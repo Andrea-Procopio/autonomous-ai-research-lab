@@ -52,6 +52,7 @@ from .metrics import (
     StepMetrics,
     UsageSource,
 )
+from .muse import MUSE_SPARK_1_2, MuseSparkProvider
 from .playbook import (
     EmpiricalMLPlaybook,
     Playbook,
@@ -127,6 +128,7 @@ __all__ = [
     "DEFAULT_PREFLIGHT_CHECKS",
     "DEFAULT_TIMEOUT_SECONDS",
     "MANIFEST_FILENAME",
+    "MUSE_SPARK_1_2",
     "NO_USAGE",
     "AdmissibilityCheck",
     "CheckState",
@@ -156,6 +158,7 @@ __all__ = [
     "ModelProviderError",
     "ModelRequest",
     "ModelResponse",
+    "MuseSparkProvider",
     "ObjectiveEvaluator",
     "OutcomeStanding",
     "OutputSchema",
