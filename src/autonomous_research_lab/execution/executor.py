@@ -20,14 +20,21 @@ already available.
 
 from __future__ import annotations
 
+import math
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
+from pathlib import PurePath
+from typing import Final
 
 from ..core.experiment import ExperimentResult
 from ..core.ids import occurrence_id
 from ..core.types import ConfigValue, freeze_mapping
+
+DEFAULT_TIMEOUT_SECONDS: Final = 3600.0
+"""Every job has a finite timeout. A job that genuinely needs longer states
+so explicitly; "run forever" is not an option the contract offers."""
 
 
 class JobStatus(StrEnum):
@@ -66,12 +73,19 @@ class ExperimentJob:
 
     config: Mapping[str, ConfigValue] = field(default_factory=dict)
     env: Mapping[str, str] = field(default_factory=dict)
+    """Environment variables passed to the process, explicitly. Executors do
+    not hand the host environment to jobs; anything a job needs beyond the
+    executor's small allowlist is declared here."""
+
     seed: int | None = None
-    timeout_seconds: float | None = None
+    timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
     required_artifacts: tuple[str, ...] = ()
     """Paths (relative to the run directory) the process must produce. A run
     that exits zero without them is recorded as a failure: a declared output
-    that does not exist is not a success with a caveat, it is a failure."""
+    that does not exist is not a success with a caveat, it is a failure.
+    Paths must stay inside the run directory: absolute paths and ``..``
+    segments are rejected at construction, and executors re-check the
+    resolved path (symlinks included) at collection time."""
 
     id: str = field(default="")
 
@@ -80,6 +94,15 @@ class ExperimentJob:
         object.__setattr__(self, "env", freeze_mapping(self.env))
         if not self.command:
             raise ValueError("job command must be non-empty")
+        if self.timeout_seconds <= 0 or not math.isfinite(self.timeout_seconds):
+            raise ValueError("timeout_seconds must be positive and finite")
+        for relative in self.required_artifacts:
+            path = PurePath(relative)
+            if not relative.strip() or path.is_absolute() or ".." in path.parts:
+                raise ValueError(
+                    f"required artifact {relative!r} must be a relative path "
+                    f"inside the run directory"
+                )
         if not self.id:
             object.__setattr__(self, "id", occurrence_id("job"))
 

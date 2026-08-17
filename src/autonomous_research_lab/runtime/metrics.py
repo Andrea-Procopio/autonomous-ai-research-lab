@@ -4,9 +4,21 @@ The question this project ultimately wants to answer about its own
 architecture is ``scientific progress / resource spent`` — and the marginal
 value of each component (critic, playbook, synthesis, escalation) is a
 question about these records. So every research step writes one structured
-record: conceptual model calls, tokens where known, wall-clock, experiment
-compute, whether the critic fired and why, the reasoning tier, and the
-outcome.
+record.
+
+Two kinds of call counting, deliberately not one number:
+
+``reasoning_invocations``
+    What the loop can actually enforce: how many times it invoked a
+    reasoning seat this step — director deliberation, role performance,
+    critic review, synthesis. With rule-based roles these invocations make
+    zero model calls; with model-backed roles each is *at least* one.
+
+``provider_calls`` / tokens / ``model``
+    What a provider adapter reports having actually spent. Zero and empty
+    until a provider exists, and never inferred: the loop cannot constrain
+    or count calls a role's adapter makes internally, so these numbers come
+    only from a :class:`UsageSource` that the adapter feeds.
 
 Same storage philosophy as the trajectory log: one JSON object per line in a
 local file, no database, no dashboard. Analysis code reads it later.
@@ -25,6 +37,38 @@ from .escalation import ReasoningTier
 
 
 @dataclass(frozen=True, slots=True)
+class ProviderUsage:
+    """Actual model usage as reported by a provider adapter."""
+
+    calls: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    model: str = ""
+
+    def __add__(self, other: ProviderUsage) -> ProviderUsage:
+        return ProviderUsage(
+            calls=self.calls + other.calls,
+            input_tokens=self.input_tokens + other.input_tokens,
+            output_tokens=self.output_tokens + other.output_tokens,
+            model=other.model or self.model,
+        )
+
+
+NO_USAGE = ProviderUsage()
+
+
+class UsageSource(Protocol):
+    """Where provider-reported usage enters the runtime. A future provider
+    adapter accumulates usage as roles call it; the loop drains it once per
+    step. Rule-based runs have no source, and their records honestly say
+    zero."""
+
+    def drain(self) -> ProviderUsage:
+        """Usage accumulated since the last drain."""
+        ...
+
+
+@dataclass(frozen=True, slots=True)
 class StepMetrics:
     """The resource accounting of one runtime step, keyed to its decision."""
 
@@ -32,15 +76,15 @@ class StepMetrics:
     action_type: str
     outcome_status: str
     reasoning_tier: ReasoningTier
-    llm_calls: int
-    """Conceptual model invocations this step: director deliberation, role
-    performances, critic review, synthesis. Counted by the runtime, so the
-    accounting exists before any real provider does."""
+    reasoning_invocations: int
+    """Reasoning-seat invocations made by the loop this step (director,
+    role, critic, synthesis). The enforceable quantity."""
 
+    provider_calls: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
     model: str = ""
-    """Zero / empty until a provider reports real numbers."""
+    """Provider-reported actuals; zero / empty without a provider adapter."""
 
     wall_clock_seconds: float = 0.0
     experiment_seconds: float = 0.0
@@ -57,6 +101,8 @@ class StepMetrics:
     """The raw decision rationale, preserved verbatim."""
 
     notes: tuple[str, ...] = ()
+    """Deterministic runtime notes: validation failures, engineering
+    failures, budget overruns."""
 
 
 class MetricsSink(Protocol):

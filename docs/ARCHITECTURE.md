@@ -313,18 +313,33 @@ executed result / artifact
 ```
 
 An LLM is never asked to infer what code can determine. Concretely, per
-ordinary experiment iteration the model-call budget is a design invariant:
+ordinary experiment iteration the **reasoning-invocation** count is a
+design invariant the loop enforces:
 
 ```
-Director: 1        one deliberation — candidates, valuations, selection
-Executor: 1        one role invocation implements/runs the assignment
+Director: 1        one deliberate() — candidates, valuations, selection
+Executor: 1        one perform() implements/runs the assignment
 Critic:   0        deterministic checks stand in for routine critique
 ```
 
-A consequential result (contradictory replication, challenged standing,
-unexpectedly large effect, implementation uncertainty, repeated failures,
-or an explicit director request) adds exactly one critic invocation —
-decided by a deterministic trigger, never by a model.
+A *scientifically consequential* result (contradictory replication,
+challenged standing, unexpectedly large effect, or an explicit director
+request) adds exactly one critic invocation — decided by a deterministic
+trigger, never by a model.
+
+Invocations are not model calls, and the accounting refuses to conflate
+them. What the loop can enforce is how many times it invokes a reasoning
+seat; how many provider calls a model-backed role makes *inside* one
+invocation is the adapter's affair, recorded separately from
+provider-reported usage (``UsageSource`` → ``provider_calls`` / tokens in
+the step metrics) and honestly zero for today's rule-based roles. The
+runtime makes no claim to constrain provider-internal calls.
+
+The runtime is equally strict about paying for work: an action whose
+estimated cost exceeds the remaining budget is never started, and actual
+cost is reconciled after commit — an overrun is billed as far as the budget
+reaches, recorded explicitly, and halts the program. Committed-but-unbilled
+work cannot exist.
 
 ### The frontier: what the director actually sees
 
@@ -365,17 +380,33 @@ snapshots) rather than as a mandatory algorithm. Branching should return
 when there is a scientific reason — competing hypotheses, materially
 distinct strategies — and calibrated value estimates to steer it.
 
-### Deterministic validation before any critique
+### The deterministic validation gate
 
 `runtime/validation.py` checks what machines can check: the process exited
-zero, the result names its spec, declared metrics are present and finite,
-the seed is recorded, artifacts hash to the manifest their run wrote, and
-replications agree within stated tolerance. The executor itself refuses
-silent success: exit-zero without metrics, a non-finite metric, or a
-missing declared artifact is a recorded failure with the run directory
-preserved. Reading a completed result into `Evidence` is a transcription,
-not a judgment, so `evidence_from_result` does it in code — reusing the
-mechanical `PredictionTest` the commit already produced.
+zero, the result names its spec and matches the director's assignment,
+declared metrics are present and finite, the seed is recorded, artifacts
+hash to the manifest their run wrote, and replications agree within stated
+tolerance. The runtime applies these checks — artifact integrity included —
+as a **pre-commit gate**: a completed result that fails any of them never
+enters `state.results`, never produces a prediction test, and never becomes
+evidence. The attempt fails as an *engineering failure*, the run directory
+is preserved for diagnosis, and the director sees a deterministic note on
+the next frontier. No critic is consulted and no model may overrule the
+gate: arithmetic is not a matter of opinion. Cardinality is part of the
+gate too — a run-type assignment must return exactly one result.
+
+Failed or cancelled *executions* are different: they commit as honest
+execution-failure records with mechanically inconclusive standing, and
+repeated failures of one experiment (counted from the results themselves)
+raise the same kind of deterministic engineering note — a debugging signal
+for the director, not scientific critique.
+
+The executor itself also refuses silent success: exit-zero without metrics,
+a non-finite metric, or a missing declared artifact is a recorded failure
+with the run directory preserved. Reading a gate-valid completed result
+into `Evidence` is a transcription, not a judgment, so
+`evidence_from_result` does it in code — reusing the mechanical
+`PredictionTest` the commit already produced.
 
 ### Deterministic routing
 
@@ -441,10 +472,12 @@ rather than by policy.
 
 Every optional mechanism hangs off a typed flag in `RuntimeConfig` —
 critic on/off, playbook on/off, synthesis on/off, cheap/strong director
-floor — and every step writes a `StepMetrics` record: conceptual model
-calls, tokens where known, wall-clock, experiment compute, whether the
-critic fired and why, the reasoning tier, the outcome, and the raw
-decision rationale. The eventual research contribution is a measurement of
+floor, the repeated-failure threshold — and every step writes a
+`StepMetrics` record: reasoning invocations, provider-reported calls and
+tokens (zero without a provider), wall-clock, experiment compute, whether
+the critic fired and why, the reasoning tier, the outcome, deterministic
+runtime notes, and the raw decision rationale. The eventual research
+contribution is a measurement of
 which components earn their cost; the flags and the records are how that
 measurement stays possible. Playbooks (`runtime/playbook.py`) follow the
 same rule: an advisory prior over what usually comes next in empirical ML

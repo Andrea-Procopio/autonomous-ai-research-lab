@@ -13,15 +13,21 @@ to the executor, and no reasoning step may edit them afterwards. That is the
 whole point of routing every number through here.
 
 There is no silent success. A run that exits zero but writes no metrics, a
-metric that is not a finite number, or a declared required artifact that does
-not exist -- each is recorded as a failure, with the run directory preserved
-for diagnosis. Every run also gets a ``manifest.json`` of artifact hashes, so
-post-hoc edits to experiment outputs are detectable later.
+metric that is not a finite number, or a declared required artifact that is
+missing or escapes the run directory -- each is recorded as a failure, with
+the run directory preserved for diagnosis. Every run also gets a
+``manifest.json`` of artifact hashes, so post-hoc edits to experiment outputs
+are detectable later.
 
-A job with no ``working_dir`` runs in a job-private ``workspace/`` inside its
-run directory: an executor-provided sandbox, so concurrent jobs cannot
-trample each other and a job touches shared code only when it explicitly asks
-to.
+Isolation here is **job-private recovery isolation, not a security
+sandbox**: a job with no ``working_dir`` runs in a job-private ``workspace/``
+inside its run directory so concurrent jobs cannot trample each other; the
+child process receives a small allowlisted environment plus ``job.env``
+rather than the whole host environment; artifact paths are confined to the
+run directory (symlinks that resolve outside it are excluded); every job has
+a finite timeout, and on timeout the whole process group is terminated, not
+only the immediate child. None of this constrains a malicious process --
+containment at that level is a future remote-executor concern.
 
 Execution is synchronous: ``submit`` runs the job to completion before
 returning its id. That is a property of this backend, not of the interface --
@@ -31,16 +37,19 @@ correct when a genuinely asynchronous backend replaces it.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import math
 import os
 import platform
+import signal
 import subprocess
 import sys
 import time
 from collections.abc import Mapping
 from pathlib import Path
+from typing import Final
 
 from ..core.budget import ResourceCost
 from ..core.experiment import Environment, ExperimentResult, ExperimentStatus
@@ -58,6 +67,26 @@ STDOUT_FILENAME = "stdout.log"
 STDERR_FILENAME = "stderr.log"
 MANIFEST_FILENAME = "manifest.json"
 WORKSPACE_DIRNAME = "workspace"
+
+#: The only host environment variables a child process inherits. Everything
+#: else -- credentials, tokens, cloud configuration -- must be passed
+#: explicitly via ``job.env`` to reach an experiment.
+ENV_ALLOWLIST: Final = (
+    "HOME",
+    "PATH",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TZ",
+    "TMPDIR",
+    "TEMP",
+    "TMP",
+    "SYSTEMROOT",
+    "COMSPEC",
+    "PATHEXT",
+)
+
+_TERMINATE_GRACE_SECONDS: Final = 5.0
 
 _STATUS_MAP = {
     JobStatus.SUCCEEDED: ExperimentStatus.COMPLETED,
@@ -97,7 +126,13 @@ class LocalExecutor(Executor):
         config_path = run_dir / CONFIG_FILENAME
         config_path.write_text(json.dumps(dict(job.config), indent=2, sort_keys=True))
 
-        env = dict(os.environ)
+        # Explicit environment: a small allowlist plus what the job declares.
+        # Host credentials never reach an experiment implicitly.
+        env = {
+            name: os.environ[name]
+            for name in ENV_ALLOWLIST
+            if name in os.environ
+        }
         env.update(job.env)
         env["ARL_RUN_DIR"] = str(run_dir)
         env["ARL_CONFIG"] = str(config_path)
@@ -105,28 +140,9 @@ class LocalExecutor(Executor):
             env["ARL_SEED"] = str(job.seed)
 
         started = time.monotonic()
-        failure_reason: str | None = None
-        try:
-            completed = subprocess.run(
-                job.command,
-                cwd=working_dir,
-                env=env,
-                capture_output=True,
-                text=True,
-                timeout=job.timeout_seconds,
-                check=False,
-            )
-            exit_code: int | None = completed.returncode
-            stdout, stderr = completed.stdout, completed.stderr
-        except subprocess.TimeoutExpired as exc:
-            exit_code = None
-            stdout = exc.stdout if isinstance(exc.stdout, str) else ""
-            stderr = exc.stderr if isinstance(exc.stderr, str) else ""
-            failure_reason = f"timed out after {job.timeout_seconds}s"
-        except OSError as exc:
-            exit_code = None
-            stdout, stderr = "", ""
-            failure_reason = f"could not launch command: {exc}"
+        exit_code, stdout, stderr, failure_reason = _run_process(
+            job.command, working_dir, env, job.timeout_seconds
+        )
         runtime = time.monotonic() - started
 
         (run_dir / STDOUT_FILENAME).write_text(stdout)
@@ -142,15 +158,9 @@ class LocalExecutor(Executor):
             failure_reason = f"exited with code {exit_code}"
 
         if failure_reason is None:
-            missing = tuple(
-                relative
-                for relative in job.required_artifacts
-                if not (run_dir / relative).is_file()
+            failure_reason = _check_required_artifacts(
+                run_dir, job.required_artifacts
             )
-            if missing:
-                failure_reason = (
-                    f"required artifact(s) not produced: {', '.join(missing)}"
-                )
 
         job_status = (
             JobStatus.SUCCEEDED if failure_reason is None else JobStatus.FAILED
@@ -215,7 +225,93 @@ def _read_metrics(path: Path) -> Mapping[str, float]:
     return metrics
 
 
+def _run_process(
+    command: tuple[str, ...],
+    working_dir: str,
+    env: dict[str, str],
+    timeout_seconds: float,
+) -> tuple[int | None, str, str, str | None]:
+    """Run one job process to completion or timeout.
+
+    The child starts in its own session (POSIX), so a timeout terminates the
+    entire process group -- an experiment that forked workers does not leave
+    them running after its record says it timed out.
+    """
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=working_dir,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=(os.name == "posix"),
+        )
+    except OSError as exc:
+        return None, "", "", f"could not launch command: {exc}"
+    try:
+        stdout, stderr = process.communicate(timeout=timeout_seconds)
+        return process.returncode, stdout, stderr, None
+    except subprocess.TimeoutExpired:
+        _terminate_group(process)
+        stdout, stderr = process.communicate()
+        return None, stdout, stderr, f"timed out after {timeout_seconds}s"
+
+
+def _terminate_group(process: subprocess.Popen[str]) -> None:
+    """SIGTERM the whole process group, escalate to SIGKILL after a grace
+    period. Falls back to killing the immediate child where process groups
+    are unavailable."""
+    if os.name != "posix":  # pragma: no cover - windows fallback
+        process.kill()
+        return
+    try:
+        group = os.getpgid(process.pid)
+    except ProcessLookupError:  # pragma: no cover - already gone
+        return
+    try:
+        os.killpg(group, signal.SIGTERM)
+    except ProcessLookupError:  # pragma: no cover - already gone
+        return
+    try:
+        process.wait(timeout=_TERMINATE_GRACE_SECONDS)
+    except subprocess.TimeoutExpired:  # pragma: no cover - stubborn child
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(group, signal.SIGKILL)
+
+
+def _within(run_dir: Path, path: Path) -> bool:
+    """Whether ``path`` -- symlinks resolved -- stays inside ``run_dir``."""
+    try:
+        return path.resolve().is_relative_to(run_dir.resolve())
+    except OSError:  # pragma: no cover - unresolvable path
+        return False
+
+
+def _check_required_artifacts(
+    run_dir: Path, required: tuple[str, ...]
+) -> str | None:
+    """Missing or escaping declared outputs make the run a failure.
+
+    ``ExperimentJob`` already rejects absolute and ``..`` paths; this is the
+    runtime half of the check, which symlinks can only fail, not bypass."""
+    for relative in required:
+        target = run_dir / relative
+        if not target.is_file():
+            return f"required artifact(s) not produced: {relative}"
+        if not _within(run_dir, target):
+            return (
+                f"required artifact {relative!r} resolves outside the run "
+                f"directory"
+            )
+    return None
+
+
 def _collect_artifacts(run_dir: Path) -> tuple[str, ...]:
+    """Every file the run left inside its directory. Symlinks resolving
+    outside the run directory are excluded: what they point at was not
+    produced by this run, and hashing it would launder foreign content into
+    the run's manifest."""
     reserved = {
         STDOUT_FILENAME,
         STDERR_FILENAME,
@@ -224,7 +320,9 @@ def _collect_artifacts(run_dir: Path) -> tuple[str, ...]:
     }
     return tuple(
         sorted(
-            str(p) for p in run_dir.rglob("*") if p.is_file() and p.name not in reserved
+            str(p)
+            for p in run_dir.rglob("*")
+            if p.is_file() and p.name not in reserved and _within(run_dir, p)
         )
     )
 

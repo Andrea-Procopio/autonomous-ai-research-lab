@@ -1,31 +1,45 @@
-"""The research runtime: the loop that keeps model calls sparse.
+"""The research runtime: the loop that keeps reasoning invocations sparse.
 
 One step of the fast loop::
 
     ResearchState
       -> ResearchFrontier (derived view)
+      -> budget check: an unaffordable action is never started
       -> director deliberates once: candidates + valuations + selection
       -> deterministic role routing
       -> one role invocation performs the action, proposals come back
+      -> Tier-0 validation gate: every returned result is checked BEFORE
+         anything commits — cardinality, assignment correspondence, declared
+         metrics, finite values, seed, artifact integrity
       -> CommitBundle commits atomically (mechanical prediction test included)
-      -> deterministic validation + deterministic evidence reading (Tier 0)
-      -> critic trigger evaluated (deterministic); critic invoked only if it fires
+      -> deterministic evidence reading of valid completed results (Tier 0)
+      -> critic trigger evaluated (deterministic, scientific reasons only)
       -> synthesis trigger evaluated; slow loop runs only when due
+      -> cost reconciled against the budget — work is never committed unbilled
       -> state persisted, decision + runtime metrics logged
 
-The invariant this module exists to hold: **an ordinary experiment iteration
-costs one director invocation and one executor invocation — nothing else.**
-Validation, evidence transcription, prediction checking, routing, and
-trigger evaluation are all code. A critic costs a third invocation only when
-a deterministic trigger says the result is consequential, and the slow
-synthesis loop is the same director in a stronger reasoning mode, on a
-deterministic cadence.
+The enforceable invariant: **an ordinary experiment step makes exactly two
+reasoning-seat invocations — one ``director.deliberate()`` and one
+``performer.perform()``.** Validation, evidence transcription, prediction
+checking, routing, and trigger evaluation are code. A critic adds a third
+invocation only when a deterministic trigger finds a *scientific* reason,
+and synthesis is the same director in a stronger mode on a deterministic
+cadence. What the loop cannot enforce — and does not claim to — is how many
+provider calls a model-backed role makes inside one invocation; those are
+recorded separately, from provider reports (:class:`~autonomous_research_lab.
+runtime.metrics.UsageSource`), and are zero for rule-based roles.
 
-Roles are injected per seat (scientist / executor / critic), so the same
-loop runs mock roles today and model-backed roles later without changing
-shape. Everything a role sees arrives through its ``RoleInvocation`` — a
-projection built here, never the raw state — which is also what keeps
-executors short-lived and narrow while the director stays long-lived.
+Failure taxonomy, kept deliberately separate:
+
+* a result failing the deterministic gate is an **engineering failure**: the
+  attempt fails, nothing enters scientific state, the run directory is
+  preserved, and the director sees a deterministic note next step — never a
+  critic, because no model opinion can override arithmetic;
+* a failed/cancelled *execution* is an honest execution record: it commits
+  with inconclusive scientific standing, and repeated failures of one
+  experiment raise a deterministic engineering note;
+* a *scientifically valid* consequential result — contradiction, challenged
+  standing, large effect — is what earns a critic.
 """
 
 from __future__ import annotations
@@ -36,11 +50,17 @@ from dataclasses import dataclass, field
 
 from ..core.actions import ResearchAction, ResearchActionType
 from ..core.attempt import ActionAttempt, ActionOutcome, AttemptStatus
-from ..core.budget import NO_COST, InsufficientBudgetError, ResourceCost
+from ..core.budget import NO_COST, ResearchBudget, ResourceCost
 from ..core.commit import CommitBundle
 from ..core.decision import DecisionRecord
-from ..core.experiment import ExperimentResult
-from ..core.proposals import EvidenceProposal, ResultProposal, payload_ids
+from ..core.experiment import ExperimentResult, ExperimentSpec
+from ..core.proposals import (
+    EvidenceProposal,
+    ExperimentProposal,
+    Proposal,
+    ResultProposal,
+    payload_ids,
+)
 from ..core.state import ResearchState
 from ..evidence.store import EvidenceStore
 from ..persistence.state_store import FileStateStore
@@ -53,12 +73,20 @@ from ..runtime.escalation import (
     ReasoningTier,
 )
 from ..runtime.frontier import ResearchFrontier, build_frontier, find_contradictions
-from ..runtime.metrics import MetricsSink, StepMetrics
+from ..runtime.metrics import (
+    NO_USAGE,
+    MetricsSink,
+    ProviderUsage,
+    StepMetrics,
+    UsageSource,
+)
 from ..runtime.playbook import Playbook, PlaybookAdvice
 from ..runtime.validation import (
+    ValidationCheck,
     ValidationReport,
     evidence_from_result,
     validate_result,
+    verify_artifact_integrity,
 )
 from .critic_trigger import CriticTrigger
 from .director import Deliberation, FrontierDirector, deliberation_record
@@ -69,6 +97,25 @@ from .transitions import TransitionError, commit, commit_bundle
 
 _READER = "runtime:deterministic-reader:v1"
 
+#: Actions whose invocation must return exactly one result. An executor
+#: assigned one run that reports zero or several is out of contract.
+_SINGLE_RESULT_ACTIONS = frozenset(
+    {
+        ResearchActionType.RUN_EXPERIMENT,
+        ResearchActionType.REPLICATE,
+        ResearchActionType.TEST_BASELINE,
+        ResearchActionType.SCALE_EXPERIMENT,
+    }
+)
+
+
+class ValidationGateError(Exception):
+    """A returned result failed the deterministic pre-commit gate."""
+
+    def __init__(self, message: str, reports: tuple[ValidationReport, ...]):
+        super().__init__(message)
+        self.reports = reports
+
 
 @dataclass(frozen=True, slots=True)
 class StepReport:
@@ -78,11 +125,16 @@ class StepReport:
     state: ResearchState
     deliberation: Deliberation
     tier: ReasoningTier
-    llm_calls: int
-    validation: ValidationReport | None = None
+    reasoning_invocations: int
+    provider_usage: ProviderUsage = NO_USAGE
+    validation: tuple[ValidationReport, ...] = ()
     critic_reasons: tuple[str, ...] = ()
     critic_invoked: bool = False
     synthesis: SynthesisReview | None = None
+    notes: tuple[str, ...] = ()
+    """Deterministic runtime notes raised this step (engineering failures,
+    repeated execution failures, budget overruns)."""
+
     halt_reason: str | None = None
 
 
@@ -114,6 +166,11 @@ class ResearchRuntime:
     critic_trigger: CriticTrigger = field(default_factory=CriticTrigger)
     escalation: EscalationPolicy = field(default_factory=EscalationPolicy)
     synthesis_trigger: SynthesisTrigger | None = None
+    usage: UsageSource | None = None
+    """Provider-usage reporter, when a provider adapter exists. Drained once
+    per step into the metrics record; ``None`` means actual model usage is
+    honestly recorded as zero."""
+
     _results_since_synthesis: int = field(default=0, init=False)
     _notes: tuple[str, ...] = field(default=(), init=False)
 
@@ -139,6 +196,7 @@ class ResearchRuntime:
     def step(self, state: ResearchState) -> StepReport:
         """One fast-loop iteration, with the slow loop run when due."""
         started = time.monotonic()
+        step_notes: list[str] = []
         frontier = build_frontier(
             state,
             recent_results=self.config.recent_results,
@@ -160,7 +218,7 @@ class ResearchRuntime:
             tier=tier,
             max_candidates=self.config.max_candidates,
         )
-        llm_calls = 1  # the deliberation is the one mandatory reasoning call
+        invocations = 1  # the deliberation is the one mandatory invocation
         record = deliberation_record(
             deliberation, state_id=state.id, director=self.director.name
         )
@@ -168,13 +226,13 @@ class ResearchRuntime:
 
         if selected is None:
             return self._halted(
-                state, record, deliberation, tier, llm_calls,
+                state, record, deliberation, tier, invocations,
                 started, "director declined every candidate",
             )
         action = selected.action
         if action.action_type is ResearchActionType.STOP_INVESTIGATION:
             return self._stop(
-                state, record, deliberation, tier, llm_calls, started, action
+                state, record, deliberation, tier, invocations, started, action
             )
 
         seat = route(action.action_type)
@@ -185,9 +243,17 @@ class ResearchRuntime:
                 f"is registered for that seat"
             )
 
+        # Budget gate: work that cannot be paid for is never started.
+        estimated = selected.valuation.expected_cost
+        if not state.budget.can_afford(estimated):
+            return self._halted(
+                state, record, deliberation, tier, invocations, started,
+                f"insufficient budget for {action.action_type}: the estimated "
+                f"cost exceeds the remaining budget",
+            )
+
         attempt = ActionAttempt(action=action).started()
         state = state.begin_attempt(attempt)
-        estimated = selected.valuation.expected_cost
         invocation = RoleInvocation(
             role=seat,
             assignment=action,
@@ -198,20 +264,18 @@ class ResearchRuntime:
         )
 
         failures = 0
+        validation: tuple[ValidationReport, ...] = ()
+        results: tuple[ExperimentResult, ...] = ()
         try:
             proposals = performer.perform(invocation)
-            llm_calls += 1
-            rejected = [p for p in proposals if not invocation.permits(p)]
-            if rejected:
-                raise TransitionError(
-                    f"role {seat} returned proposal kind(s) outside its "
-                    f"output contract: "
-                    f"{', '.join(type(p).__name__ for p in rejected)}"
-                )
+            invocations += 1
+            _check_contract(invocation, proposals, seat)
             results = tuple(
                 p.result for p in proposals if isinstance(p, ResultProposal)
             )
-            actual = _actual_cost(results, estimated)
+            # The deterministic gate: nothing enters authoritative scientific
+            # state unless code has checked it. Raises before any commit.
+            validation = _gate_results(state, action, proposals, results)
             bundle = CommitBundle(
                 attempt_id=attempt.id,
                 outcome=ActionOutcome(
@@ -219,19 +283,35 @@ class ResearchRuntime:
                     produced=tuple(
                         pid for p in proposals for pid in payload_ids(p)
                     ),
-                    actual_cost=actual,
+                    actual_cost=_actual_cost(results, estimated),
                 ),
                 proposals=proposals,
             )
+        except ValidationGateError as exc:
+            failures = 1
+            validation = exc.reports
+            results = ()
+            step_notes.append(
+                f"engineering failure: {action.action_type} rejected by the "
+                f"deterministic validation gate — {exc} (run outputs preserved)"
+            )
+            bundle = _failed_bundle(attempt.id, str(exc), estimated)
         except TransitionError as exc:
             failures = 1
-            bundle = _failed_bundle(attempt.id, str(exc), estimated)
             results = ()
+            step_notes.append(
+                f"engineering failure: {action.action_type} — {exc}"
+            )
+            bundle = _failed_bundle(attempt.id, str(exc), estimated)
         except Exception as exc:  # a role failing is an outcome, not a crash
             failures = 1
-            llm_calls += 1  # the invocation happened even though it failed
-            bundle = _failed_bundle(attempt.id, str(exc), estimated)
+            invocations += 1  # the invocation happened even though it failed
             results = ()
+            step_notes.append(
+                f"engineering failure: {seat} raised during "
+                f"{action.action_type} — {exc}"
+            )
+            bundle = _failed_bundle(attempt.id, str(exc), estimated)
 
         contradictions_before = len(find_contradictions(state))
         try:
@@ -239,37 +319,47 @@ class ResearchRuntime:
         except TransitionError as exc:
             failures += 1
             results = ()
+            step_notes.append(f"engineering failure: commit rejected — {exc}")
             state = commit_bundle(
                 state, _failed_bundle(attempt.id, str(exc), estimated), self.store
             )
         outcome = _outcome_of(state, attempt.id)
 
-        # -- Tier 0 aftermath of an executed result --------------------------
-        validation: ValidationReport | None = None
+        # -- Tier 0 aftermath of committed results ---------------------------
         critic_reasons: tuple[str, ...] = ()
         critic_invoked = False
         if outcome.status is AttemptStatus.SUCCEEDED and results:
-            result = results[0]
-            self._results_since_synthesis += len(results)
-            state, validation = self._read_result(state, result)
-            critic_reasons = self._critic_reasons(state, result, validation)
-            if critic_reasons and self.config.critic_enabled:
-                state, invoked_calls = self._invoke_critic(
-                    state, result, critic_reasons, validation
-                )
-                llm_calls += invoked_calls
-                critic_invoked = invoked_calls > 0
+            completed = tuple(r for r in results if r.succeeded)
+            self._results_since_synthesis += len(completed)
+            for result in completed:
+                state = self._transcribe(state, result)
+                reasons = self._critic_reasons(state, result)
+                if reasons and not critic_reasons:
+                    critic_reasons = reasons
+                    if self.config.critic_enabled:
+                        state, invoked = self._invoke_critic(
+                            state, result, reasons
+                        )
+                        invocations += invoked
+                        critic_invoked = invoked > 0
+            step_notes.extend(
+                self._execution_failure_notes(state, results)
+            )
 
         state = state.apply(action)
-        try:
-            state = state.charge(outcome.actual_cost)
-        except InsufficientBudgetError:
+        state, overrun_note, exhausted = _reconcile_cost(
+            state, outcome.actual_cost, estimated
+        )
+        if overrun_note is not None:
+            step_notes.append(overrun_note)
+        if exhausted:
             return self._finish(
-                state, record, deliberation, tier, llm_calls, started,
+                state, record, deliberation, tier, invocations, started,
                 attempt_id=attempt.id, outcome=outcome, seat=seat,
                 validation=validation, critic_reasons=critic_reasons,
                 critic_invoked=critic_invoked, failures=failures,
-                results=results, halt_reason="budget exhausted mid-program",
+                results=results, notes=tuple(step_notes),
+                halt_reason="budget exhausted after cost overrun",
             )
 
         synthesis = self._maybe_synthesize(
@@ -279,44 +369,61 @@ class ResearchRuntime:
             stopping=False,
         )
         if synthesis is not None:
-            llm_calls += 1
+            invocations += 1
 
+        self._notes = (*self._notes, *step_notes)
         return self._finish(
-            state, record, deliberation, tier, llm_calls, started,
+            state, record, deliberation, tier, invocations, started,
             attempt_id=attempt.id, outcome=outcome, seat=seat,
             validation=validation, critic_reasons=critic_reasons,
             critic_invoked=critic_invoked, failures=failures,
-            results=results, synthesis=synthesis, halt_reason=None,
+            results=results, synthesis=synthesis, notes=tuple(step_notes),
+            halt_reason=None,
         )
 
     # -- deterministic aftermath --------------------------------------------
 
-    def _read_result(
+    def _transcribe(
         self, state: ResearchState, result: ExperimentResult
-    ) -> tuple[ResearchState, ValidationReport]:
-        """Validate and transcribe one committed result. Zero model calls:
-        the reading reuses the mechanical prediction test the commit already
-        produced, and the evidence proposal is attributed to the runtime."""
+    ) -> ResearchState:
+        """Read one gate-validated, committed result into evidence. Zero
+        model calls: the reading reuses the mechanical prediction test the
+        commit already produced, and the proposal is attributed to the
+        runtime."""
         spec = state.experiment(result.spec_id)
         assert spec is not None  # the bundle could not have committed otherwise
         prediction = state.prediction(spec.prediction_id)
-        validation = validate_result(spec, result, prediction=prediction)
         test = (
             state.test_for_result(prediction.id, result.id)
             if prediction is not None
             else None
         )
         evidence = evidence_from_result(result, test=test)
-        state = commit(
+        return commit(
             state, EvidenceProposal(evidence=evidence, proposer=_READER), self.store
         )
-        return state, validation
+
+    def _execution_failure_notes(
+        self, state: ResearchState, results: tuple[ExperimentResult, ...]
+    ) -> list[str]:
+        """Deterministic repeated-failure signal, counted from the execution
+        record itself: failed/cancelled results of one experiment."""
+        notes: list[str] = []
+        for spec_id in {r.spec_id for r in results}:
+            failed = sum(
+                1
+                for ref in state.results_for(spec_id)
+                if not self.store.get_result(ref.result_id).succeeded
+            )
+            if failed >= self.config.repeated_failure_threshold:
+                notes.append(
+                    f"engineering: {failed} failed execution(s) of experiment "
+                    f"{spec_id} — debug the implementation before rerunning"
+                )
+        return notes
 
     def _critic_reasons(
-        self,
-        state: ResearchState,
-        result: ExperimentResult,
-        validation: ValidationReport,
+        self, state: ResearchState, result: ExperimentResult
     ) -> tuple[str, ...]:
         spec = state.experiment(result.spec_id)
         prediction = (
@@ -327,16 +434,13 @@ class ResearchRuntime:
             if prediction is not None
             else None
         )
-        return self.critic_trigger.reasons(
-            state, result=result, validation=validation, test=test
-        )
+        return self.critic_trigger.reasons(state, test=test)
 
     def _invoke_critic(
         self,
         state: ResearchState,
         result: ExperimentResult,
         reasons: tuple[str, ...],
-        validation: ValidationReport,
     ) -> tuple[ResearchState, int]:
         critic = self.roles.get(RoleName.RESULT_ANALYST)
         if critic is None:
@@ -351,7 +455,7 @@ class ResearchRuntime:
         invocation = RoleInvocation(
             role=RoleName.RESULT_ANALYST,
             assignment=action,
-            context=_critic_context(state, self.store, result, reasons, validation),
+            context=_critic_context(state, self.store, result, reasons),
             allowed_actions=frozenset({ResearchActionType.ANALYZE}),
             expected_output=expected_proposals(ResearchActionType.ANALYZE),
         )
@@ -398,6 +502,7 @@ class ResearchRuntime:
         )
         self._results_since_synthesis = 0
         self._notes = (
+            *self._notes,
             f"last synthesis ({'; '.join(reasons)}): {review.summary}",
         )
         return review
@@ -410,7 +515,7 @@ class ResearchRuntime:
         record: DecisionRecord,
         deliberation: Deliberation,
         tier: ReasoningTier,
-        llm_calls: int,
+        invocations: int,
         started: float,
         action: ResearchAction,
     ) -> StepReport:
@@ -418,13 +523,13 @@ class ResearchRuntime:
             state, new_contradiction=False, stopping=True
         )
         if synthesis is not None:
-            llm_calls += 1
+            invocations += 1
         state = state.apply(action)
         return self._finish(
-            state, record, deliberation, tier, llm_calls, started,
+            state, record, deliberation, tier, invocations, started,
             attempt_id=None, outcome=None, seat=None,
-            validation=None, critic_reasons=(), critic_invoked=False,
-            failures=0, results=(), synthesis=synthesis,
+            validation=(), critic_reasons=(), critic_invoked=False,
+            failures=0, results=(), synthesis=synthesis, notes=(),
             halt_reason=action.rationale,
         )
 
@@ -434,15 +539,15 @@ class ResearchRuntime:
         record: DecisionRecord,
         deliberation: Deliberation,
         tier: ReasoningTier,
-        llm_calls: int,
+        invocations: int,
         started: float,
         reason: str,
     ) -> StepReport:
         return self._finish(
-            state, record, deliberation, tier, llm_calls, started,
+            state, record, deliberation, tier, invocations, started,
             attempt_id=None, outcome=None, seat=None,
-            validation=None, critic_reasons=(), critic_invoked=False,
-            failures=0, results=(), halt_reason=reason,
+            validation=(), critic_reasons=(), critic_invoked=False,
+            failures=0, results=(), notes=(), halt_reason=reason,
         )
 
     def _finish(
@@ -451,21 +556,23 @@ class ResearchRuntime:
         record: DecisionRecord,
         deliberation: Deliberation,
         tier: ReasoningTier,
-        llm_calls: int,
+        invocations: int,
         started: float,
         *,
         attempt_id: str | None,
         outcome: ActionOutcome | None,
         seat: RoleName | None,
-        validation: ValidationReport | None,
+        validation: tuple[ValidationReport, ...],
         critic_reasons: tuple[str, ...],
         critic_invoked: bool,
         failures: int,
         results: tuple[ExperimentResult, ...],
+        notes: tuple[str, ...],
         synthesis: SynthesisReview | None = None,
         halt_reason: str | None,
     ) -> StepReport:
         self._persist(state)
+        usage = self.usage.drain() if self.usage is not None else NO_USAGE
         completed = record.completed(
             attempt_id=attempt_id,
             outcome=outcome,
@@ -485,7 +592,11 @@ class ResearchRuntime:
                     action_type=action_type,
                     outcome_status=outcome.status.value if outcome else "none",
                     reasoning_tier=tier,
-                    llm_calls=llm_calls,
+                    reasoning_invocations=invocations,
+                    provider_calls=usage.calls,
+                    input_tokens=usage.input_tokens,
+                    output_tokens=usage.output_tokens,
+                    model=usage.model,
                     wall_clock_seconds=time.monotonic() - started,
                     experiment_seconds=sum(r.runtime_seconds for r in results),
                     estimated_usd=(
@@ -496,9 +607,13 @@ class ResearchRuntime:
                     critic_reasons=critic_reasons,
                     synthesis_invoked=synthesis is not None,
                     rationale=deliberation.reasoning,
-                    notes=tuple(
-                        f"validation:{check.name}"
-                        for check in (validation.failures if validation else ())
+                    notes=(
+                        *notes,
+                        *(
+                            f"validation:{check.name}"
+                            for report in validation
+                            for check in report.failures
+                        ),
                     ),
                 )
             )
@@ -507,17 +622,168 @@ class ResearchRuntime:
             state=state,
             deliberation=deliberation,
             tier=tier,
-            llm_calls=llm_calls,
+            reasoning_invocations=invocations,
+            provider_usage=usage,
             validation=validation,
             critic_reasons=critic_reasons,
             critic_invoked=critic_invoked,
             synthesis=synthesis,
+            notes=notes,
             halt_reason=halt_reason,
         )
 
     def _persist(self, state: ResearchState) -> None:
         if self.states is not None:
             self.states.persist(state)
+
+
+# -- the deterministic gate ---------------------------------------------------
+
+
+def _check_contract(
+    invocation: RoleInvocation,
+    proposals: tuple[Proposal, ...],
+    seat: RoleName,
+) -> None:
+    rejected = [p for p in proposals if not invocation.permits(p)]
+    if rejected:
+        raise TransitionError(
+            f"role {seat} returned proposal kind(s) outside its output "
+            f"contract: {', '.join(type(p).__name__ for p in rejected)}"
+        )
+
+
+def _gate_results(
+    state: ResearchState,
+    action: ResearchAction,
+    proposals: tuple[Proposal, ...],
+    results: tuple[ExperimentResult, ...],
+) -> tuple[ValidationReport, ...]:
+    """Deterministically validate every returned result before any commit.
+
+    Raises :class:`ValidationGateError` when a *completed* result fails any
+    machine check — such a result must never enter authoritative scientific
+    state, and no model is ever asked to overrule this. Failed/cancelled
+    executions pass through: they commit as execution-failure records with
+    inconclusive standing, which is honest.
+    """
+    if action.action_type in _SINGLE_RESULT_ACTIONS and len(results) != 1:
+        raise ValidationGateError(
+            f"{action.action_type} must return exactly one result, "
+            f"got {len(results)}",
+            reports=(),
+        )
+
+    reports: list[ValidationReport] = []
+    for result in results:
+        if not result.succeeded:
+            continue  # an execution failure is a record, not a claim
+        spec = _spec_for(state, proposals, result.spec_id)
+        if spec is None:
+            raise ValidationGateError(
+                f"result {result.id} names unknown experiment {result.spec_id}",
+                reports=tuple(reports),
+            )
+        prediction = state.prediction(spec.prediction_id)
+        checks = list(
+            validate_result(spec, result, prediction=prediction).checks
+        )
+        checks.append(_matches_assignment(action, result))
+        checks.append(verify_artifact_integrity(result))
+        report = ValidationReport(checks=tuple(checks))
+        reports.append(report)
+        if not report.passed:
+            failed = ", ".join(check.name for check in report.failures)
+            raise ValidationGateError(
+                f"result {result.id} failed deterministic validation "
+                f"({failed})",
+                reports=tuple(reports),
+            )
+    return tuple(reports)
+
+
+def _matches_assignment(
+    action: ResearchAction, result: ExperimentResult
+) -> ValidationCheck:
+    """The result must come from the experiment the director selected."""
+    if action.action_type not in _SINGLE_RESULT_ACTIONS or not action.targets:
+        return ValidationCheck(name="result_matches_assignment", passed=True)
+    return ValidationCheck(
+        name="result_matches_assignment",
+        passed=result.spec_id == action.targets[0],
+        detail=(
+            f"assignment targets {action.targets[0]}, result ran "
+            f"{result.spec_id}"
+        ),
+    )
+
+
+def _spec_for(
+    state: ResearchState,
+    proposals: tuple[Proposal, ...],
+    spec_id: str,
+) -> ExperimentSpec | None:
+    """The spec a result claims — from the state, or proposed in the same
+    bundle (a role may design and run in one assignment)."""
+    spec = state.experiment(spec_id)
+    if spec is not None:
+        return spec
+    return next(
+        (
+            p.spec
+            for p in proposals
+            if isinstance(p, ExperimentProposal) and p.spec.id == spec_id
+        ),
+        None,
+    )
+
+
+def _reconcile_cost(
+    state: ResearchState,
+    actual: ResourceCost,
+    estimated: ResourceCost,
+) -> tuple[ResearchState, str | None, bool]:
+    """Bill the work that just committed; never leave it unbilled.
+
+    Returns ``(state, note, exhausted)``. Affordable costs charge in full;
+    an overrun beyond the invocation's estimate is recorded explicitly; a
+    cost the remaining budget cannot cover drains the budget to its floor,
+    records the overrun, and signals a safe halt.
+    """
+    if state.budget.can_afford(actual):
+        note = None
+        if not _fits(actual, estimated):
+            note = (
+                "budget overrun: actual cost exceeded the invocation's "
+                "estimated budget; charged in full"
+            )
+        return state.charge(actual), note, False
+    charged = _clamp(actual, state.budget)
+    note = (
+        "budget overrun: actual cost exceeded the remaining budget; "
+        "remainder drained and the program halted"
+    )
+    return state.charge(charged), note, True
+
+
+def _fits(cost: ResourceCost, cap: ResourceCost) -> bool:
+    return (
+        cost.wall_clock_seconds <= cap.wall_clock_seconds
+        and cost.gpu_hours <= cap.gpu_hours
+        and cost.usd <= cap.usd
+        and cost.model_tokens <= cap.model_tokens
+    )
+
+
+def _clamp(cost: ResourceCost, budget: ResearchBudget) -> ResourceCost:
+    """The largest affordable share of ``cost`` — what an overrun can still
+    be billed against a nearly-empty budget."""
+    return ResourceCost(
+        wall_clock_seconds=min(cost.wall_clock_seconds, budget.wall_clock_seconds),
+        gpu_hours=min(cost.gpu_hours, budget.gpu_hours),
+        usd=min(cost.usd, budget.usd),
+        model_tokens=min(cost.model_tokens, budget.model_tokens),
+    )
 
 
 # -- helpers -----------------------------------------------------------------
@@ -684,7 +950,6 @@ def _critic_context(
     store: EvidenceStore,
     result: ExperimentResult,
     reasons: tuple[str, ...],
-    validation: ValidationReport,
 ) -> RoleContext:
     spec = state.experiment(result.spec_id)
     prediction = state.prediction(spec.prediction_id) if spec else None
@@ -715,11 +980,5 @@ def _critic_context(
         results=family,
         evidence=evidence,
         assessments=state.assessments,
-        notes=(
-            *reasons,
-            *(
-                f"validation failure: {check.name} ({check.detail})"
-                for check in validation.failures
-            ),
-        ),
+        notes=reasons,
     )

@@ -88,12 +88,14 @@ Eight commitments shape the rest:
   `CommitBundle` — all or nothing, and a successful attempt cannot claim
   outputs that were not committed. Every decision is trajectory-logged and
   every decision-boundary state is snapshot to disk, from step one.
-- **Rich state, sparse model calls.** A domain abstraction does not imply an
-  LLM call or an agent. An ordinary experiment iteration costs one director
-  deliberation and one executor invocation; validation, evidence
-  transcription, prediction checking, routing and critic/synthesis triggers
-  are deterministic code, and a critic is invoked only when a deterministic
-  trigger says the result is consequential.
+- **Rich state, sparse reasoning invocations.** A domain abstraction does not
+  imply an LLM call or an agent. An ordinary experiment iteration makes one
+  director deliberation and one executor invocation — the quantity the loop
+  can enforce; actual provider calls and tokens are recorded separately from
+  provider reports, and are zero for the rule-based roles that exist today.
+  Every result passes a deterministic validation gate *before* it can enter
+  scientific state, and a critic is invoked only when a deterministic trigger
+  finds a scientific reason — never to review arithmetic.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the reasoning and
 [docs/ROADMAP.md](docs/ROADMAP.md) for where it is going.
@@ -118,18 +120,18 @@ python examples/runtime_loop.py
 
 This runs the research runtime twice on a deliberately trivial question — is
 a seeded draw stream biased? — and prints both trajectories with their
-model-call accounting. The normal scenario walks
+invocation accounting. The normal scenario walks
 
 ```
 frontier → director deliberates once → deterministic routing → executor
-(isolated) → deterministic validation → critic trigger evaluates to false
-→ atomic commit → new frontier
+(job-private isolation) → deterministic validation gate → critic trigger
+evaluates to false → atomic commit → new frontier
 ```
 
-at two conceptual model calls per experiment iteration; the escalated
-scenario produces a contradictory replication, the deterministic critic
-trigger fires, and a critic review (plus a slow-loop synthesis) is added —
-and only then.
+at two reasoning invocations — and zero actual model calls, recorded as
+such — per experiment iteration; the escalated scenario produces a
+contradictory replication, the deterministic critic trigger fires, and a
+critic review (plus a slow-loop synthesis) is added — and only then.
 
 ```bash
 python examples/minimal_loop.py

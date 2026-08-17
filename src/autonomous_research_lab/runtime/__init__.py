@@ -37,7 +37,14 @@ from .frontier import (
     build_frontier,
     find_contradictions,
 )
-from .metrics import JsonlRuntimeMetrics, MetricsSink, StepMetrics
+from .metrics import (
+    NO_USAGE,
+    JsonlRuntimeMetrics,
+    MetricsSink,
+    ProviderUsage,
+    StepMetrics,
+    UsageSource,
+)
 from .playbook import (
     EmpiricalMLPlaybook,
     Playbook,
@@ -59,6 +66,7 @@ from .validation import (
 __all__ = [
     "COMPACT_METHOD",
     "MANIFEST_FILENAME",
+    "NO_USAGE",
     "CompactValuation",
     "Contradiction",
     "EmpiricalMLPlaybook",
@@ -74,11 +82,13 @@ __all__ = [
     "Playbook",
     "PlaybookAdvice",
     "PlaybookStage",
+    "ProviderUsage",
     "ReasoningTier",
     "ReplicationSummary",
     "ResearchFrontier",
     "RuntimeConfig",
     "StepMetrics",
+    "UsageSource",
     "ValidationCheck",
     "ValidationReport",
     "as_action_utility",

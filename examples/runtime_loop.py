@@ -5,16 +5,18 @@ Two scenarios over the same wiring:
 **Normal** (one seed, threshold 0.55) — the deliverable's ordinary loop::
 
     frontier -> director deliberates once -> deterministic routing
-    -> executor runs in isolation -> deterministic validation
-    -> critic trigger evaluates to FALSE -> commit -> new frontier
+    -> executor runs in job-private isolation -> deterministic validation
+    gate -> critic trigger evaluates to FALSE -> commit -> new frontier
 
-The experiment iteration costs exactly two conceptual model calls (director,
-executor). Analysis of the ordinary result is deterministic transcription.
+The experiment iteration makes exactly two reasoning-seat invocations
+(director, executor) — and, because every role here is rule-based, zero
+actual model calls, which the metrics record as such. Analysis of the
+ordinary result is deterministic transcription.
 
 **Escalated** (two seeds straddling threshold 0.5) — a replication
 contradicts the first run, the deterministic critic trigger fires, and the
-critic reviews the contradiction as a third call. The synthesis slow loop
-also runs, because a contradiction appeared.
+critic reviews the contradiction as a third invocation. The synthesis slow
+loop also runs, because a contradiction appeared.
 
 The roles here are rule-based mocks standing where model-backed roles will
 sit; like real roles they read only their invocation's context and return
@@ -444,7 +446,7 @@ def _print_run(title: str, run: DemoRun) -> None:
     outcome = run.outcome
     print(f"== {title} ==")
     print(f"halted: {outcome.halt_reason}")
-    print("step  action                calls  critic  tier  outcome")
+    print("step  action                  inv  critic  tier  outcome")
     for step, report in enumerate(outcome.reports, start=1):
         selected = report.deliberation.selected
         action = (
@@ -464,8 +466,8 @@ def _print_run(title: str, run: DemoRun) -> None:
             else "-"
         )
         print(
-            f"{step:>4}  {action:<20}  {report.llm_calls:>5}  {critic:>6}  "
-            f"{report.tier.value:>4}  {status}"
+            f"{step:>4}  {action:<20}  {report.reasoning_invocations:>5}  "
+            f"{critic:>6}  {report.tier.value:>4}  {status}"
         )
     state = outcome.state
     for hypothesis in state.hypotheses:
@@ -487,12 +489,13 @@ def experiment_report(
 
 
 def _account(label: str, report: StepReport) -> None:
-    calls = report.llm_calls - (1 if report.synthesis else 0)
+    invocations = report.reasoning_invocations - (1 if report.synthesis else 0)
     critic = 1 if report.critic_invoked else 0
     suffix = " (+1 synthesis, slow loop)" if report.synthesis else ""
     print(
         f"  {label}: director 1 + executor 1 + critic {critic} "
-        f"= {calls} calls{suffix}"
+        f"= {invocations} reasoning invocations{suffix}; "
+        f"actual model calls: {report.provider_usage.calls}"
     )
 
 

@@ -1,23 +1,13 @@
-"""The critic is event-triggered: ordinary results never pay for critique."""
+"""The critic is event-triggered, and only by scientific reasons: ordinary
+results never pay for critique, and engineering trouble never reaches it."""
 
 from __future__ import annotations
 
-from autonomous_research_lab.core.actions import ResearchAction, ResearchActionType
 from autonomous_research_lab.core.assessment import (
     AssessmentVerdict,
     EpistemicAssessment,
 )
-from autonomous_research_lab.core.attempt import (
-    ActionAttempt,
-    ActionOutcome,
-    AttemptStatus,
-)
-from autonomous_research_lab.core.experiment import (
-    Environment,
-    ExperimentResult,
-    ExperimentSpec,
-    ExperimentStatus,
-)
+from autonomous_research_lab.core.experiment import ExperimentSpec
 from autonomous_research_lab.core.hypothesis import Hypothesis
 from autonomous_research_lab.core.prediction import (
     Comparator,
@@ -27,13 +17,8 @@ from autonomous_research_lab.core.prediction import (
 )
 from autonomous_research_lab.core.state import ResearchState
 from autonomous_research_lab.orchestration.critic_trigger import CriticTrigger
-from autonomous_research_lab.runtime.validation import (
-    ValidationCheck,
-    ValidationReport,
-)
 
 TRIGGER = CriticTrigger()
-PASSING = ValidationReport(checks=())
 HYPOTHESIS = Hypothesis(statement="The stream is biased.")
 PREDICTION = Prediction(
     hypothesis_id=HYPOTHESIS.id,
@@ -48,18 +33,6 @@ SPEC = ExperimentSpec(
     procedure="draw and count",
     metrics=("heads_rate",),
 )
-
-
-def _result() -> ExperimentResult:
-    return ExperimentResult(
-        spec_id=SPEC.id,
-        job_id="job_t",
-        status=ExperimentStatus.COMPLETED,
-        command=("run",),
-        environment=Environment(python_version="3.11", platform="test"),
-        metrics={"heads_rate": 0.503},
-        exit_code=0,
-    )
 
 
 def _test(result_id: str, observed: float) -> PredictionTest:
@@ -88,28 +61,22 @@ def _state(*tests: PredictionTest) -> ResearchState:
 
 def test_ordinary_result_does_not_trigger_the_critic() -> None:
     test = _test("res_1", 0.503)
-    reasons = TRIGGER.reasons(
-        _state(test), result=_result(), validation=PASSING, test=test
-    )
-    assert reasons == ()
+    assert TRIGGER.reasons(_state(test), test=test) == ()
+
+
+def test_no_test_means_no_scientific_question_to_review() -> None:
+    assert TRIGGER.reasons(_state(), test=None) == ()
 
 
 def test_contradictory_replications_trigger() -> None:
     first, second = _test("res_1", 0.503), _test("res_2", 0.492)
-    reasons = TRIGGER.reasons(
-        _state(first, second),
-        result=_result(),
-        validation=PASSING,
-        test=second,
-    )
+    reasons = TRIGGER.reasons(_state(first, second), test=second)
     assert any("contradictory replications" in r for r in reasons)
 
 
 def test_unexpectedly_large_effect_triggers() -> None:
     test = _test("res_1", 5.0)
-    reasons = TRIGGER.reasons(
-        _state(test), result=_result(), validation=PASSING, test=test
-    )
+    reasons = TRIGGER.reasons(_state(test), test=test)
     assert any("unexpectedly large effect" in r for r in reasons)
 
 
@@ -122,51 +89,24 @@ def test_challenge_to_settled_standing_triggers() -> None:
             method="prior",
         )
     )
-    reasons = TRIGGER.reasons(
-        state, result=_result(), validation=PASSING, test=test
-    )
+    reasons = TRIGGER.reasons(state, test=test)
     assert any("standing challenged" in r for r in reasons)
-
-
-def test_repeated_failures_trigger() -> None:
-    state = _state()
-    for _ in range(2):
-        attempt = ActionAttempt(
-            action=ResearchAction(
-                action_type=ResearchActionType.RUN_EXPERIMENT,
-                rationale="try",
-                targets=(SPEC.id,),
-            )
-        ).started()
-        state = state.begin_attempt(attempt).resolve_attempt(
-            attempt.resolved(
-                ActionOutcome(status=AttemptStatus.FAILED, error="boom")
-            )
-        )
-    reasons = TRIGGER.reasons(
-        state, result=_result(), validation=PASSING, test=None
-    )
-    assert any("repeated failures" in r for r in reasons)
-
-
-def test_validation_problems_on_a_completed_run_trigger() -> None:
-    failing = ValidationReport(
-        checks=(
-            ValidationCheck(name="metrics_finite", passed=False, detail="nan"),
-        )
-    )
-    reasons = TRIGGER.reasons(
-        _state(), result=_result(), validation=failing, test=None
-    )
-    assert any("implementation uncertainty" in r for r in reasons)
 
 
 def test_the_director_may_always_request_review() -> None:
     reasons = TRIGGER.reasons(
-        _state(),
-        result=_result(),
-        validation=PASSING,
-        test=None,
-        director_request="this will decide the branch",
+        _state(), test=None, director_request="this will decide the branch"
     )
     assert any("director request" in r for r in reasons)
+
+
+def test_the_trigger_offers_no_engineering_inputs() -> None:
+    """Validation failures and repeated execution failures are engineering
+    signals handled deterministically by the runtime — the trigger's
+    interface cannot even receive them."""
+    import inspect
+
+    parameters = inspect.signature(CriticTrigger.reasons).parameters
+    assert "validation" not in parameters
+    assert "result" not in parameters
+    assert set(parameters) == {"self", "state", "test", "director_request"}

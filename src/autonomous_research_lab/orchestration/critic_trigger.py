@@ -1,37 +1,36 @@
 """Event-triggered critic escalation: review is earned, not scheduled.
 
 An ordinary experiment goes ``execute -> deterministic checks -> director``
-with no critique in between: the mechanical prediction test and the Tier-0
-validation report already say everything a routine result can say. A critic
-is invoked only when a result is *consequential* — and "consequential" is
-decided by this deterministic, inspectable trigger, never by a model.
+with no critique in between: the pre-commit validation gate and the
+mechanical prediction test already say everything a routine result can say.
+A critic is invoked only when a *scientifically valid* result is
+consequential — and "consequential" is decided by this deterministic,
+inspectable trigger, never by a model.
 
-Conditions (each check is a few lines of arithmetic over the record):
+The conditions are scientific, exclusively:
 
 * **contradictory replications** — conclusive tests of the same prediction
   disagree;
 * **standing challenged** — a new conclusive test disagrees with the current
-  epistemic assessment of its hypothesis;
+  settled epistemic assessment of its hypothesis;
 * **unexpectedly large effect** — the observed value is far beyond the
   pre-registered threshold's own scale;
-* **implementation uncertainty** — the run completed but deterministic
-  validation found problems;
-* **repeated failures** — the same intent has now failed several times;
 * **explicit director request** — the director may always ask.
 
-"About to become a major claim / branch decision" arrives through the last
-condition: it is a judgment about intent, so the entity holding the intent
-(the director) states it explicitly rather than having it inferred here.
+What is deliberately *not* here: engineering trouble. A result that fails
+deterministic validation never reaches this trigger (the gate rejects it
+before commit), and repeated execution failures produce a deterministic
+runtime note for the director — a debugging signal, not a question a critic
+could answer. Asking an LLM whether a metric is missing would be paying for
+an opinion about arithmetic.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ..core.experiment import ExperimentResult
 from ..core.prediction import Consistency, PredictionTest
 from ..core.state import ResearchState
-from ..runtime.validation import ValidationReport
 
 _CHALLENGES = {
     # current settled verdict -> the test consistency that challenges it
@@ -42,7 +41,7 @@ _CHALLENGES = {
 
 @dataclass(frozen=True, slots=True)
 class CriticTrigger:
-    """Deterministic rules for when a result deserves a critic. All
+    """Deterministic rules for when a valid result deserves a critic. All
     thresholds are visible fields, so the trigger is tunable and its ablation
     is one config edit."""
 
@@ -55,47 +54,19 @@ class CriticTrigger:
     """The threshold's scale is ``max(tolerance, floor * |threshold|)`` — the
     floor keeps near-zero thresholds from flagging every observation."""
 
-    repeated_failure_threshold: int = 2
-
     def reasons(
         self,
         state: ResearchState,
         *,
-        result: ExperimentResult,
-        validation: ValidationReport,
         test: PredictionTest | None,
         director_request: str | None = None,
     ) -> tuple[str, ...]:
         """Why this result deserves critique — empty means it does not."""
         reasons: list[str] = []
-
         if test is not None:
             reasons.extend(self._test_reasons(state, test))
-
-        if result.succeeded and not validation.passed:
-            failed = ", ".join(check.name for check in validation.failures)
-            reasons.append(
-                f"implementation uncertainty: run completed but deterministic "
-                f"validation failed ({failed})"
-            )
-
-        failures = sum(
-            1
-            for attempt in state.attempts
-            if not attempt.succeeded
-            and attempt.status.is_terminal
-            and attempt.action.targets
-            and result.spec_id in attempt.action.targets
-        )
-        if failures >= self.repeated_failure_threshold:
-            reasons.append(
-                f"repeated failures: {failures} failed attempt(s) against "
-                f"experiment {result.spec_id}"
-            )
-
         if director_request:
             reasons.append(f"director request: {director_request}")
-
         return tuple(reasons)
 
     def _test_reasons(

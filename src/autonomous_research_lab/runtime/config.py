@@ -46,6 +46,11 @@ class RuntimeConfig:
     """The cheapest tier the director may run at — the cheap/strong director
     switch. Escalation can raise a deliberation above the floor, never below."""
 
+    repeated_failure_threshold: int = 2
+    """Failed or cancelled executions of one experiment before the runtime
+    raises a deterministic engineering note for the director. An engineering
+    signal, not a critic trigger: debugging is not scientific critique."""
+
     def __post_init__(self) -> None:
         if self.synthesis_every < 1:
             raise ValueError("synthesis_every must be at least 1")
@@ -53,3 +58,5 @@ class RuntimeConfig:
             raise ValueError("max_candidates must be at least 1")
         if self.recent_results < 0:
             raise ValueError("recent_results must be non-negative")
+        if self.repeated_failure_threshold < 1:
+            raise ValueError("repeated_failure_threshold must be at least 1")

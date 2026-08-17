@@ -153,16 +153,22 @@ def test_the_deliberation_carries_a_small_candidate_set(tmp_path: Path) -> None:
     assert "prefer" in replicate.deliberation.reasoning
 
 
-def test_ordinary_experiment_iteration_costs_two_calls(tmp_path: Path) -> None:
-    """The performance invariant: director 1, executor 1, critic 0."""
+def test_ordinary_experiment_iteration_costs_two_invocations(
+    tmp_path: Path,
+) -> None:
+    """The enforceable invariant: one deliberate() plus one perform(), and —
+    with rule-based roles — zero actual model calls, recorded honestly."""
     run = run_runtime_loop(tmp_path)
     report = experiment_report(run, ResearchActionType.RUN_EXPERIMENT)
 
-    assert report.llm_calls == 2
+    assert report.reasoning_invocations == 2
+    assert report.provider_usage.calls == 0
     assert not report.critic_invoked
     assert report.critic_reasons == ()
-    assert report.validation is not None
-    assert report.validation.passed
+    (validation,) = report.validation
+    assert validation.passed
+    # The gate includes artifact integrity — it is not a bypassable extra.
+    assert any(c.name == "artifact_integrity" for c in validation.checks)
 
 
 def test_consequential_iteration_adds_exactly_the_critic(tmp_path: Path) -> None:
@@ -174,7 +180,7 @@ def test_consequential_iteration_adds_exactly_the_critic(tmp_path: Path) -> None
     assert report.critic_invoked
     assert any("contradictory replications" in r for r in report.critic_reasons)
     synthesis_calls = 1 if report.synthesis else 0
-    assert report.llm_calls == 3 + synthesis_calls
+    assert report.reasoning_invocations == 3 + synthesis_calls
 
     # The critic's judgment is on the record, grounded in evidence.
     state = run.outcome.state
@@ -229,8 +235,13 @@ def test_runtime_metrics_are_recorded_per_decision(tmp_path: Path) -> None:
     decision_ids = {r.record.id for r in run.outcome.reports}
     for record in records:
         assert record["decision_id"] in decision_ids
-        assert isinstance(record["llm_calls"], int)
-        assert record["llm_calls"] >= 1
+        assert isinstance(record["reasoning_invocations"], int)
+        assert record["reasoning_invocations"] >= 1
+        # Rule-based roles make no model calls, and the record says so.
+        assert record["provider_calls"] == 0
+        assert record["input_tokens"] == 0
+        assert record["output_tokens"] == 0
+        assert record["model"] == ""
         assert record["action_type"]
         assert record["rationale"]  # the raw decision rationale is preserved
         assert "reasoning_tier" in record
