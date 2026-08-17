@@ -38,7 +38,8 @@ core          scientific vocabulary: state, actions + attempts, questions,
 evidence      append-only storage of what actually happened, plus the
               deterministic evidence-chain validator
 execution     binding an experiment design to a process, anywhere it runs —
-              isolated, artifact-aware, no silent success
+              job-private workspace, home and environment; artifact-aware,
+              no silent success
 knowledge     factual read models — the claim-evidence graph, the lesson shape
 persistence   content-addressed state snapshots, reconstructible offline
 runtime       the cost-aware layer: frontier view, Tier-0 validation,
@@ -55,7 +56,7 @@ publication   reporting (deliberately empty)
 Dependencies point downward only, and `core` imports nothing from its siblings —
 enforced by a test, not by convention.
 
-Eight commitments shape the rest:
+Nine commitments shape the rest:
 
 - **Scientific state is explicit data.** The authoritative state of a research
   program lives in a structured, immutable `ResearchState`, not in a model's
@@ -93,9 +94,16 @@ Eight commitments shape the rest:
   director deliberation and one executor invocation — the quantity the loop
   can enforce; actual provider calls and tokens are recorded separately from
   provider reports, and are zero for the rule-based roles that exist today.
-  Every result passes a deterministic validation gate *before* it can enter
-  scientific state, and a critic is invoked only when a deterministic trigger
-  finds a scientific reason — never to review arithmetic.
+  Every returned result — failed executions included — passes a deterministic
+  validation gate *before* it can enter scientific state: it must name its
+  assigned experiment and verify its artifact provenance, and a successful
+  result must additionally carry its declared metrics, finite values, and
+  seed. When the gate rejects work that already ran, the scientific commit is
+  refused but the operational record survives: actual cost and runtime are
+  still metered and billed against the budget. Roles — the critic included —
+  commit only proposal kinds within their invocation's output contract, and a
+  critic is invoked only when a deterministic trigger finds a scientific
+  reason — never to review arithmetic.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the reasoning and
 [docs/ROADMAP.md](docs/ROADMAP.md) for where it is going.
@@ -124,8 +132,8 @@ invocation accounting. The normal scenario walks
 
 ```
 frontier → director deliberates once → deterministic routing → executor
-(job-private isolation) → deterministic validation gate → critic trigger
-evaluates to false → atomic commit → new frontier
+(job-private workspace, home and environment) → deterministic validation
+gate → critic trigger evaluates to false → atomic commit → new frontier
 ```
 
 at two reasoning invocations — and zero actual model calls, recorded as

@@ -9,6 +9,8 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import pytest
+
 from autonomous_research_lab.core.actions import ResearchAction, ResearchActionType
 from autonomous_research_lab.core.attempt import AttemptStatus
 from autonomous_research_lab.core.budget import ResearchBudget, ResourceCost
@@ -25,6 +27,7 @@ from autonomous_research_lab.core.state import ResearchState
 from autonomous_research_lab.evidence.store import InMemoryEvidenceStore
 from autonomous_research_lab.execution.executor import ExperimentJob
 from autonomous_research_lab.execution.local import LocalExecutor
+from autonomous_research_lab.orchestration import loop as runtime_loop
 from autonomous_research_lab.orchestration.director import RuleBasedFrontierDirector
 from autonomous_research_lab.orchestration.loop import ResearchRuntime, StepReport
 from autonomous_research_lab.roles.base import (
@@ -108,6 +111,10 @@ class StubEngineer(ResearchRole):
     proposal_count: int = 1
     cost_override: ResourceCost | None = None
     raise_error: str | None = None
+    misreport: dict[str, str] | None = None
+    """Assigned spec id -> the spec id the returned result claims instead."""
+
+    drop_manifest: bool = False
     performed: int = 0
 
     @property
@@ -135,7 +142,7 @@ class StubEngineer(ResearchRole):
             seed = None if self.omit_seed else 100 + index
             script = _FAILING_SCRIPT if self.fail_process else _SCRIPT
             job = ExperimentJob(
-                spec_id=spec.id,
+                spec_id=(self.misreport or {}).get(spec.id, spec.id),
                 command=(sys.executable, "-c", script),
                 config={"value": self.value},
                 seed=seed,
@@ -147,6 +154,9 @@ class StubEngineer(ResearchRole):
                 (run_dir / "metrics.json").write_text(
                     json.dumps({"heads_rate": 0.99})
                 )
+            if self.drop_manifest:
+                run_dir = Path(result.logs[0]).parent
+                (run_dir / "manifest.json").unlink()
             if self.cost_override is not None:
                 result = dataclasses.replace(result, cost=self.cost_override)
             proposals.append(
@@ -179,6 +189,17 @@ class SpyCritic(ResearchRole):
         return ()
 
 
+class RogueCritic(SpyCritic):
+    """A critic that tries to smuggle a forged result through its review —
+    a ResultProposal is outside ANALYZE's output contract."""
+
+    def perform(self, invocation: RoleInvocation) -> tuple[Proposal, ...]:
+        self.performed += 1
+        (result, *_) = invocation.context.results
+        forged = dataclasses.replace(result, job_id="job_forged", id="")
+        return (ResultProposal(result=forged, proposer="rogue:critic"),)
+
+
 @dataclass
 class ListSink:
     records: list[StepMetrics] = field(default_factory=list)
@@ -190,7 +211,7 @@ class ListSink:
 def _runtime(
     tmp_path: Path,
     engineer: StubEngineer,
-    critic: SpyCritic,
+    critic: ResearchRole,
     *,
     config: RuntimeConfig | None = None,
     usage: object | None = None,
@@ -459,3 +480,248 @@ def test_a_provider_adapter_can_report_actual_usage(tmp_path: Path) -> None:
     assert record.model == "fake-model-1"
     # Conceptual invocations are still tracked separately and honestly.
     assert record.reasoning_invocations == 2
+
+
+# -- operational record vs scientific state -----------------------------------
+
+
+def test_validation_rejected_work_records_actual_cost_and_runtime(
+    tmp_path: Path,
+) -> None:
+    """A run that executed but failed the gate keeps its operational record:
+    the attempt carries the actual cost, the budget is billed the actual
+    cost, and the runtime is metered — while nothing scientific commits."""
+    spec, prediction = _spec_and_prediction()
+    actual = ResourceCost(wall_clock_seconds=120.0)
+    engineer = StubEngineer(
+        LocalExecutor(tmp_path / "runs"), tamper=True, cost_override=actual
+    )
+    critic = SpyCritic()
+    runtime, store, sink = _runtime(tmp_path, engineer, critic)
+    before = _prepared_state(spec, prediction)
+
+    report = runtime.step(before)
+
+    _assert_nothing_scientific_committed(report, store, critic)
+    (attempt,) = report.state.attempts
+    assert attempt.outcome is not None
+    assert attempt.outcome.actual_cost == actual  # actual, never the estimate
+    spent = (
+        before.budget.wall_clock_seconds
+        - report.state.budget.wall_clock_seconds
+    )
+    assert spent == 120.0  # the rejected work is billed in full
+    # The work that really ran is on the metrics record, commit or not.
+    assert sink.records[-1].experiment_seconds > 0.0
+
+
+def test_budget_overrun_from_rejected_work_is_billed_and_halts(
+    tmp_path: Path,
+) -> None:
+    """Gate-rejected work whose actual cost exceeds the remaining budget
+    drains the budget, records the overrun, and halts — exactly like
+    committed work. Rejection is not a discount."""
+    spec, prediction = _spec_and_prediction()
+    engineer = StubEngineer(
+        LocalExecutor(tmp_path / "runs"),
+        tamper=True,
+        cost_override=ResourceCost(wall_clock_seconds=10_000.0),
+    )
+    critic = SpyCritic()
+    runtime, store, _ = _runtime(tmp_path, engineer, critic)
+    state = _prepared_state(
+        spec,
+        prediction,
+        budget=ResearchBudget(wall_clock_seconds=400.0, model_tokens=100),
+    )
+
+    report = runtime.step(state)
+
+    assert report.halt_reason == "budget exhausted after cost overrun"
+    assert report.state.budget.wall_clock_seconds == 0.0  # drained, billed
+    assert any("budget overrun" in note for note in report.notes)
+    assert report.state.results == ()  # and still nothing scientific
+    assert store.results() == ()
+
+
+# -- the critic's output contract ---------------------------------------------
+
+
+def test_unauthorized_critic_output_cannot_commit(tmp_path: Path) -> None:
+    """The critic is under the same mechanical output contract as every
+    other seat: an unauthorized proposal rejects its entire bundle, the
+    critic attempt fails, and no forged object reaches state or store."""
+    spec, prediction = _spec_and_prediction(threshold=0.5)
+    engineer = StubEngineer(LocalExecutor(tmp_path / "runs"), value=0.9)
+    critic = RogueCritic()
+    runtime, store, _ = _runtime(tmp_path, engineer, critic)
+
+    report = runtime.step(_prepared_state(spec, prediction))
+
+    assert critic.performed == 1  # the trigger fired and the critic ran
+    assert report.critic_invoked
+    analyze = next(
+        a
+        for a in report.state.attempts
+        if a.action.action_type is ResearchActionType.ANALYZE
+    )
+    assert analyze.status is AttemptStatus.FAILED
+    assert analyze.outcome is not None
+    assert "output contract" in str(analyze.outcome.error)
+    # Only the engineer's genuine result exists anywhere authoritative.
+    (ref,) = report.state.results
+    (recorded,) = store.results()
+    assert recorded.id == ref.result_id
+    assert recorded.job_id != "job_forged"
+
+
+# -- invocation counting and exception attribution ----------------------------
+
+
+def test_role_invocation_is_counted_once_on_success(tmp_path: Path) -> None:
+    spec, prediction = _spec_and_prediction(threshold=0.45)
+    engineer = StubEngineer(LocalExecutor(tmp_path / "runs"), value=0.5)
+    critic = SpyCritic()
+    runtime, _, sink = _runtime(tmp_path, engineer, critic)
+
+    runtime.step(_prepared_state(spec, prediction))
+
+    assert engineer.performed == 1
+    assert sink.records[-1].reasoning_invocations == 2  # director + role
+
+
+def test_role_invocation_is_counted_once_on_role_exception(
+    tmp_path: Path,
+) -> None:
+    spec, prediction = _spec_and_prediction()
+    engineer = StubEngineer(
+        LocalExecutor(tmp_path / "runs"), raise_error="GPU on fire"
+    )
+    critic = SpyCritic()
+    runtime, _, sink = _runtime(tmp_path, engineer, critic)
+
+    report = runtime.step(_prepared_state(spec, prediction))
+
+    assert engineer.performed == 1
+    assert sink.records[-1].reasoning_invocations == 2  # not double-counted
+    assert any("raised during" in note for note in report.notes)
+
+
+def test_unexpected_validation_exception_is_not_blamed_on_the_role(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bug in the runtime's own post-role checks is a crash, not a role
+    outcome: it propagates rather than masquerading as the role raising,
+    and the single role invocation is never double-counted."""
+    spec, prediction = _spec_and_prediction()
+    engineer = StubEngineer(LocalExecutor(tmp_path / "runs"))
+    critic = SpyCritic()
+    runtime, store, sink = _runtime(tmp_path, engineer, critic)
+
+    def broken_gate(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("validator bug")
+
+    monkeypatch.setattr(runtime_loop, "_gate_results", broken_gate)
+
+    with pytest.raises(RuntimeError, match="validator bug"):
+        runtime.step(_prepared_state(spec, prediction))
+
+    assert engineer.performed == 1  # the role ran once and was not blamed
+    assert sink.records == []  # no record mislabels this as a role failure
+    assert store.results() == ()
+
+
+# -- identity of failed executions --------------------------------------------
+
+
+def test_correctly_assigned_failed_execution_commits_as_failure_record(
+    tmp_path: Path,
+) -> None:
+    """A failed run of the assigned experiment is an honest execution
+    record: it commits with inconclusive standing and produces no claim."""
+    spec, prediction = _spec_and_prediction()
+    engineer = StubEngineer(LocalExecutor(tmp_path / "runs"), fail_process=True)
+    critic = SpyCritic()
+    runtime, store, _ = _runtime(tmp_path, engineer, critic)
+
+    report = runtime.step(_prepared_state(spec, prediction))
+
+    (attempt,) = report.state.attempts
+    assert attempt.status is AttemptStatus.SUCCEEDED  # the record committed
+    (ref,) = report.state.results
+    assert not store.get_result(ref.result_id).succeeded
+    (test,) = report.state.prediction_tests
+    assert test.consistency is Consistency.INCONCLUSIVE
+    assert report.state.evidence_ids == ()  # a record, not a claim
+    (validation,) = report.validation
+    assert validation.passed  # identity and provenance were still checked
+
+
+def test_wrongly_assigned_failed_result_is_rejected_transactionally(
+    tmp_path: Path,
+) -> None:
+    """An executor assigned experiment A cannot commit a failed result for
+    experiment B: assignment identity is validated regardless of status."""
+    spec, prediction = _spec_and_prediction()
+    other_prediction = Prediction(
+        hypothesis_id=HYPOTHESIS.id,
+        condition="a different draw stream",
+        metric="heads_rate",
+        comparator=Comparator.GREATER_OR_EQUAL,
+        threshold=0.9,
+    )
+    other_spec = ExperimentSpec(
+        prediction_id=other_prediction.id,
+        objective="measure the other rate",
+        procedure="run the other stream and report",
+        metrics=("heads_rate",),
+        seeds=(7,),
+    )
+    engineer = StubEngineer(
+        LocalExecutor(tmp_path / "runs"),
+        fail_process=True,
+        misreport={spec.id: other_spec.id, other_spec.id: spec.id},
+    )
+    critic = SpyCritic()
+    runtime, store, _ = _runtime(tmp_path, engineer, critic)
+    state = (
+        _prepared_state(spec, prediction)
+        .upsert_prediction(other_prediction)
+        .add_experiment(other_spec)
+    )
+
+    report = runtime.step(state)
+
+    _assert_nothing_scientific_committed(report, store, critic)
+    (validation,) = report.validation
+    assert any(
+        c.name == "result_matches_assignment" for c in validation.failures
+    )
+
+
+def test_failed_result_with_broken_provenance_is_rejected_but_costed(
+    tmp_path: Path,
+) -> None:
+    """Losing the manifest breaks the executor contract even for a failed
+    run: the result is barred from authoritative state, while its actual
+    cost and runtime stay on the operational books."""
+    spec, prediction = _spec_and_prediction()
+    actual = ResourceCost(wall_clock_seconds=90.0)
+    engineer = StubEngineer(
+        LocalExecutor(tmp_path / "runs"),
+        fail_process=True,
+        drop_manifest=True,
+        cost_override=actual,
+    )
+    critic = SpyCritic()
+    runtime, store, sink = _runtime(tmp_path, engineer, critic)
+
+    report = runtime.step(_prepared_state(spec, prediction))
+
+    _assert_nothing_scientific_committed(report, store, critic)
+    (validation,) = report.validation
+    assert any(c.name == "artifact_integrity" for c in validation.failures)
+    (attempt,) = report.state.attempts
+    assert attempt.outcome is not None
+    assert attempt.outcome.actual_cost == actual
+    assert sink.records[-1].experiment_seconds > 0.0

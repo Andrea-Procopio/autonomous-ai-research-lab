@@ -14,6 +14,7 @@ import pytest
 from autonomous_research_lab.core.experiment import ExperimentStatus
 from autonomous_research_lab.execution.executor import ExperimentJob
 from autonomous_research_lab.execution.local import (
+    HOME_DIRNAME,
     MANIFEST_FILENAME,
     WORKSPACE_DIRNAME,
     LocalExecutor,
@@ -130,6 +131,32 @@ def test_host_secrets_are_absent_from_the_child_environment(
     assert "SUPER_SECRET_TOKEN" not in seen
     assert "DECLARED_FOR_JOB" in seen  # explicit passthrough still works
     assert {"ARL_RUN_DIR", "ARL_CONFIG"} <= seen
+
+
+def test_child_home_and_xdg_directories_are_job_private(tmp_path: Path) -> None:
+    """SDK default-credential discovery under ``~`` (``~/.aws``,
+    ``~/.config/gcloud``, ...) lands in a job-private directory inside the
+    run directory — never the host user's home. Recovery isolation, not
+    containment: generated code can still open absolute host paths."""
+    executor = LocalExecutor(tmp_path)
+    job = _job(
+        "import json, os, pathlib; "
+        "d = pathlib.Path(os.environ['ARL_RUN_DIR']); "
+        "(d / 'home.json').write_text(json.dumps({"
+        "'home': str(pathlib.Path.home()), "
+        "'xdg_config': os.environ['XDG_CONFIG_HOME'], "
+        "'xdg_cache': os.environ['XDG_CACHE_HOME']})); "
+        + _WRITE_METRICS.replace("import json, os, pathlib; ", "")
+    )
+    result = executor.collect(executor.submit(job))
+
+    assert result.succeeded
+    seen = json.loads((tmp_path / job.id / "home.json").read_text())
+    child_home = Path(seen["home"]).resolve()
+    assert child_home == (tmp_path / job.id / HOME_DIRNAME).resolve()
+    assert child_home != Path.home().resolve()
+    for xdg in (seen["xdg_config"], seen["xdg_cache"]):
+        assert Path(xdg).resolve().is_relative_to(child_home)
 
 
 def test_escaping_required_artifact_paths_are_rejected_up_front() -> None:

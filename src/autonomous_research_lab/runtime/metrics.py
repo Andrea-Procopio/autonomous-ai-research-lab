@@ -88,6 +88,10 @@ class StepMetrics:
 
     wall_clock_seconds: float = 0.0
     experiment_seconds: float = 0.0
+    """Runtime of every execution the step's role actually performed —
+    including work whose scientific commit was later rejected. Time spent
+    is time spent."""
+
     estimated_usd: float = 0.0
     failures: int = 0
     critic_invoked: bool = False

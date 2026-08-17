@@ -15,7 +15,9 @@ One step of the fast loop::
       -> deterministic evidence reading of valid completed results (Tier 0)
       -> critic trigger evaluated (deterministic, scientific reasons only)
       -> synthesis trigger evaluated; slow loop runs only when due
-      -> cost reconciled against the budget — work is never committed unbilled
+      -> cost reconciled against the budget — work is never committed
+         unbilled, and rejected work is billed at its actual known cost,
+         never silently at the estimate
       -> state persisted, decision + runtime metrics logged
 
 The enforceable invariant: **an ordinary experiment step makes exactly two
@@ -33,8 +35,10 @@ Failure taxonomy, kept deliberately separate:
 
 * a result failing the deterministic gate is an **engineering failure**: the
   attempt fails, nothing enters scientific state, the run directory is
-  preserved, and the director sees a deterministic note next step — never a
-  critic, because no model opinion can override arithmetic;
+  preserved — and the execution's actual cost and runtime stay on the
+  operational record and are billed — and the director sees a deterministic
+  note next step — never a critic, because no model opinion can override
+  arithmetic;
 * a failed/cancelled *execution* is an honest execution record: it commits
   with inconclusive scientific standing, and repeated failures of one
   experiment raise a deterministic engineering note;
@@ -265,71 +269,105 @@ class ResearchRuntime:
 
         failures = 0
         validation: tuple[ValidationReport, ...] = ()
-        results: tuple[ExperimentResult, ...] = ()
+        # Operational vs scientific record, kept deliberately separate:
+        # ``executed_results`` is every result the role actually returned —
+        # retained for cost, timing and diagnostics even when nothing
+        # commits; ``committed_results`` is the gate-approved subset that
+        # entered authoritative scientific state.
+        executed_results: tuple[ExperimentResult, ...] = ()
+        committed_results: tuple[ExperimentResult, ...] = ()
+
+        # The role invocation happens exactly once, counted here. Only an
+        # exception raised by ``perform`` itself is attributed to the role.
+        invocations += 1
+        proposals: tuple[Proposal, ...] = ()
+        role_error: Exception | None = None
         try:
             proposals = performer.perform(invocation)
-            invocations += 1
-            _check_contract(invocation, proposals, seat)
-            results = tuple(
-                p.result for p in proposals if isinstance(p, ResultProposal)
-            )
-            # The deterministic gate: nothing enters authoritative scientific
-            # state unless code has checked it. Raises before any commit.
-            validation = _gate_results(state, action, proposals, results)
-            bundle = CommitBundle(
-                attempt_id=attempt.id,
-                outcome=ActionOutcome(
-                    status=AttemptStatus.SUCCEEDED,
-                    produced=tuple(
-                        pid for p in proposals for pid in payload_ids(p)
-                    ),
-                    actual_cost=_actual_cost(results, estimated),
-                ),
-                proposals=proposals,
-            )
-        except ValidationGateError as exc:
-            failures = 1
-            validation = exc.reports
-            results = ()
-            step_notes.append(
-                f"engineering failure: {action.action_type} rejected by the "
-                f"deterministic validation gate — {exc} (run outputs preserved)"
-            )
-            bundle = _failed_bundle(attempt.id, str(exc), estimated)
-        except TransitionError as exc:
-            failures = 1
-            results = ()
-            step_notes.append(
-                f"engineering failure: {action.action_type} — {exc}"
-            )
-            bundle = _failed_bundle(attempt.id, str(exc), estimated)
         except Exception as exc:  # a role failing is an outcome, not a crash
+            role_error = exc
+
+        if role_error is not None:
             failures = 1
-            invocations += 1  # the invocation happened even though it failed
-            results = ()
             step_notes.append(
                 f"engineering failure: {seat} raised during "
-                f"{action.action_type} — {exc}"
+                f"{action.action_type} — {role_error}"
             )
-            bundle = _failed_bundle(attempt.id, str(exc), estimated)
+            # No result came back, so the estimate is the best known cost.
+            bundle = _failed_bundle(attempt.id, str(role_error), estimated)
+        else:
+            executed_results = tuple(
+                p.result for p in proposals if isinstance(p, ResultProposal)
+            )
+            try:
+                _check_contract(invocation, proposals, seat)
+                # The deterministic gate: nothing enters authoritative
+                # scientific state unless code has checked it. Raises before
+                # any commit. Unexpected exceptions from the checks
+                # themselves propagate — mislabeling an orchestration bug as
+                # a role failure would corrupt the record.
+                validation = _gate_results(
+                    state, action, proposals, executed_results
+                )
+                bundle = CommitBundle(
+                    attempt_id=attempt.id,
+                    outcome=ActionOutcome(
+                        status=AttemptStatus.SUCCEEDED,
+                        produced=tuple(
+                            pid for p in proposals for pid in payload_ids(p)
+                        ),
+                        actual_cost=_actual_cost(executed_results, estimated),
+                    ),
+                    proposals=proposals,
+                )
+            except ValidationGateError as exc:
+                failures = 1
+                validation = exc.reports
+                step_notes.append(
+                    f"engineering failure: {action.action_type} rejected by "
+                    f"the deterministic validation gate — {exc} (run outputs "
+                    f"preserved)"
+                )
+                bundle = _failed_bundle(
+                    attempt.id,
+                    str(exc),
+                    _actual_cost(executed_results, estimated),
+                )
+            except TransitionError as exc:
+                failures = 1
+                step_notes.append(
+                    f"engineering failure: {action.action_type} — {exc}"
+                )
+                bundle = _failed_bundle(
+                    attempt.id,
+                    str(exc),
+                    _actual_cost(executed_results, estimated),
+                )
 
         contradictions_before = len(find_contradictions(state))
         try:
             state = commit_bundle(state, bundle, self.store)
+            if bundle.outcome.status is AttemptStatus.SUCCEEDED:
+                committed_results = executed_results
         except TransitionError as exc:
             failures += 1
-            results = ()
             step_notes.append(f"engineering failure: commit rejected — {exc}")
             state = commit_bundle(
-                state, _failed_bundle(attempt.id, str(exc), estimated), self.store
+                state,
+                _failed_bundle(
+                    attempt.id,
+                    str(exc),
+                    _actual_cost(executed_results, estimated),
+                ),
+                self.store,
             )
         outcome = _outcome_of(state, attempt.id)
 
         # -- Tier 0 aftermath of committed results ---------------------------
         critic_reasons: tuple[str, ...] = ()
         critic_invoked = False
-        if outcome.status is AttemptStatus.SUCCEEDED and results:
-            completed = tuple(r for r in results if r.succeeded)
+        if outcome.status is AttemptStatus.SUCCEEDED and committed_results:
+            completed = tuple(r for r in committed_results if r.succeeded)
             self._results_since_synthesis += len(completed)
             for result in completed:
                 state = self._transcribe(state, result)
@@ -343,7 +381,7 @@ class ResearchRuntime:
                         invocations += invoked
                         critic_invoked = invoked > 0
             step_notes.extend(
-                self._execution_failure_notes(state, results)
+                self._execution_failure_notes(state, committed_results)
             )
 
         state = state.apply(action)
@@ -358,7 +396,7 @@ class ResearchRuntime:
                 attempt_id=attempt.id, outcome=outcome, seat=seat,
                 validation=validation, critic_reasons=critic_reasons,
                 critic_invoked=critic_invoked, failures=failures,
-                results=results, notes=tuple(step_notes),
+                executed_results=executed_results, notes=tuple(step_notes),
                 halt_reason="budget exhausted after cost overrun",
             )
 
@@ -377,7 +415,8 @@ class ResearchRuntime:
             attempt_id=attempt.id, outcome=outcome, seat=seat,
             validation=validation, critic_reasons=critic_reasons,
             critic_invoked=critic_invoked, failures=failures,
-            results=results, synthesis=synthesis, notes=tuple(step_notes),
+            executed_results=executed_results, synthesis=synthesis,
+            notes=tuple(step_notes),
             halt_reason=None,
         )
 
@@ -461,6 +500,10 @@ class ResearchRuntime:
         )
         try:
             proposals = critic.perform(invocation)
+            # The critic is under the same mechanical output contract as
+            # every other seat: an unauthorized proposal kind rejects the
+            # whole bundle and the critic attempt resolves as failed.
+            _check_contract(invocation, proposals, RoleName.RESULT_ANALYST)
             bundle = CommitBundle(
                 attempt_id=attempt.id,
                 outcome=ActionOutcome(
@@ -529,7 +572,7 @@ class ResearchRuntime:
             state, record, deliberation, tier, invocations, started,
             attempt_id=None, outcome=None, seat=None,
             validation=(), critic_reasons=(), critic_invoked=False,
-            failures=0, results=(), synthesis=synthesis, notes=(),
+            failures=0, executed_results=(), synthesis=synthesis, notes=(),
             halt_reason=action.rationale,
         )
 
@@ -547,7 +590,7 @@ class ResearchRuntime:
             state, record, deliberation, tier, invocations, started,
             attempt_id=None, outcome=None, seat=None,
             validation=(), critic_reasons=(), critic_invoked=False,
-            failures=0, results=(), notes=(), halt_reason=reason,
+            failures=0, executed_results=(), notes=(), halt_reason=reason,
         )
 
     def _finish(
@@ -566,7 +609,7 @@ class ResearchRuntime:
         critic_reasons: tuple[str, ...],
         critic_invoked: bool,
         failures: int,
-        results: tuple[ExperimentResult, ...],
+        executed_results: tuple[ExperimentResult, ...],
         notes: tuple[str, ...],
         synthesis: SynthesisReview | None = None,
         halt_reason: str | None,
@@ -598,7 +641,11 @@ class ResearchRuntime:
                     output_tokens=usage.output_tokens,
                     model=usage.model,
                     wall_clock_seconds=time.monotonic() - started,
-                    experiment_seconds=sum(r.runtime_seconds for r in results),
+                    # Everything that actually ran, gate-rejected work
+                    # included — runtime is spent whether or not it commits.
+                    experiment_seconds=sum(
+                        r.runtime_seconds for r in executed_results
+                    ),
                     estimated_usd=(
                         selected.valuation.expected_cost.usd if selected else 0.0
                     ),
@@ -661,11 +708,18 @@ def _gate_results(
 ) -> tuple[ValidationReport, ...]:
     """Deterministically validate every returned result before any commit.
 
-    Raises :class:`ValidationGateError` when a *completed* result fails any
-    machine check — such a result must never enter authoritative scientific
-    state, and no model is ever asked to overrule this. Failed/cancelled
-    executions pass through: they commit as execution-failure records with
-    inconclusive standing, which is honest.
+    Every result — failed and cancelled executions included — must name a
+    known experiment, correspond to the selected assignment, and pass the
+    executor contract's artifact-integrity check: identity and provenance
+    are not optional just because a run failed. Only successful completed
+    results additionally face the scientific-success checks (declared
+    metrics, finite values, prediction metric, seed).
+
+    Raises :class:`ValidationGateError` when any check fails — such a
+    result must never enter authoritative scientific state, and no model is
+    ever asked to overrule this. A correctly assigned failed execution
+    passes and commits as an execution-failure record with inconclusive
+    standing, which is honest.
     """
     if action.action_type in _SINGLE_RESULT_ACTIONS and len(results) != 1:
         raise ValidationGateError(
@@ -676,18 +730,18 @@ def _gate_results(
 
     reports: list[ValidationReport] = []
     for result in results:
-        if not result.succeeded:
-            continue  # an execution failure is a record, not a claim
         spec = _spec_for(state, proposals, result.spec_id)
         if spec is None:
             raise ValidationGateError(
                 f"result {result.id} names unknown experiment {result.spec_id}",
                 reports=tuple(reports),
             )
-        prediction = state.prediction(spec.prediction_id)
-        checks = list(
-            validate_result(spec, result, prediction=prediction).checks
-        )
+        checks: list[ValidationCheck] = []
+        if result.succeeded:
+            prediction = state.prediction(spec.prediction_id)
+            checks.extend(
+                validate_result(spec, result, prediction=prediction).checks
+            )
         checks.append(_matches_assignment(action, result))
         checks.append(verify_artifact_integrity(result))
         report = ValidationReport(checks=tuple(checks))

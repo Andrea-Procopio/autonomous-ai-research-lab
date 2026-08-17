@@ -23,10 +23,15 @@ Isolation here is **job-private recovery isolation, not a security
 sandbox**: a job with no ``working_dir`` runs in a job-private ``workspace/``
 inside its run directory so concurrent jobs cannot trample each other; the
 child process receives a small allowlisted environment plus ``job.env``
-rather than the whole host environment; artifact paths are confined to the
+rather than the whole host environment; ``HOME`` (and the XDG base
+directories) point at a job-private ``home/`` inside the run directory, so
+standard SDKs that discover credentials and configuration under ``~`` --
+``~/.aws``, ``~/.config/gcloud`` and the like -- find an empty job-private
+directory rather than the host user's; artifact paths are confined to the
 run directory (symlinks that resolve outside it are excluded); every job has
 a finite timeout, and on timeout the whole process group is terminated, not
 only the immediate child. None of this constrains a malicious process --
+generated code can still deliberately open absolute host paths, and
 containment at that level is a future remote-executor concern.
 
 Execution is synchronous: ``submit`` runs the job to completion before
@@ -67,12 +72,14 @@ STDOUT_FILENAME = "stdout.log"
 STDERR_FILENAME = "stderr.log"
 MANIFEST_FILENAME = "manifest.json"
 WORKSPACE_DIRNAME = "workspace"
+HOME_DIRNAME = "home"
 
 #: The only host environment variables a child process inherits. Everything
 #: else -- credentials, tokens, cloud configuration -- must be passed
-#: explicitly via ``job.env`` to reach an experiment.
+#: explicitly via ``job.env`` to reach an experiment. ``HOME`` is
+#: deliberately absent: the child gets a job-private home directory instead,
+#: so SDK default-credential discovery cannot reach the host user's files.
 ENV_ALLOWLIST: Final = (
-    "HOME",
     "PATH",
     "LANG",
     "LC_ALL",
@@ -133,6 +140,18 @@ class LocalExecutor(Executor):
             for name in ENV_ALLOWLIST
             if name in os.environ
         }
+        # Job-private home: ``Path.home()`` and XDG-style configuration and
+        # cache lookups resolve inside the run directory, not to the host
+        # user's home (recovery isolation, not filesystem containment).
+        # ``USERPROFILE`` covers ``Path.home()`` on Windows.
+        home_dir = run_dir / HOME_DIRNAME
+        home_dir.mkdir(parents=True, exist_ok=True)
+        env["HOME"] = str(home_dir)
+        env["USERPROFILE"] = str(home_dir)
+        env["XDG_CONFIG_HOME"] = str(home_dir / ".config")
+        env["XDG_CACHE_HOME"] = str(home_dir / ".cache")
+        env["XDG_DATA_HOME"] = str(home_dir / ".local" / "share")
+        env["XDG_STATE_HOME"] = str(home_dir / ".local" / "state")
         env.update(job.env)
         env["ARL_RUN_DIR"] = str(run_dir)
         env["ARL_CONFIG"] = str(config_path)
