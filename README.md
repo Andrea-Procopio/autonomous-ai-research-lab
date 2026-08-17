@@ -30,33 +30,29 @@ The architecture is under active development and interfaces will change.
 
 ## Architecture at a glance
 
-```
-core          scientific vocabulary: state, actions + attempts, questions,
-              hypotheses, predictions + their tests, experiments, evidence,
-              claims, assessments, proposals, commit bundles, decisions,
-              budgets, replication groups              (depends on nothing)
-evidence      append-only storage of what actually happened, plus the
-              deterministic evidence-chain validator
-execution     binding an experiment design to a process, anywhere it runs —
-              job-private workspace, home and environment; artifact-aware,
-              no silent success
-knowledge     factual read models — the claim-evidence graph, the lesson shape
-persistence   content-addressed state snapshots, reconstructible offline
-runtime       the cost-aware layer: frontier view, Tier-0 validation,
-              reasoning tiers + escalation, runtime metrics, playbooks,
-              development/held-out evaluation seam     (depends on core only)
-search        selection policies over evaluated candidates
-roles         specialized agents; explicit invocations in, proposals out
-orchestration the director (one deliberation: candidates → valuation →
-              selection), the runtime loop, deterministic routing, critic +
-              synthesis triggers, atomic transitions, the trajectory log
-publication   reporting (deliberately empty)
-```
+The package is a stack of small layers. Dependencies point downward only, and
+`core` imports nothing from its siblings — enforced by a test, not by
+convention.
 
-Dependencies point downward only, and `core` imports nothing from its siblings —
-enforced by a test, not by convention.
+| Layer | Responsibility |
+| --- | --- |
+| `core` | The scientific vocabulary: research state, actions and attempts, questions, hypotheses, predictions and their tests, experiments, evidence, claims, assessments, proposals, commit bundles, decisions, budgets, replication groups. Depends on nothing. |
+| `evidence` | Append-only storage of what actually happened, plus the deterministic evidence-chain validator. |
+| `execution` | Binding an experiment design to a process, anywhere it runs. Job-private workspace, home directory and environment; artifact-aware; no silent success. |
+| `knowledge` | Factual read models: the claim–evidence graph, the lesson shape. |
+| `persistence` | Content-addressed state snapshots, reconstructible offline. |
+| `runtime` | The cost-aware layer: the frontier view, Tier-0 deterministic validation, reasoning tiers and escalation, runtime metrics, playbooks, the development/held-out evaluation seam. Depends on `core` only. |
+| `search` | Selection policies over evaluated candidates. |
+| `roles` | Specialized agents: explicit invocations in, typed proposals out. Roles never mutate state. |
+| `orchestration` | The director (one deliberation: candidates → valuation → selection), the runtime loop, deterministic routing, critic and synthesis triggers, atomic transitions, the trajectory log. |
+| `publication` | Reporting. Deliberately empty for now. |
 
-Nine commitments shape the rest:
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the reasoning behind each
+layer and [docs/ROADMAP.md](docs/ROADMAP.md) for where it is going.
+
+## Design commitments
+
+### The scientific record
 
 - **Scientific state is explicit data.** The authoritative state of a research
   program lives in a structured, immutable `ResearchState`, not in a model's
@@ -65,9 +61,6 @@ Nine commitments shape the rest:
   are immutable propositions; what an execution observed about a prediction is
   a per-run `PredictionTest`, and what is currently believed is a versioned
   `EpistemicAssessment`. Standing is always a query, never a field.
-- **Progress is a search over typed actions**, not a fixed pipeline of stages —
-  and an action's *intent* is separate from each *attempt* at executing it. A
-  failed attempt leaves the work open; it never makes it look done.
 - **Hypotheses commit through predictions.** A hypothesis is testable only via
   pre-registered, machine-checkable predictions (metric, comparator,
   threshold), checked mechanically when each result is committed — never
@@ -83,30 +76,40 @@ Nine commitments shape the rest:
 - **Negative results are first-class.** Failed runs, inconsistent prediction
   tests, failed attempts and contradicted claims are recorded outcomes with
   provenance.
+
+### How work happens
+
+- **Progress is a search over typed actions**, not a fixed pipeline of stages —
+  and an action's *intent* is separate from each *attempt* at executing it. A
+  failed attempt leaves the work open; it never makes it look done.
 - **Roles propose; commits are atomic.** Roles receive explicit invocations
   (context, allowed actions, output contract) and produce typed, attributable
   proposals. An attempt's proposals and outcome commit together as a
   `CommitBundle` — all or nothing, and a successful attempt cannot claim
   outputs that were not committed. Every decision is trajectory-logged and
   every decision-boundary state is snapshot to disk, from step one.
-- **Rich state, sparse reasoning invocations.** A domain abstraction does not
-  imply an LLM call or an agent. An ordinary experiment iteration makes one
-  director deliberation and one executor invocation — the quantity the loop
-  can enforce; actual provider calls and tokens are recorded separately from
-  provider reports, and are zero for the rule-based roles that exist today.
-  Every returned result — failed executions included — passes a deterministic
-  validation gate *before* it can enter scientific state: it must name its
-  assigned experiment and verify its artifact provenance, and a successful
-  result must additionally carry its declared metrics, finite values, and
-  seed. When the gate rejects work that already ran, the scientific commit is
-  refused but the operational record survives: actual cost and runtime are
-  still metered and billed against the budget. Roles — the critic included —
-  commit only proposal kinds within their invocation's output contract, and a
-  critic is invoked only when a deterministic trigger finds a scientific
-  reason — never to review arithmetic.
 
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the reasoning and
-[docs/ROADMAP.md](docs/ROADMAP.md) for where it is going.
+### Runtime discipline
+
+- **Rich state, sparse reasoning invocations.** A domain abstraction does not
+  imply an LLM call or an agent. An ordinary experiment iteration makes
+  exactly two reasoning-seat invocations — one director deliberation and one
+  executor invocation. A critic is added only when a deterministic trigger
+  finds a *scientific* reason, never to review arithmetic. Actual provider
+  calls and tokens are recorded separately, from provider reports, and are
+  zero for the rule-based roles that exist today.
+- **Nothing enters scientific state unchecked.** Every returned result —
+  failed executions included — passes a deterministic validation gate *before*
+  it can commit: it must name its assigned experiment and verify its artifact
+  provenance, and a successful result must additionally carry its declared
+  metrics, finite values, and seed. Every role, the critic included, may
+  commit only the proposal kinds its invocation's output contract allows.
+- **Work is billed at what it actually cost.** The operational execution
+  record is kept separate from scientific state: when the gate rejects work
+  that already ran, nothing scientific commits, but the actual cost and
+  runtime are still metered and billed against the budget. An overrun is
+  recorded explicitly and halts the program safely — committed-but-unbilled
+  work cannot exist.
 
 ## Setup
 
@@ -120,15 +123,19 @@ pip install -e ".[dev]"
 
 The package has no runtime dependencies.
 
-## Running
+## Running the demos
+
+### The research runtime
 
 ```bash
 python examples/runtime_loop.py
 ```
 
-This runs the research runtime twice on a deliberately trivial question — is
-a seeded draw stream biased? — and prints both trajectories with their
-invocation accounting. The normal scenario walks
+Runs the research runtime twice on a deliberately trivial question — is a
+seeded draw stream biased? — and prints both trajectories with their
+invocation accounting.
+
+The **normal** scenario walks
 
 ```
 frontier → director deliberates once → deterministic routing → executor
@@ -137,17 +144,18 @@ gate → critic trigger evaluates to false → atomic commit → new frontier
 ```
 
 at two reasoning invocations — and zero actual model calls, recorded as
-such — per experiment iteration; the escalated scenario produces a
-contradictory replication, the deterministic critic trigger fires, and a
+such — per experiment iteration. The **escalated** scenario produces a
+contradictory replication: the deterministic critic trigger fires, and a
 critic review (plus a slow-loop synthesis) is added — and only then.
+
+### The decomposed decision path
 
 ```bash
 python examples/minimal_loop.py
 ```
 
 The original demo of the decomposed decision path (generator → utilities →
-policy). It walks the same contract at finer action granularity and prints
-the resulting trajectory:
+policy). It walks the same contract at finer action granularity:
 
 ```
 ResearchState → director (candidates → utilities → policy) → ActionAttempt
