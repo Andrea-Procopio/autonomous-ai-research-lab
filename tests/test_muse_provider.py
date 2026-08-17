@@ -17,9 +17,12 @@ from __future__ import annotations
 import http.client
 import io
 import json
+import socket
+import threading
+import time
 import urllib.error
 import urllib.request
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from email.message import Message as EmailMessage
 from typing import Any, ClassVar
 
@@ -645,6 +648,151 @@ def test_an_oversized_body_is_rejected_not_buffered(
 
     with pytest.raises(InvalidModelResponseError, match="exceeds"):
         MuseSparkProvider().invoke(_request())
+
+
+def _serve_once(handler: Callable[[socket.socket], None]) -> int:
+    """A one-connection local HTTP server; returns its port. The handler
+    receives the accepted connection after the request has been read."""
+    server = socket.create_server(("127.0.0.1", 0))
+    server.settimeout(10.0)
+    port: int = server.getsockname()[1]
+
+    def run() -> None:
+        try:
+            conn, _ = server.accept()
+            with conn:
+                conn.recv(65536)
+                handler(conn)
+        except OSError:
+            pass
+        finally:
+            server.close()
+
+    threading.Thread(target=run, daemon=True).start()
+    return port
+
+
+def _http_headers(content_length: int) -> bytes:
+    return (
+        b"HTTP/1.1 200 OK\r\n"
+        b"Content-Type: application/json\r\n"
+        b"Content-Length: " + str(content_length).encode() + b"\r\n\r\n"
+    )
+
+
+def test_a_genuinely_stalled_read_times_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A real socket, not a fake clock: the server sends headers and then
+    nothing. The blocking read must surface as ProviderTimeoutError within
+    the deadline's order of magnitude, not hang."""
+
+    def stall(conn: socket.socket) -> None:
+        conn.sendall(_http_headers(1_000_000))
+        time.sleep(3.0)
+
+    port = _serve_once(stall)
+    monkeypatch.setenv("MUSE_API_KEY", "dummy-not-a-real-key")
+    started = time.monotonic()
+
+    with pytest.raises(ProviderTimeoutError):
+        MuseSparkProvider(base_url=f"http://127.0.0.1:{port}").invoke(
+            _request(timeout_seconds=0.5)
+        )
+    assert time.monotonic() - started < 3.0
+
+
+def test_a_genuinely_dripping_body_hits_the_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The sharp case a between-chunks clock check cannot catch on its own:
+    each byte arrives fast enough that no single socket operation times
+    out, while a buffered read(n) would keep recv-ing forever. The
+    whole-call deadline must still end the call."""
+
+    def drip(conn: socket.socket) -> None:
+        conn.sendall(_http_headers(1_000_000))
+        try:
+            for _ in range(30):
+                conn.sendall(b"x")
+                time.sleep(0.15)
+        except OSError:
+            pass  # the client gave up, which is the point
+
+    port = _serve_once(drip)
+    monkeypatch.setenv("MUSE_API_KEY", "dummy-not-a-real-key")
+    started = time.monotonic()
+
+    # Either enforcement path is the deadline working: the between-reads
+    # check ("did not complete") or the tightened socket timeout firing
+    # once the remaining deadline drops below the drip interval.
+    with pytest.raises(ProviderTimeoutError, match="within"):
+        MuseSparkProvider(base_url=f"http://127.0.0.1:{port}").invoke(
+            _request(timeout_seconds=0.6)
+        )
+    assert time.monotonic() - started < 3.0
+
+
+class _ExplodingBody:
+    """An error body whose read raises — a stalled or dropped connection
+    while draining the envelope."""
+
+    def __init__(self, error: Exception) -> None:
+        self._error = error
+
+    def read(self, amount: int = -1) -> bytes:
+        raise self._error
+
+    def close(self) -> None:  # addinfourl closes its wrapped file on teardown
+        return None
+
+
+@pytest.mark.parametrize(
+    "body_error",
+    [
+        TimeoutError("stalled while draining the error body"),
+        http.client.IncompleteRead(b""),
+        ValueError("I/O operation on closed file"),
+    ],
+)
+def test_an_unreadable_error_body_still_yields_a_typed_error(
+    monkeypatch: pytest.MonkeyPatch, body_error: Exception
+) -> None:
+    """The status and headers already classify the failure; a body that
+    cannot be read must degrade to that classification, never escape the
+    handler as an untyped exception."""
+    headers = EmailMessage()
+    headers["Retry-After"] = "7"
+    http_error = urllib.error.HTTPError(
+        "https://api.meta.ai/v1/chat/completions",
+        429,
+        "Too Many Requests",
+        headers,
+        _ExplodingBody(body_error),  # type: ignore[arg-type]
+    )
+    _stub_urlopen(monkeypatch, http_error)
+
+    with pytest.raises(ProviderRateLimitError) as caught:
+        MuseSparkProvider().invoke(_request())
+    # The already-known headers still carry the server's instruction.
+    assert caught.value.retry_after_seconds == 7.0
+
+
+def test_an_http_error_without_headers_or_body_is_still_typed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    http_error = urllib.error.HTTPError(
+        "https://api.meta.ai/v1/chat/completions",
+        500,
+        "boom",
+        None,  # type: ignore[arg-type]  # observed shape: hdrs can be absent
+        None,
+    )
+    _stub_urlopen(monkeypatch, http_error)
+
+    with pytest.raises(ProviderTransportError) as caught:
+        MuseSparkProvider().invoke(_request())
+    assert caught.value.status_code == 500
 
 
 def test_retry_after_rejects_non_finite_and_negative_values() -> None:

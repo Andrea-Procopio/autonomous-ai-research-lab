@@ -50,6 +50,7 @@ documentation uses) — and appears in nothing but the request header.
 
 from __future__ import annotations
 
+import contextlib
 import http.client
 import json
 import math
@@ -139,10 +140,11 @@ class MuseSparkProvider(ModelProvider):
                 body = _read_bounded(reply, deadline=deadline, timeout=timeout)
                 return body, _lowered(reply.headers.items())
         except urllib.error.HTTPError as exc:
+            raw_headers = getattr(exc, "headers", None)
             raise _error_for_status(
                 exc.code,
-                _lowered(exc.headers.items()),
-                exc.read(_MAX_ERROR_BODY_BYTES + 1),
+                _lowered(raw_headers.items()) if raw_headers is not None else {},
+                _error_body(exc),
             ) from exc
         except urllib.error.URLError as exc:
             if isinstance(exc.reason, TimeoutError):
@@ -498,21 +500,33 @@ class _Reader(Protocol):
 def _read_bounded(reply: _Reader, *, deadline: float, timeout: float) -> bytes:
     """The whole success body, bounded in both time and size.
 
-    urllib's ``timeout`` is a per-socket-operation limit, so a server that
-    drips one chunk per interval could otherwise hold the call open far past
-    the caller's deadline; the check between chunks converts that into
-    :class:`ProviderTimeoutError`. The size cap converts a body no sane
-    completion produces into :class:`InvalidModelResponseError` instead of
-    unbounded memory growth.
+    urllib's ``timeout`` is a per-socket-operation limit, and a buffered
+    ``read(n)`` issues as many socket reads as it takes to fill ``n``
+    bytes — so a server dripping one byte per interval would never trip
+    either the socket timeout or a between-chunks clock check. Two
+    measures make the deadline real: each iteration reads with ``read1``
+    (at most one underlying socket read, buffer served first), so the
+    deadline check runs between every socket operation; and the socket
+    timeout is shrunk, best-effort, to the remaining deadline so the one
+    blocking read cannot overshoot it either. The size cap converts a
+    body no sane completion produces into
+    :class:`InvalidModelResponseError` instead of unbounded memory growth.
     """
+    read_one = getattr(reply, "read1", None)
     chunks = bytearray()
     while True:
-        if time.monotonic() > deadline:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
             raise ProviderTimeoutError(
                 f"the reply body did not complete within {timeout}s",
                 timeout_seconds=timeout,
             )
-        chunk = reply.read(_CHUNK_BYTES)
+        _tighten_timeout(reply, remaining)
+        chunk: bytes = (
+            read_one(_CHUNK_BYTES)
+            if callable(read_one)
+            else reply.read(_CHUNK_BYTES)
+        )
         if not chunk:
             return bytes(chunks)
         chunks += chunk
@@ -520,3 +534,39 @@ def _read_bounded(reply: _Reader, *, deadline: float, timeout: float) -> bytes:
             raise InvalidModelResponseError(
                 f"the reply body exceeds {_MAX_BODY_BYTES} bytes"
             )
+
+
+def _tighten_timeout(reply: object, remaining: float) -> None:
+    """Best effort: shrink the socket timeout to the remaining deadline so
+    the next blocking read cannot overshoot it. Reaches through stdlib
+    internals (``fp.raw._sock``) behind hasattr-style guards; when the
+    socket is not reachable this way, the per-operation timeout set at
+    ``urlopen`` still bounds the read."""
+    fp = getattr(reply, "fp", None)
+    raw = getattr(fp, "raw", None)
+    sock = getattr(raw, "_sock", None)
+    settimeout = getattr(sock, "settimeout", None)
+    if callable(settimeout):
+        # A socket mid-close may refuse; the urlopen timeout still holds.
+        with contextlib.suppress(OSError):
+            settimeout(remaining)
+
+
+def _error_body(exc: urllib.error.HTTPError) -> bytes:
+    """The error envelope, best effort and bounded.
+
+    The status and headers already classify the failure, so a body that
+    cannot be read — stalled mid-drain, dropped, or absent — degrades to
+    the status-code fallback rather than replacing a classified HTTP
+    failure with an untyped crash from inside the error handler.
+    """
+    try:
+        return exc.read(_MAX_ERROR_BODY_BYTES + 1)
+    except (
+        TimeoutError,
+        OSError,
+        ValueError,
+        AttributeError,
+        http.client.HTTPException,
+    ):
+        return b""

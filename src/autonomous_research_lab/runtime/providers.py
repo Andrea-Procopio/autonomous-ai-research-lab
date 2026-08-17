@@ -582,9 +582,12 @@ class UsageLedger:
 
         Returns whether anything was recorded, so a caller can tell
         recorded spend from unknown spend. A failure without accounting
-        adds nothing — unknown is not zero. Record each failed call
-        exactly once; a failure never also produced a ``ModelResponse``,
-        so it can never be double-counted against :meth:`record`.
+        adds nothing — unknown is not zero.
+
+        Call this once per caught failure. A failure never also produced
+        a ``ModelResponse``, so it cannot duplicate a success recorded via
+        :meth:`record` — but the ledger does not deduplicate: passing the
+        same error twice records its spend twice.
         """
         if error.accounting is None:
             return False
