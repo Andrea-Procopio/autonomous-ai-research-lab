@@ -15,17 +15,30 @@ from **facts and succeeded attempts**, never from ``history``:
   open, so it is re-offered and a retry is a new attempt.
 
 Work with an attempt currently queued or running is not re-offered.
+
+Propositions carry no status, so the generator *consumes* epistemic judgments
+where it needs standing: a hypothesis whose current assessment is SUPPORTED or
+REFUTED is treated as settled and not offered further derivation work. That is
+a generation policy reading assessments — the judgment itself was made
+elsewhere, by an assessor who signed it.
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Protocol
+from typing import Final, Protocol
 
 from ..core.actions import ResearchAction, ResearchActionType
+from ..core.assessment import AssessmentVerdict
 from ..core.decision import ActionCandidate
-from ..core.prediction import PredictionStatus
+from ..core.hypothesis import Hypothesis
 from ..core.state import ResearchState
+
+#: Verdicts this generator treats as settling a hypothesis. A generation
+#: policy, not epistemology: the assessments were made elsewhere.
+_SETTLED: Final = frozenset(
+    {AssessmentVerdict.SUPPORTED, AssessmentVerdict.REFUTED}
+)
 
 
 class CandidateGenerator(Protocol):
@@ -38,7 +51,7 @@ class CandidateGenerator(Protocol):
 class RuleBasedCandidateGenerator:
     @property
     def name(self) -> str:
-        return "rule-based:v0"
+        return "rule-based:v1"
 
     def generate(self, state: ResearchState) -> Sequence[ActionCandidate]:
         candidates: list[ActionCandidate] = []
@@ -59,6 +72,10 @@ class RuleBasedCandidateGenerator:
                 )
             )
 
+        def settled(hypothesis: Hypothesis) -> bool:
+            assessment = state.current_assessment(hypothesis.id)
+            return assessment is not None and assessment.verdict in _SETTLED
+
         if not state.hypotheses:
             offer(
                 ResearchActionType.GENERATE_HYPOTHESIS,
@@ -67,7 +84,7 @@ class RuleBasedCandidateGenerator:
             )
 
         for hypothesis in state.hypotheses:
-            if hypothesis.status.is_terminal:
+            if settled(hypothesis):
                 continue
             if not state.predictions_for(hypothesis.id):
                 offer(
@@ -78,12 +95,9 @@ class RuleBasedCandidateGenerator:
 
         for prediction in state.predictions:
             owner = state.hypothesis(prediction.hypothesis_id)
-            if owner is not None and owner.status.is_terminal:
+            if owner is not None and settled(owner):
                 continue
-            if (
-                prediction.status is PredictionStatus.UNTESTED
-                and not state.experiments_for(prediction.id)
-            ):
+            if not state.experiments_for(prediction.id):
                 offer(
                     ResearchActionType.DESIGN_EXPERIMENT,
                     f"prediction {prediction.id} has no experiment testing it",

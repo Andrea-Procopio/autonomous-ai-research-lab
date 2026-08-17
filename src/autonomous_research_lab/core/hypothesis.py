@@ -6,35 +6,20 @@ derived from it — each one a concrete, pre-registered commitment about a
 measurable quantity. A hypothesis with no predictions is not yet testable,
 and candidate generation treats deriving one as open work.
 
-``status`` is an operational lifecycle marker, updated only through the
-transition layer — typically when an :class:`~.assessment.EpistemicAssessment`
-targeting the hypothesis is committed. It is a cache of the current standing,
-never a substitute for the assessment that justified it.
+A hypothesis is a scientific proposition, and propositions do not carry
+truth status: what is currently believed about a hypothesis is the latest
+:class:`~.assessment.EpistemicAssessment` targeting it, queryable via
+``ResearchState.current_assessment``. An earlier design cached a lifecycle
+status here; it was removed because a cached standing on the proposition is
+exactly the shortcut — belief mutating the fact it is about — that this
+ontology exists to forbid.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
-from enum import StrEnum
+from dataclasses import dataclass, field
 
 from .ids import content_id
-
-
-class HypothesisStatus(StrEnum):
-    PROPOSED = "proposed"
-    UNDER_TEST = "under_test"
-    SUPPORTED = "supported"
-    FALSIFIED = "falsified"
-    INCONCLUSIVE = "inconclusive"
-    ABANDONED = "abandoned"
-
-    @property
-    def is_terminal(self) -> bool:
-        return self in {
-            HypothesisStatus.SUPPORTED,
-            HypothesisStatus.FALSIFIED,
-            HypothesisStatus.ABANDONED,
-        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,11 +28,14 @@ class Hypothesis:
     rationale: str = ""
     assumptions: tuple[str, ...] = ()
     question_id: str | None = None
+    """The research question this hypothesis attempts to answer. Nearly always
+    set: a hypothesis that answers no question has no scientific relevance to
+    anchor its utility to."""
+
     parent_id: str | None = None
     """Set when this hypothesis is a refinement of another, so refinement
     lineage survives in the state rather than only in a conversation log."""
 
-    status: HypothesisStatus = HypothesisStatus.PROPOSED
     id: str = field(default="")
 
     def __post_init__(self) -> None:
@@ -57,8 +45,3 @@ class Hypothesis:
             object.__setattr__(
                 self, "id", content_id("hyp", self.statement, self.parent_id)
             )
-
-    def with_status(self, status: HypothesisStatus) -> Hypothesis:
-        """Status changes preserve identity: a falsified hypothesis is the
-        same hypothesis, or every reference to it would dangle."""
-        return replace(self, status=status)

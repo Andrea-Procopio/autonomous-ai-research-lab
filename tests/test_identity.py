@@ -18,7 +18,12 @@ from autonomous_research_lab.core.claim import Claim
 from autonomous_research_lab.core.decision import DecisionRecord
 from autonomous_research_lab.core.experiment import ExperimentSpec
 from autonomous_research_lab.core.hypothesis import Hypothesis
-from autonomous_research_lab.core.prediction import Comparator, Prediction
+from autonomous_research_lab.core.prediction import (
+    Comparator,
+    Consistency,
+    Prediction,
+    PredictionTest,
+)
 from autonomous_research_lab.execution.executor import ExperimentJob
 
 ACTION = ResearchAction(action_type=ResearchActionType.ANALYZE, rationale="r")
@@ -67,6 +72,23 @@ class TestSemanticIdentity:
             )
 
         assert spec().id == spec().id
+
+    def test_a_prediction_test_inherits_its_results_occurrence(self) -> None:
+        """A test is content-addressed, but its content includes the result id
+        — so the same comparison on two different executions is two tests,
+        while replaying one comparison is idempotent."""
+
+        def test_of(result_id: str) -> PredictionTest:
+            return PredictionTest(
+                prediction_id="pred_1",
+                result_id=result_id,
+                metric="m",
+                observed=0.6,
+                consistency=Consistency.CONSISTENT,
+            )
+
+        assert test_of("res_1").id == test_of("res_1").id
+        assert test_of("res_1").id != test_of("res_2").id
 
 
 class TestOccurrenceIdentity:

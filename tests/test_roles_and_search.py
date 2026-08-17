@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from autonomous_research_lab.core.actions import ResearchAction, ResearchActionType
 from autonomous_research_lab.core.budget import ResearchBudget, ResourceCost
 from autonomous_research_lab.core.decision import (
@@ -7,12 +9,26 @@ from autonomous_research_lab.core.decision import (
     ActionUtility,
     EvaluatedCandidate,
 )
+from autonomous_research_lab.core.evidence import Evidence, EvidenceKind
+from autonomous_research_lab.core.hypothesis import Hypothesis
+from autonomous_research_lab.core.proposals import (
+    EvidenceProposal,
+    HypothesisProposal,
+    Proposal,
+    ProposalKind,
+)
 from autonomous_research_lab.core.state import ResearchState
 from autonomous_research_lab.orchestration.assignment import RegistryAssigner
 from autonomous_research_lab.orchestration.candidates import RuleBasedCandidateGenerator
 from autonomous_research_lab.orchestration.director import ResearchDirector
 from autonomous_research_lab.orchestration.evaluation import HeuristicUtilityEvaluator
-from autonomous_research_lab.roles.base import ResearchRole, RoleName, UtilityScore
+from autonomous_research_lab.roles.base import (
+    ResearchRole,
+    RoleContext,
+    RoleInvocation,
+    RoleName,
+    RoleSuitability,
+)
 from autonomous_research_lab.search.policy import GreedySearchPolicy
 
 STATE = ResearchState(objective="o")
@@ -23,8 +39,8 @@ FUNDED = ResearchState(
 
 
 class StubRole(ResearchRole):
-    """A role is a (name, authority, objective) triple; that is all the base
-    contract asks for, and all this stub supplies."""
+    """A role is (objective, information set, allowed actions, output
+    contract); this stub supplies the contract surface and nothing else."""
 
     def __init__(
         self,
@@ -44,8 +60,13 @@ class StubRole(ResearchRole):
     def supported_actions(self) -> frozenset[ResearchActionType]:
         return self._actions
 
-    def utility(self, state: ResearchState, action: ResearchAction) -> UtilityScore:
-        return UtilityScore(value=self._value)
+    def suitability(
+        self, state: ResearchState, action: ResearchAction
+    ) -> RoleSuitability:
+        return RoleSuitability(value=self._value)
+
+    def perform(self, invocation: RoleInvocation) -> tuple[Proposal, ...]:
+        raise NotImplementedError("stub role cannot act; no model provider exists")
 
 
 def action(action_type: ResearchActionType) -> ResearchAction:
@@ -79,17 +100,70 @@ class TestAssignment:
         )
         assert assigner.assign(STATE, action(ResearchActionType.RUN_EXPERIMENT)) is None
 
-    def test_roles_are_not_ranked_by_a_shared_reward(self) -> None:
-        """Each capable role scores the work by its own objective; assignment
-        picks the one that values it most, rather than a single global
-        score."""
-        keen = StubRole(RoleName.SKEPTIC, frozenset({ResearchActionType.FALSIFY}), 9.0)
-        indifferent = StubRole(
+    def test_the_most_suitable_capable_role_is_assigned(self) -> None:
+        """Suitability ranks *who* does already-selected work. It never fed
+        into whether the work was selected — that was ActionUtility's job,
+        upstream, and the two quantities share no code path."""
+        strong = StubRole(
+            RoleName.SKEPTIC, frozenset({ResearchActionType.FALSIFY}), 9.0
+        )
+        weak = StubRole(
             RoleName.PAPER_WRITER, frozenset({ResearchActionType.FALSIFY}), 1.0
         )
-        assigner = RegistryAssigner([indifferent, keen])
+        assigner = RegistryAssigner([weak, strong])
 
-        assert assigner.assign(STATE, action(ResearchActionType.FALSIFY)) is keen
+        assert assigner.assign(STATE, action(ResearchActionType.FALSIFY)) is strong
+
+
+class TestRoleInvocation:
+    def invocation(self) -> RoleInvocation:
+        return RoleInvocation(
+            role=RoleName.RESULT_ANALYST,
+            assignment=action(ResearchActionType.ANALYZE),
+            context=RoleContext(objective="o"),
+            allowed_actions=frozenset({ResearchActionType.ANALYZE}),
+            expected_output=frozenset({ProposalKind.EVIDENCE}),
+            budget=ResourceCost(model_tokens=4_000),
+        )
+
+    def test_assignment_must_be_within_allowed_actions(self) -> None:
+        with pytest.raises(ValueError, match="not among its allowed actions"):
+            RoleInvocation(
+                role=RoleName.RESULT_ANALYST,
+                assignment=action(ResearchActionType.RUN_EXPERIMENT),
+                context=RoleContext(),
+                allowed_actions=frozenset({ResearchActionType.ANALYZE}),
+                expected_output=frozenset({ProposalKind.EVIDENCE}),
+            )
+
+    def test_output_contract_is_checkable_per_proposal(self) -> None:
+        invocation = self.invocation()
+        evidence = EvidenceProposal(
+            evidence=Evidence(
+                result_id="res_1",
+                spec_id="exp_1",
+                kind=EvidenceKind.MEASUREMENT,
+                observation="x was 0.5",
+            ),
+            proposer="analyst",
+        )
+        off_contract = HypothesisProposal(
+            hypothesis=Hypothesis(statement="s"), proposer="analyst"
+        )
+        assert invocation.permits(evidence)
+        assert not invocation.permits(off_contract)
+
+    def test_invocations_are_occurrences(self) -> None:
+        assert self.invocation().id != self.invocation().id
+
+    def test_context_is_an_explicit_projection_not_the_state(self) -> None:
+        """The context carries selected objects, not a ResearchState: the
+        operational machinery — attempts, budget, audit trail — has no field
+        to arrive through."""
+        context = RoleContext(objective="o")
+        assert not hasattr(context, "attempts")
+        assert not hasattr(context, "budget")
+        assert not hasattr(context, "history")
 
 
 class TestGreedyPolicy:

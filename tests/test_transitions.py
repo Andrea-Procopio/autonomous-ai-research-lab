@@ -1,8 +1,8 @@
 """The transition layer: proposals are validated, then committed.
 
 Also the enforcement point for the roles-never-mutate-state invariant: state
-changes flow through ``commit`` alone (see ``test_layering.py`` for the
-structural half of that guarantee).
+changes flow through the ``commit`` functions alone (see ``test_layering.py``
+for the structural half of that guarantee).
 """
 
 from __future__ import annotations
@@ -21,12 +21,8 @@ from autonomous_research_lab.core.experiment import (
     ExperimentSpec,
     ExperimentStatus,
 )
-from autonomous_research_lab.core.hypothesis import Hypothesis, HypothesisStatus
-from autonomous_research_lab.core.prediction import (
-    Comparator,
-    Prediction,
-    PredictionStatus,
-)
+from autonomous_research_lab.core.hypothesis import Hypothesis
+from autonomous_research_lab.core.prediction import Comparator, Consistency, Prediction
 from autonomous_research_lab.core.proposals import (
     AssessmentProposal,
     ClaimProposal,
@@ -34,8 +30,10 @@ from autonomous_research_lab.core.proposals import (
     ExperimentProposal,
     HypothesisProposal,
     PredictionProposal,
+    QuestionProposal,
     ResultProposal,
 )
+from autonomous_research_lab.core.question import ResearchQuestion
 from autonomous_research_lab.core.state import ResearchState
 from autonomous_research_lab.evidence.store import InMemoryEvidenceStore
 from autonomous_research_lab.orchestration.transitions import TransitionError, commit
@@ -69,10 +67,12 @@ def with_experiment() -> tuple[ResearchState, InMemoryEvidenceStore]:
     return state, store
 
 
-def result(metrics: dict[str, float] | None = None) -> ExperimentResult:
+def result(
+    metrics: dict[str, float] | None = None, job_id: str = "job_1"
+) -> ExperimentResult:
     return ExperimentResult(
         spec_id=SPEC.id,
-        job_id="job_1",
+        job_id=job_id,
         status=ExperimentStatus.COMPLETED,
         command=("python", "run.py"),
         environment=Environment(python_version="3.11.0", platform="test"),
@@ -93,6 +93,33 @@ def evidence_for(res: ExperimentResult) -> Evidence:
 
 
 class TestReferentialValidation:
+    def test_question_parent_must_be_known(self) -> None:
+        orphan = ResearchQuestion(text="Sub-question?", parent_id="q_missing")
+        with pytest.raises(TransitionError, match="unknown parent"):
+            commit(
+                base_state(),
+                QuestionProposal(orphan, proposer="t"),
+                InMemoryEvidenceStore(),
+            )
+
+    def test_hypothesis_question_must_be_known(self) -> None:
+        orphan = Hypothesis(statement="s", question_id="q_missing")
+        with pytest.raises(TransitionError, match="unknown question"):
+            commit(
+                base_state(),
+                HypothesisProposal(orphan, proposer="t"),
+                InMemoryEvidenceStore(),
+            )
+
+    def test_hypothesis_refinement_parent_must_be_known(self) -> None:
+        orphan = Hypothesis(statement="s", parent_id="hyp_missing")
+        with pytest.raises(TransitionError, match="refines unknown"):
+            commit(
+                base_state(),
+                HypothesisProposal(orphan, proposer="t"),
+                InMemoryEvidenceStore(),
+            )
+
     def test_prediction_requires_known_hypothesis(self) -> None:
         with pytest.raises(TransitionError, match="unknown hypothesis"):
             commit(
@@ -158,45 +185,85 @@ class TestReferentialValidation:
             commit(state, ClaimProposal(claim, links=(link,), proposer="t"), store)
 
 
-class TestMechanicalConsequences:
-    def test_committing_an_experiment_puts_the_hypothesis_under_test(self) -> None:
-        state, _ = with_experiment()
-        hypothesis = state.hypothesis(HYPOTHESIS.id)
-        assert hypothesis is not None
-        assert hypothesis.status is HypothesisStatus.UNDER_TEST
+class TestMechanicalPredictionTests:
+    """Committing a result triggers the pre-registered check and records one
+    PredictionTest per execution. No role's opinion enters; nothing is ever
+    written onto the prediction itself."""
 
-    def test_evidence_commit_checks_the_prediction_mechanically(self) -> None:
-        """0.51 < 0.55: the pre-registered check fails the prediction, with no
-        role expressing an opinion anywhere."""
+    def test_inconsistent_observation_is_recorded_as_such(self) -> None:
+        """0.51 < 0.55: the observation is inconsistent with the prediction —
+        and the prediction object is untouched."""
         state, store = with_experiment()
         res = result()
         state = commit(state, ResultProposal(res, proposer="executor"), store)
-        state = commit(state, EvidenceProposal(evidence_for(res), proposer="t"), store)
 
-        prediction = state.prediction(PREDICTION.id)
-        assert prediction is not None
-        assert prediction.status is PredictionStatus.FAILED
-        assert prediction.id == PREDICTION.id  # identity preserved
+        (test,) = state.tests_for(PREDICTION.id)
+        assert test.result_id == res.id
+        assert test.observed == 0.51
+        assert test.consistency is Consistency.INCONSISTENT
+        assert state.prediction(PREDICTION.id) == PREDICTION  # proposition intact
 
-    def test_prediction_holds_when_the_number_clears_the_threshold(self) -> None:
+    def test_consistent_observation(self) -> None:
         state, store = with_experiment()
         res = result({"heads_rate": 0.61, "n_draws": 4000})
         state = commit(state, ResultProposal(res, proposer="executor"), store)
-        state = commit(state, EvidenceProposal(evidence_for(res), proposer="t"), store)
-        prediction = state.prediction(PREDICTION.id)
-        assert prediction is not None
-        assert prediction.status is PredictionStatus.HELD
+        (test,) = state.tests_for(PREDICTION.id)
+        assert test.consistency is Consistency.CONSISTENT
 
-    def test_unmeasurable_prediction_is_indeterminate(self) -> None:
+    def test_unmeasurable_result_is_inconclusive(self) -> None:
         state, store = with_experiment()
         res = result({"n_draws": 4000.0})
         state = commit(state, ResultProposal(res, proposer="executor"), store)
-        state = commit(state, EvidenceProposal(evidence_for(res), proposer="t"), store)
-        prediction = state.prediction(PREDICTION.id)
-        assert prediction is not None
-        assert prediction.status is PredictionStatus.INDETERMINATE
+        (test,) = state.tests_for(PREDICTION.id)
+        assert test.consistency is Consistency.INCONCLUSIVE
+        assert test.observed is None
 
-    def test_assessment_on_hypothesis_updates_its_lifecycle_status(self) -> None:
+    def test_failed_run_is_inconclusive(self) -> None:
+        state, store = with_experiment()
+        res = ExperimentResult(
+            spec_id=SPEC.id,
+            job_id="job_crash",
+            status=ExperimentStatus.FAILED,
+            command=("python", "run.py"),
+            environment=Environment(python_version="3.11.0", platform="test"),
+            failure_reason="exited with code 3",
+        )
+        state = commit(state, ResultProposal(res, proposer="executor"), store)
+        (test,) = state.tests_for(PREDICTION.id)
+        assert test.consistency is Consistency.INCONCLUSIVE
+        assert "did not complete" in test.detail
+
+    def test_every_replication_gets_its_own_test(self) -> None:
+        """Four runs, four coexisting tests — a mixed record is preserved as a
+        mixed record, and no layer collapses it into a verdict."""
+        state, store = with_experiment()
+        runs = (
+            ({"heads_rate": 0.58, "n_draws": 4000.0}, "job_1"),  # consistent
+            ({"heads_rate": 0.57, "n_draws": 4000.0}, "job_2"),  # consistent
+            ({"heads_rate": 0.49, "n_draws": 4000.0}, "job_3"),  # inconsistent
+            ({"n_draws": 4000.0}, "job_4"),  # inconclusive
+        )
+        for metrics, job_id in runs:
+            state = commit(
+                state,
+                ResultProposal(result(metrics, job_id=job_id), proposer="executor"),
+                store,
+            )
+
+        tests = state.tests_for(PREDICTION.id)
+        assert [t.consistency for t in tests] == [
+            Consistency.CONSISTENT,
+            Consistency.CONSISTENT,
+            Consistency.INCONSISTENT,
+            Consistency.INCONCLUSIVE,
+        ]
+        assert len({t.result_id for t in tests}) == 4
+
+
+class TestAssessments:
+    def test_assessment_settles_standing_without_touching_the_subject(self) -> None:
+        """The judgment is the assessment. The hypothesis — a proposition —
+        is bit-for-bit the same object after being assessed as refuted."""
         state, store = with_experiment()
         assessment = EpistemicAssessment(
             subject_id=HYPOTHESIS.id,
@@ -204,9 +271,8 @@ class TestMechanicalConsequences:
             method="test:v0",
         )
         state = commit(state, AssessmentProposal(assessment, proposer="t"), store)
-        hypothesis = state.hypothesis(HYPOTHESIS.id)
-        assert hypothesis is not None
-        assert hypothesis.status is HypothesisStatus.FALSIFIED
+
+        assert state.hypothesis(HYPOTHESIS.id) == HYPOTHESIS
         assert state.current_assessment(HYPOTHESIS.id) == assessment
 
     def test_superseding_assessment_becomes_current(self) -> None:

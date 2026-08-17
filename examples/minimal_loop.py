@@ -4,19 +4,22 @@
       -> director (candidates -> utilities -> policy) selects an action
       -> ActionAttempt begun
       -> demo role produces proposals / executor produces a result
-      -> transition layer validates and commits
-      -> ActionAttempt resolved with an ActionOutcome
-      -> DecisionRecord completed and logged
+      -> CommitBundle validated and committed atomically
+      -> attempt resolved inside the same transition
+      -> DecisionRecord completed and logged, state snapshot persisted
 
 The science here is a placeholder. What is being demonstrated is the shape of
 the loop: every number entering the state came out of a process that ran; the
-pre-registered prediction is checked mechanically at commit time; the claim's
-standing comes from an explicit epistemic assessment that names its method;
-and a failed attempt leaves work open rather than making it look done.
+pre-registered prediction is checked mechanically when the result commits,
+producing a PredictionTest per execution; the claim's standing comes from an
+explicit epistemic assessment that names its method; a failed attempt leaves
+work open rather than making it look done; and an attempt's entire effect
+commits atomically — a bundle the transition layer rejects changes nothing.
 
 The ``_perform`` handlers below are demo glue standing in for roles. Like real
 roles, they only *read* state and return proposals — every state change goes
-through :func:`~autonomous_research_lab.orchestration.transitions.commit`.
+through the transition layer in
+:mod:`autonomous_research_lab.orchestration.transitions`.
 
 Run with::
 
@@ -46,14 +49,15 @@ from autonomous_research_lab.core.budget import (
     ResourceCost,
 )
 from autonomous_research_lab.core.claim import Claim, EvidenceLink, EvidenceRelation
+from autonomous_research_lab.core.commit import CommitBundle
 from autonomous_research_lab.core.decision import DecisionRecord
 from autonomous_research_lab.core.evidence import Evidence, EvidenceKind
 from autonomous_research_lab.core.experiment import ExperimentSpec, ExperimentStatus
 from autonomous_research_lab.core.hypothesis import Hypothesis
 from autonomous_research_lab.core.prediction import (
     Comparator,
+    Consistency,
     Prediction,
-    PredictionStatus,
 )
 from autonomous_research_lab.core.proposals import (
     AssessmentProposal,
@@ -64,6 +68,7 @@ from autonomous_research_lab.core.proposals import (
     PredictionProposal,
     Proposal,
     ResultProposal,
+    payload_ids,
 )
 from autonomous_research_lab.core.question import ResearchQuestion
 from autonomous_research_lab.core.state import ResearchState
@@ -75,7 +80,11 @@ from autonomous_research_lab.orchestration.candidates import RuleBasedCandidateG
 from autonomous_research_lab.orchestration.director import ResearchDirector
 from autonomous_research_lab.orchestration.evaluation import HeuristicUtilityEvaluator
 from autonomous_research_lab.orchestration.trajectory import JsonlTrajectoryLogger
-from autonomous_research_lab.orchestration.transitions import commit
+from autonomous_research_lab.orchestration.transitions import (
+    TransitionError,
+    commit_bundle,
+)
+from autonomous_research_lab.persistence.state_store import FileStateStore
 from autonomous_research_lab.search.policy import GreedySearchPolicy
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -95,6 +104,8 @@ class LoopOutcome:
     halt_reason: str
     decisions: tuple[DecisionRecord, ...] = ()
     log_path: Path | None = None
+    states: FileStateStore | None = None
+    """Snapshot store holding every decision-boundary state of this run."""
 
     @property
     def actions(self) -> tuple[ResearchAction, ...]:
@@ -130,6 +141,7 @@ def run_minimal_loop(
     root = Path(run_root) if run_root else Path(mkdtemp())
     executor = LocalExecutor(root / "runs")
     store: EvidenceStore = InMemoryEvidenceStore()
+    states = FileStateStore(root)
     director = ResearchDirector(
         generator=RuleBasedCandidateGenerator(),
         evaluator=HeuristicUtilityEvaluator(),
@@ -137,10 +149,13 @@ def run_minimal_loop(
     )
     logger = JsonlTrajectoryLogger(log_path or root / "trajectory.jsonl")
     current = state if state is not None else initial_state()
+    states.persist(current)
     decisions: list[DecisionRecord] = []
 
     def halt(reason: str) -> LoopOutcome:
-        return LoopOutcome(current, store, reason, tuple(decisions), logger.path)
+        return LoopOutcome(
+            current, store, reason, tuple(decisions), logger.path, states
+        )
 
     for _ in range(max_steps):
         decision = director.decide(current)
@@ -151,6 +166,7 @@ def run_minimal_loop(
             return halt("policy declined every candidate")
         if action.action_type is ResearchActionType.STOP_INVESTIGATION:
             current = current.apply(action)
+            states.persist(current)
             record = decision.record.completed(
                 attempt_id=None, outcome=None, state_after_id=current.id
             )
@@ -167,22 +183,49 @@ def run_minimal_loop(
 
         try:
             proposals, cost = _perform(current, action, executor, store)
-            for proposal in proposals:
-                current = commit(current, proposal, store)
-            outcome = ActionOutcome(
-                status=AttemptStatus.SUCCEEDED,
-                produced=_produced_ids(proposals),
-                actual_cost=cost if not cost.is_zero else estimated,
+            bundle = CommitBundle(
+                attempt_id=attempt.id,
+                outcome=ActionOutcome(
+                    status=AttemptStatus.SUCCEEDED,
+                    produced=tuple(
+                        pid for proposal in proposals for pid in payload_ids(proposal)
+                    ),
+                    actual_cost=cost if not cost.is_zero else estimated,
+                ),
+                proposals=proposals,
             )
         except Exception as exc:  # demo-grade failure handling
-            outcome = ActionOutcome(
-                status=AttemptStatus.FAILED, error=str(exc), actual_cost=estimated
+            bundle = CommitBundle(
+                attempt_id=attempt.id,
+                outcome=ActionOutcome(
+                    status=AttemptStatus.FAILED, error=str(exc), actual_cost=estimated
+                ),
             )
 
-        current = current.resolve_attempt(attempt.resolved(outcome)).apply(action)
+        try:
+            current = commit_bundle(current, bundle, store)
+        except TransitionError as exc:
+            # The whole bundle was rejected; the attempt is still unresolved
+            # and the state unchanged. Resolve it as failed — on the record.
+            current = commit_bundle(
+                current,
+                CommitBundle(
+                    attempt_id=attempt.id,
+                    outcome=ActionOutcome(
+                        status=AttemptStatus.FAILED,
+                        error=str(exc),
+                        actual_cost=estimated,
+                    ),
+                ),
+                store,
+            )
+        outcome = _resolved_outcome(current, attempt.id)
+
+        current = current.apply(action)
         try:
             current = current.charge(outcome.actual_cost)
         except InsufficientBudgetError:
+            states.persist(current)
             record = decision.record.completed(
                 attempt_id=attempt.id, outcome=outcome, state_after_id=current.id
             )
@@ -190,6 +233,7 @@ def run_minimal_loop(
             decisions.append(record)
             return halt("budget exhausted mid-program")
 
+        states.persist(current)
         record = decision.record.completed(
             attempt_id=attempt.id, outcome=outcome, state_after_id=current.id
         )
@@ -199,25 +243,10 @@ def run_minimal_loop(
     return halt(f"step limit of {max_steps} reached")
 
 
-def _produced_ids(proposals: tuple[Proposal, ...]) -> tuple[str, ...]:
-    produced: list[str] = []
-    for proposal in proposals:
-        match proposal:
-            case HypothesisProposal():
-                produced.append(proposal.hypothesis.id)
-            case PredictionProposal():
-                produced.append(proposal.prediction.id)
-            case ExperimentProposal():
-                produced.append(proposal.spec.id)
-            case ResultProposal():
-                produced.append(proposal.result.id)
-            case EvidenceProposal():
-                produced.append(proposal.evidence.id)
-            case ClaimProposal():
-                produced.append(proposal.claim.id)
-            case AssessmentProposal():
-                produced.append(proposal.assessment.id)
-    return tuple(produced)
+def _resolved_outcome(state: ResearchState, attempt_id: str) -> ActionOutcome:
+    attempt = next(a for a in state.attempts if a.id == attempt_id)
+    assert attempt.outcome is not None
+    return attempt.outcome
 
 
 # -- demo roles ---------------------------------------------------------------
@@ -275,7 +304,7 @@ def _derive_prediction(action: ResearchAction) -> tuple[Proposal, ...]:
         threshold=BIAS_THRESHOLD,
         expectation=(
             f"The observed heads rate is at least {BIAS_THRESHOLD:.2f}; anything "
-            f"below fails the prediction."
+            f"below is inconsistent with the prediction."
         ),
     )
     return (PredictionProposal(prediction=prediction, proposer="demo:generator"),)
@@ -337,13 +366,17 @@ def _analyze(
     heads_rate = result.metrics["heads_rate"]
     n_draws = int(result.metrics["n_draws"])
     spec = state.experiment(result.spec_id)
-    prediction = state.prediction(spec.prediction_id) if spec else None
-    fails_prediction = prediction is not None and not prediction.check(heads_rate)
+    test = (
+        state.test_for_result(spec.prediction_id, result.id)
+        if spec is not None
+        else None
+    )
+    inconsistent = test is not None and test.consistency is Consistency.INCONSISTENT
 
     evidence = Evidence(
         result_id=result.id,
         spec_id=result.spec_id,
-        kind=EvidenceKind.NULL_RESULT if fails_prediction else EvidenceKind.MEASUREMENT,
+        kind=EvidenceKind.NULL_RESULT if inconsistent else EvidenceKind.MEASUREMENT,
         # Factual: what was measured, not what it means.
         observation=(
             f"Observed heads rate {heads_rate:.4f} over {n_draws} draws "
@@ -352,6 +385,13 @@ def _analyze(
         metrics={"heads_rate": heads_rate, "n_draws": float(n_draws)},
     )
     return (EvidenceProposal(evidence=evidence, proposer="demo:analyst"),)
+
+
+_RELATION_FOR: dict[Consistency, EvidenceRelation] = {
+    Consistency.CONSISTENT: EvidenceRelation.SUPPORTS,
+    Consistency.INCONSISTENT: EvidenceRelation.CONTRADICTS,
+    Consistency.INCONCLUSIVE: EvidenceRelation.INCONCLUSIVE,
+}
 
 
 def _synthesize(
@@ -364,25 +404,23 @@ def _synthesize(
     assert prediction is not None
     hypothesis = state.hypothesis(prediction.hypothesis_id)
     assert hypothesis is not None
+    test = state.test_for_result(prediction.id, evidence.result_id)
+    assert test is not None
 
     claim = Claim(
         statement=hypothesis.statement,
         scope=spec.procedure,
         hypothesis_id=hypothesis.id,
     )
-    relation = (
-        EvidenceRelation.CONTRADICTS
-        if prediction.status is PredictionStatus.FAILED
-        else EvidenceRelation.SUPPORTS
-    )
     link = EvidenceLink(
         claim_id=claim.id,
         evidence_id=evidence.id,
-        relation=relation,
+        relation=_RELATION_FOR[test.consistency],
         rationale=(
             f"Pre-registered prediction {prediction.id} "
             f"({prediction.metric} {prediction.comparator} "
-            f"{prediction.threshold}) resolved {prediction.status}."
+            f"{prediction.threshold}) tested {test.consistency} against "
+            f"result {test.result_id}: {test.detail}."
         ),
     )
     return (ClaimProposal(claim=claim, links=(link,), proposer="demo:analyst"),)
@@ -392,23 +430,31 @@ def _assess(state: ResearchState, action: ResearchAction) -> tuple[Proposal, ...
     claim = state.claim(action.targets[0])
     assert claim is not None
     hypothesis = state.hypothesis(claim.hypothesis_id) if claim.hypothesis_id else None
-    predictions = (
-        state.predictions_for(hypothesis.id) if hypothesis is not None else ()
+    tests = (
+        tuple(
+            test
+            for prediction in state.predictions_for(hypothesis.id)
+            for test in state.tests_for(prediction.id)
+        )
+        if hypothesis is not None
+        else ()
     )
-    prediction = predictions[0] if predictions else None
     evidence_ids = tuple(
         link.evidence_id
         for link in state.evidence_links
         if link.claim_id == claim.id
     )
 
-    failed = prediction is not None and prediction.status is PredictionStatus.FAILED
-    verdict = AssessmentVerdict.REFUTED if failed else AssessmentVerdict.UNDETERMINED
+    inconsistent = [t for t in tests if t.consistency is Consistency.INCONSISTENT]
+    consistent = [t for t in tests if t.consistency is Consistency.CONSISTENT]
+    refuted = bool(inconsistent) and not consistent
+    verdict = AssessmentVerdict.REFUTED if refuted else AssessmentVerdict.UNDETERMINED
     rationale = (
-        "The single pre-registered prediction failed under its stated "
-        "condition; no auxiliary-assumption escape has been argued."
-        if failed
-        else "The evidence considered does not yet license a lean."
+        f"All {len(inconsistent)} conclusive test(s) of the pre-registered "
+        f"prediction(s) were inconsistent under their stated conditions; no "
+        f"auxiliary-assumption escape has been argued."
+        if refuted
+        else "The tests considered do not yet license a lean."
     )
 
     proposals: list[Proposal] = [
@@ -418,7 +464,7 @@ def _assess(state: ResearchState, action: ResearchAction) -> tuple[Proposal, ...
                 verdict=verdict,
                 method="demo:prediction-check-v0",
                 evidence_ids=evidence_ids,
-                confidence=0.7 if failed else None,
+                confidence=0.7 if refuted else None,
                 scope=claim.scope,
                 rationale=rationale,
             ),
@@ -433,7 +479,7 @@ def _assess(state: ResearchState, action: ResearchAction) -> tuple[Proposal, ...
                     verdict=verdict,
                     method="demo:prediction-check-v0",
                     evidence_ids=evidence_ids,
-                    confidence=0.7 if failed else None,
+                    confidence=0.7 if refuted else None,
                     rationale=rationale,
                 ),
                 proposer="demo:assessor",
@@ -454,14 +500,18 @@ def main() -> None:
 
     print("\nhypotheses:")
     for hypothesis in state.hypotheses:
-        print(f"  [{hypothesis.status}] {hypothesis.statement}")
+        assessment = state.current_assessment(hypothesis.id)
+        verdict = assessment.verdict if assessment else "unassessed"
+        print(f"  [{verdict}] {hypothesis.statement}")
 
     print("\npredictions:")
     for prediction in state.predictions:
         print(
-            f"  [{prediction.status}] {prediction.metric} "
-            f"{prediction.comparator} {prediction.threshold} | {prediction.condition}"
+            f"  {prediction.metric} {prediction.comparator} "
+            f"{prediction.threshold} | {prediction.condition}"
         )
+        for test in state.tests_for(prediction.id):
+            print(f"      [{test.consistency}] {test.detail}")
 
     print("\nclaims:")
     graph = ClaimEvidenceGraph.from_state(state, outcome.store)
@@ -481,6 +531,8 @@ def main() -> None:
         f"{remaining.model_tokens} model tokens"
     )
     print(f"trajectory log: {outcome.log_path}")
+    if outcome.states is not None:
+        print(f"state snapshots: {len(outcome.states.state_ids())} persisted")
 
 
 if __name__ == "__main__":

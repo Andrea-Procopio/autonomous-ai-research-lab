@@ -102,9 +102,19 @@ class DecisionRecord:
     generator: str
     evaluator: str
     policy: str
+    assigned_role: str | None = None
+    """The role assigned to perform the selected action, when routing
+    happened. Preserved so trajectories can later answer whether role
+    specialization helps — a question about (action, role, outcome) triples."""
+
     attempt_id: str | None = None
     outcome: ActionOutcome | None = None
     state_after_id: str | None = None
+    """With state snapshots persisted, ``state_before_id`` and
+    ``state_after_id`` double as references into the state store, so the full
+    (state, candidates, selection, outcome, state') tuple reconstructs
+    offline."""
+
     id: str = field(default="")
 
     def __post_init__(self) -> None:
@@ -117,12 +127,16 @@ class DecisionRecord:
         attempt_id: str | None,
         outcome: ActionOutcome | None,
         state_after_id: str,
+        assigned_role: str | None = None,
     ) -> DecisionRecord:
         return replace(
             self,
             attempt_id=attempt_id,
             outcome=outcome,
             state_after_id=state_after_id,
+            assigned_role=assigned_role
+            if assigned_role is not None
+            else self.assigned_role,
         )
 
     @property

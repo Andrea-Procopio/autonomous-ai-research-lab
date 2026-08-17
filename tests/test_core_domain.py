@@ -9,11 +9,12 @@ from autonomous_research_lab.core.budget import (
     ResourceCost,
 )
 from autonomous_research_lab.core.experiment import ExperimentSpec
-from autonomous_research_lab.core.hypothesis import Hypothesis, HypothesisStatus
+from autonomous_research_lab.core.hypothesis import Hypothesis
 from autonomous_research_lab.core.prediction import (
     Comparator,
+    Consistency,
     Prediction,
-    PredictionStatus,
+    PredictionTest,
 )
 from autonomous_research_lab.core.state import ResearchState
 
@@ -60,9 +61,65 @@ class TestPrediction:
         assert prediction.check(1.05)
         assert not prediction.check(1.2)
 
-    def test_status_change_preserves_identity(self) -> None:
+    def test_a_prediction_is_a_proposition_and_carries_no_status(self) -> None:
+        """The empirical record about a prediction lives in PredictionTest
+        objects, one per bearing execution — never on the proposition."""
         prediction = make_prediction()
-        assert prediction.with_status(PredictionStatus.FAILED).id == prediction.id
+        assert not hasattr(prediction, "status")
+        assert not hasattr(prediction, "with_status")
+
+
+class TestPredictionTest:
+    def test_conclusive_test_requires_an_observation(self) -> None:
+        with pytest.raises(ValueError, match="observed value"):
+            PredictionTest(
+                prediction_id="pred_1",
+                result_id="res_1",
+                metric="m",
+                observed=None,
+                consistency=Consistency.CONSISTENT,
+            )
+
+    def test_contradictory_tests_of_one_prediction_coexist(self) -> None:
+        """Run 1 consistent, run 2 inconsistent, run 3 inconclusive: three
+        facts, three records, no verdict anywhere."""
+
+        def test_for(result_id: str, consistency: Consistency) -> PredictionTest:
+            observed = None if consistency is Consistency.INCONCLUSIVE else 0.6
+            return PredictionTest(
+                prediction_id="pred_1",
+                result_id=result_id,
+                metric="m",
+                observed=observed,
+                consistency=consistency,
+            )
+
+        state = ResearchState(objective="o")
+        state = state.record_prediction_test(test_for("res_1", Consistency.CONSISTENT))
+        state = state.record_prediction_test(
+            test_for("res_2", Consistency.INCONSISTENT)
+        )
+        state = state.record_prediction_test(
+            test_for("res_3", Consistency.INCONCLUSIVE)
+        )
+
+        tests = state.tests_for("pred_1")
+        assert [t.consistency for t in tests] == [
+            Consistency.CONSISTENT,
+            Consistency.INCONSISTENT,
+            Consistency.INCONCLUSIVE,
+        ]
+
+    def test_recording_the_same_test_twice_is_idempotent(self) -> None:
+        test = PredictionTest(
+            prediction_id="pred_1",
+            result_id="res_1",
+            metric="m",
+            observed=0.6,
+            consistency=Consistency.CONSISTENT,
+        )
+        state = ResearchState(objective="o").record_prediction_test(test)
+        assert state.record_prediction_test(test) is state
 
 
 class TestHypothesis:
@@ -70,12 +127,12 @@ class TestHypothesis:
         with pytest.raises(ValueError, match="non-empty"):
             Hypothesis(statement="   ")
 
-    def test_status_change_preserves_identity(self) -> None:
-        """A falsified hypothesis is the same hypothesis. If its id changed,
-        every reference to it — from predictions, claims, assessments —
-        would dangle."""
+    def test_a_hypothesis_is_a_proposition_and_carries_no_status(self) -> None:
+        """Current standing is the latest assessment targeting the hypothesis
+        (ResearchState.current_assessment), never a field on it."""
         hypothesis = make_hypothesis()
-        assert hypothesis.with_status(HypothesisStatus.FALSIFIED).id == hypothesis.id
+        assert not hasattr(hypothesis, "status")
+        assert not hasattr(hypothesis, "with_status")
 
 
 class TestExperimentSpec:
@@ -97,25 +154,39 @@ class TestResearchState:
         assert evolved.id != state.id
 
     def test_upsert_replaces_in_place_rather_than_appending(self) -> None:
+        """Content id ignores the rationale, so a re-proposed hypothesis with
+        a better rationale replaces the original rather than duplicating it."""
         hypothesis = make_hypothesis()
+        refined = Hypothesis(statement=hypothesis.statement, rationale="sharper")
+        assert refined.id == hypothesis.id
+
         state = ResearchState(objective="Understand Z.").upsert_hypothesis(hypothesis)
-        updated = state.upsert_hypothesis(
-            hypothesis.with_status(HypothesisStatus.FALSIFIED)
-        )
+        updated = state.upsert_hypothesis(refined)
 
         assert len(updated.hypotheses) == 1
-        assert updated.hypotheses[0].status is HypothesisStatus.FALSIFIED
+        assert updated.hypotheses[0].rationale == "sharper"
 
-    def test_sibling_states_with_different_statuses_are_different_states(self) -> None:
-        hypothesis = make_hypothesis()
-        base = ResearchState(objective="o").upsert_hypothesis(hypothesis)
-        falsified = base.upsert_hypothesis(
-            hypothesis.with_status(HypothesisStatus.FALSIFIED)
+    def test_states_with_different_tests_are_different_states(self) -> None:
+        base = ResearchState(objective="o")
+        consistent = base.record_prediction_test(
+            PredictionTest(
+                prediction_id="pred_1",
+                result_id="res_1",
+                metric="m",
+                observed=0.6,
+                consistency=Consistency.CONSISTENT,
+            )
         )
-        supported = base.upsert_hypothesis(
-            hypothesis.with_status(HypothesisStatus.SUPPORTED)
+        inconsistent = base.record_prediction_test(
+            PredictionTest(
+                prediction_id="pred_1",
+                result_id="res_1",
+                metric="m",
+                observed=0.4,
+                consistency=Consistency.INCONSISTENT,
+            )
         )
-        assert falsified.id != supported.id
+        assert consistent.id != inconsistent.id
 
     def test_history_records_the_actions_taken(self) -> None:
         action = ResearchAction(

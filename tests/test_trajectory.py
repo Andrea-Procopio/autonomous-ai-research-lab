@@ -48,10 +48,11 @@ class TestDecisionRecord:
         assert record.evaluated, "no candidates recorded"
         for evaluated in record.evaluated:
             assert evaluated.utility.method == "heuristic:v0"
-        assert record.generator == "rule-based:v0"
+        assert record.generator == "rule-based:v1"
         assert record.evaluator == "heuristic:v0"
         assert record.policy == "greedy:v0"
         assert record.selected_action_id is not None
+        assert record.assigned_role is None  # no roles exist yet; slot is live
 
     def test_completion_preserves_identity(self) -> None:
         decision = director().decide(funded_state())
@@ -59,11 +60,15 @@ class TestDecisionRecord:
             status=AttemptStatus.SUCCEEDED, actual_cost=ResourceCost(usd=1.0)
         )
         completed = decision.record.completed(
-            attempt_id="att_x", outcome=outcome, state_after_id="st_after"
+            attempt_id="att_x",
+            outcome=outcome,
+            state_after_id="st_after",
+            assigned_role="skeptic",
         )
         assert completed.id == decision.record.id
         assert completed.outcome == outcome
         assert completed.state_after_id == "st_after"
+        assert completed.assigned_role == "skeptic"
 
     def test_predicted_cost_reads_the_selected_candidates_estimate(self) -> None:
         decision = director().decide(funded_state())
@@ -85,6 +90,7 @@ class TestJsonlLogger:
         assert row["state_before_id"] == funded_state().id
         assert row["policy"] == "greedy:v0"
         assert "logged_at" in row
+        assert "assigned_role" in row  # serialized even while always None
         evaluated = row["evaluated"]
         assert isinstance(evaluated, list) and evaluated
         first = evaluated[0]

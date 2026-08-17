@@ -1,13 +1,16 @@
 """Deciding who performs a chosen action.
 
 Kept separate from the director because "what should we do next" and "who
-should do it" are different decisions with different failure modes, and folding
-them together is how a system ends up with a single manager object that owns
-everything.
+should do it" are different decisions with different failure modes, and
+folding them together is how a system ends up with a single manager object
+that owns everything. The split, stated once:
 
-Assignment consults each capable role's own utility, so the choice reflects
-which role values the work most highly by its own objective, rather than a
-central ranking imposed on all of them.
+    ActionUtility     U(a | state)                     — is this worth doing?
+    RoleSuitability   ≈ P(role succeeds | action, state) — who should do it?
+
+Assignment happens strictly *after* selection: suitability never feeds back
+into which action is chosen, so "what is scientifically valuable" cannot
+quietly become "what our current roles are good at".
 """
 
 from __future__ import annotations
@@ -42,5 +45,5 @@ class RegistryAssigner:
             return None
         return max(
             capable,
-            key=lambda role: (role.utility(state, action).value, role.name),
+            key=lambda role: (role.suitability(state, action).value, role.name),
         )

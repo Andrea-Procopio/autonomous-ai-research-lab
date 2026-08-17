@@ -1,12 +1,12 @@
 """Pure domain types.
 
 This package has no dependencies on any sibling package — orchestration,
-roles, search, execution, evidence storage and knowledge all depend on ``core``
-and never the reverse. Keeping the dependency graph a DAG rooted here is what
-allows the scientific vocabulary to stay stable while the machinery around it
-is replaced. External validation libraries stay out for the same reason:
-validating model output is a boundary concern, and the boundary translates
-into these types rather than replacing them.
+roles, search, execution, evidence storage, knowledge and persistence all
+depend on ``core`` and never the reverse. Keeping the dependency graph a DAG
+rooted here is what allows the scientific vocabulary to stay stable while the
+machinery around it is replaced. External validation libraries stay out for
+the same reason: validating model output is a boundary concern, and the
+boundary translates into these types rather than replacing them.
 """
 
 from .actions import ResearchAction, ResearchActionType
@@ -19,6 +19,7 @@ from .budget import (
     ResourceCost,
 )
 from .claim import Claim, EvidenceLink, EvidenceRelation
+from .commit import CommitBundle
 from .decision import (
     ActionCandidate,
     ActionUtility,
@@ -33,9 +34,9 @@ from .experiment import (
     ExperimentStatus,
     ResultRef,
 )
-from .hypothesis import Hypothesis, HypothesisStatus
+from .hypothesis import Hypothesis
 from .ids import content_id, occurrence_id
-from .prediction import Comparator, Prediction, PredictionStatus
+from .prediction import Comparator, Consistency, Prediction, PredictionTest
 from .proposals import (
     AssessmentProposal,
     ClaimProposal,
@@ -44,9 +45,18 @@ from .proposals import (
     HypothesisProposal,
     PredictionProposal,
     Proposal,
+    ProposalKind,
+    QuestionProposal,
     ResultProposal,
+    kind_of,
+    payload_ids,
 )
 from .question import QuestionStatus, ResearchQuestion
+from .replication import (
+    ReplicationGroup,
+    group_replications,
+    replication_group_of,
+)
 from .serialize import to_jsonable
 from .state import ResearchState
 from .types import ConfigValue
@@ -62,8 +72,10 @@ __all__ = [
     "AttemptStatus",
     "Claim",
     "ClaimProposal",
+    "CommitBundle",
     "Comparator",
     "ConfigValue",
+    "Consistency",
     "DecisionRecord",
     "Environment",
     "EpistemicAssessment",
@@ -79,13 +91,15 @@ __all__ = [
     "ExperimentStatus",
     "Hypothesis",
     "HypothesisProposal",
-    "HypothesisStatus",
     "InsufficientBudgetError",
     "Prediction",
     "PredictionProposal",
-    "PredictionStatus",
+    "PredictionTest",
     "Proposal",
+    "ProposalKind",
+    "QuestionProposal",
     "QuestionStatus",
+    "ReplicationGroup",
     "ResearchAction",
     "ResearchActionType",
     "ResearchBudget",
@@ -95,6 +109,10 @@ __all__ = [
     "ResultProposal",
     "ResultRef",
     "content_id",
+    "group_replications",
+    "kind_of",
     "occurrence_id",
+    "payload_ids",
+    "replication_group_of",
     "to_jsonable",
 ]

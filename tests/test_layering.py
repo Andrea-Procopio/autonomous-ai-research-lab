@@ -26,6 +26,7 @@ STATE_MUTATORS = frozenset(
         "add_experiment",
         "record_result",
         "record_evidence",
+        "record_prediction_test",
         "upsert_claim",
         "link_evidence",
         "record_assessment",

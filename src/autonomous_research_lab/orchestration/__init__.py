@@ -13,7 +13,7 @@ from .candidates import CandidateGenerator, RuleBasedCandidateGenerator
 from .director import Decision, ResearchDirector
 from .evaluation import HeuristicUtilityEvaluator, UtilityEvaluator
 from .trajectory import JsonlTrajectoryLogger
-from .transitions import TransitionError, commit
+from .transitions import TransitionError, commit, commit_bundle
 
 __all__ = [
     "CandidateGenerator",
@@ -27,4 +27,5 @@ __all__ = [
     "TransitionError",
     "UtilityEvaluator",
     "commit",
+    "commit_bundle",
 ]

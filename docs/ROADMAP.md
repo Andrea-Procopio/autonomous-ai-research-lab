@@ -24,9 +24,11 @@ in the loop, producing results that survive scrutiny.
   alternative explanations in the system's own work. Early rather than late: a
   loop without one drifts toward self-confirmation, and retrofitting adversarial
   review is much harder than building around it.
-- **Persistence.** `ResearchState` and the evidence store written to disk, so a
-  program can be stopped, resumed and audited. Content-addressed ids exist
-  partly for this.
+- **Persistence.** Partly done: `ResearchState` snapshots persist to disk
+  content-addressed (`persistence/`), and trajectory records reference them,
+  so a run is auditable and reconstructible offline. Still open: a durable
+  evidence store behind the existing `EvidenceStore` protocol, and
+  resume-from-snapshot orchestration.
 - **Literature access.** Search and retrieval, with findings entering the state
   as structured objects carrying their sources.
 - **Real experiment execution.** ML training runs under the existing executor
