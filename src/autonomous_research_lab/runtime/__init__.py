@@ -90,6 +90,14 @@ from .verification import (
     outcome_standing,
     verify_analysis_coverage,
 )
+from .verification_store import (
+    FileVerificationStore,
+    InMemoryVerificationStore,
+    VerificationConflictError,
+    VerificationRecord,
+    VerificationStore,
+    verification_record,
+)
 
 __all__ = [
     "COMPACT_METHOD",
@@ -105,9 +113,11 @@ __all__ = [
     "EscalationSignals",
     "EvaluationHooks",
     "ExperimentValidityStatus",
+    "FileVerificationStore",
     "HeldOutAccess",
     "HeldOutAccessError",
     "ImplementationVerifier",
+    "InMemoryVerificationStore",
     "JobLike",
     "JsonlRuntimeMetrics",
     "Level",
@@ -132,7 +142,10 @@ __all__ = [
     "ValidationReport",
     "ValidityDimension",
     "VerificationCheck",
+    "VerificationConflictError",
+    "VerificationRecord",
     "VerificationReport",
+    "VerificationStore",
     "as_action_utility",
     "build_frontier",
     "derive_validity",
@@ -145,6 +158,7 @@ __all__ = [
     "run_preflight",
     "sha256_of",
     "validate_result",
+    "verification_record",
     "verify_analysis_coverage",
     "verify_artifact_integrity",
 ]

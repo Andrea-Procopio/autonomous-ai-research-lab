@@ -108,6 +108,14 @@ class StepMetrics:
     statement about engineering, never about the scientific outcome — a
     repaired experiment yielding a valid negative is a debugging success."""
 
+    implementation_debug_attempts: int = 0
+    implementation_debug_resolved: bool = False
+    """Bounded implementation repair of a completed run, entered only on
+    typed implementation-invalidity evidence (failed control, verifier
+    FAIL) — never on the scientific outcome. Resolution means the
+    reimplementation earned a fresh verification whose implementation
+    dimension no longer fails."""
+
     verification_status: str = ""
     """``ExperimentValidityStatus`` of this step's committed completed
     result, when verification ran."""
@@ -117,6 +125,10 @@ class StepMetrics:
     methodology_rejected: bool = False
     implementation_rejected: bool = False
     analysis_rejected: bool = False
+    promotion_blocked: bool = False
+    """A proposal tried to cite unverified observation as trusted scientific
+    support this step and was rejected by the promotion gate."""
+
     negative_result_verdict: str = ""
     """For a conclusive negative outcome this step: ``"accepted"`` when it
     was promoted to verified scientific evidence, ``"deferred"`` when the

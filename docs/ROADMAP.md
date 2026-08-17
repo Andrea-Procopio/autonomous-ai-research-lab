@@ -36,12 +36,16 @@ in the loop, producing results that survive scrutiny.
 - **Scientific debugging and experiment verification.** Done in its Phase 1
   form: the five-way failure taxonomy (engineering / implementation /
   methodological / analytical / verified), a deterministic failure
-  classifier, the bounded debug loop, preflight, positive controls,
-  selective implementation verification, the methodology gate, analysis
-  coverage, and the negative-result gate — all flag-gated and removable
-  (see ARCHITECTURE). Still open: model-backed repair strategies and
-  reviewers behind the existing protocols, and richer experiment-specific
-  control libraries.
+  classifier, bounded execution *and* implementation repair (the latter
+  entered only on typed implementation-invalidity evidence), preflight,
+  positive controls, selective implementation verification, the
+  methodology gate, analysis coverage, the negative-result gate, durable
+  per-result verification records, and the scientific-promotion gate that
+  keeps unverified observation from becoming trusted support — all
+  flag-gated and removable (see ARCHITECTURE). Still open: model-backed
+  repair strategies and reviewers behind the existing protocols, richer
+  experiment-specific control libraries, and gating for results committed
+  before the verification layer was wired in.
 - **Statistician and Verifier.** Real inference behind `EpistemicAssessment` —
   today's assessments are demo-grade prediction checks; these roles bring
   power, uncertainty, and multiple-comparison awareness — plus provenance

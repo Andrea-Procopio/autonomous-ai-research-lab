@@ -104,6 +104,7 @@ def test_a_repairable_failure_is_repaired_and_fully_audited(
     # Retry numbering, diagnosis, rationale, and each rerun's own result
     # (with its cost) survive per attempt.
     assert (first.number, second.number) == (1, 2)
+    assert first.diagnosis is not None
     assert first.diagnosis.category is FailureCategory.NONZERO_EXIT
     assert "swap in script" in first.repair_rationale
     assert not first.result.succeeded

@@ -450,13 +450,25 @@ The pieces, all removable for ablation:
   missing path, missing/malformed metrics, missing artifact. Conservative
   (`UNKNOWN`/`UNCERTAIN` when signals are ambiguous) and structurally blind
   to science: a completed run is `NONE` no matter what its metrics say.
-* **Bounded debug loop** (`orchestration/debug_loop.py`): diagnose →
-  propose repair (with its rationale) → rerun as a *new* job → stop at
-  `max_debug_attempts`. Every retry is a separate auditable `DEBUG` attempt
-  committed through the same validation gate, billed at its actual cost,
-  with the previous result, logs and diagnosis preserved. Entry is by
-  failure diagnosis only: the debugger *raises* on a completed result, so
-  `while result_is_scientifically_bad: debug()` cannot be written.
+* **Bounded repair loops** (`orchestration/debug_loop.py`), two
+  structurally separate entries over shared machinery. *Execution repair*:
+  diagnose a failed process → propose repair (with its rationale) → rerun
+  as a *new* job → stop at `max_debug_attempts`; entry is by failure
+  diagnosis only — the debugger *raises* on a completed result.
+  *Implementation repair*: a **completed** run may be repaired, but only
+  through an `ImplementationRepairTrigger`, whose constructor accepts
+  nothing but implementation-dimension verification checks with at least
+  one FAIL (a failed positive control, a verifier FAIL, a deterministic
+  invariant violation). A prediction test, a small effect, or an
+  underperforming baseline cannot be expressed as such a trigger, so
+  `while result_is_scientifically_bad: debug()` cannot be written against
+  either entry. Every retry, on either path, is a separate auditable
+  `DEBUG` attempt committed through the same validation gate and billed at
+  its actual cost; the original invalid result and its verification record
+  are never deleted or rewritten, and a reimplementation must *earn* its
+  own fresh verification — repair resolves only when the new run's
+  implementation dimension no longer fails, which still says nothing about
+  its scientific outcome.
 * **Preflight** (`runtime/preflight.py`): cheap deterministic pre-execution
   checks (command resolves, declared input paths exist, seed propagated)
   behind a small extensible interface; a failed check prevents the launch
@@ -490,6 +502,22 @@ The pieces, all removable for ablation:
   are all positively resolved. Anything less preserves the observation in
   the explicit observed-but-unresolved state — and under no status is a
   result routed to debugging merely for being negative (pinned by test).
+* **Durable verification records** (`runtime/verification_store.py`): every
+  verified result's report, validity and standing become a record keyed by
+  result id — id never maps to different content, verdicts are never
+  rewritten, and repair produces a new result with a new record. In-memory
+  and one-JSON-file-per-record implementations; absence of a record marks
+  a result that was run with verification ablated.
+* **The scientific-promotion gate** (in the runtime loop, pre-commit):
+  raw observation ≠ verified scientific support. A SUPPORTS/CONTRADICTS
+  evidence link or a conclusive assessment may cite evidence only when the
+  durable record behind it stands at `VERIFIED_EVIDENCE`; anything less is
+  rejected before commit — deterministically, from the record, with no
+  model consulted. Inspection is never blocked: unresolved observations
+  stay in the evidence store, may be cited as INCONCLUSIVE, may ground
+  UNDETERMINED assessments, and reach reasoning seats annotated with their
+  standing through context notes. Results with no record (the ablated lab)
+  keep legacy semantics.
 
 Deterministic checks always outrank semantic review: dimension aggregation
 treats any deterministic `FAIL` as final, so no model verdict can wash out

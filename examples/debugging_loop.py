@@ -65,6 +65,9 @@ from autonomous_research_lab.runtime.verification import (
     ValidityDimension,
     VerificationCheck,
 )
+from autonomous_research_lab.runtime.verification_store import (
+    FileVerificationStore,
+)
 
 QUESTION = ResearchQuestion(
     text="Does the sampler's draw stream lean toward heads?"
@@ -294,6 +297,8 @@ def _runtime(
         methodology_reviewer=RuleBasedMethodologist(),
         implementation_verifier=RuleBasedVerifier(),
         control_source=lambda spec: (PROBE_CONTROL,),  # noqa: ARG005
+        # Verdicts are durable: one JSON per result, reloadable later.
+        verifications=FileVerificationStore(root / "verifications"),
     )
 
 
@@ -358,6 +363,12 @@ def main() -> None:
         f"  C executed: {bool(report_c.state.results)} "
         f"(methodology rejected before execution)"
     )
+    stored = FileVerificationStore(root / "case_b" / "verifications").records()
+    for verdict in stored:
+        print(
+            f"  durable verdict on disk: {verdict.result_id} -> "
+            f"{verdict.validity} ({verdict.standing})"
+        )
 
 
 if __name__ == "__main__":

@@ -67,13 +67,18 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 from ..core.actions import ResearchAction, ResearchActionType
+from ..core.assessment import AssessmentVerdict
 from ..core.attempt import ActionAttempt, ActionOutcome, AttemptStatus
 from ..core.budget import NO_COST, ResearchBudget, ResourceCost
+from ..core.claim import EvidenceRelation
 from ..core.commit import CommitBundle
 from ..core.decision import DecisionRecord
+from ..core.evidence import Evidence
 from ..core.experiment import ExperimentResult, ExperimentSpec
 from ..core.prediction import Consistency
 from ..core.proposals import (
+    AssessmentProposal,
+    ClaimProposal,
     EvidenceProposal,
     ExperimentProposal,
     Proposal,
@@ -81,7 +86,7 @@ from ..core.proposals import (
     payload_ids,
 )
 from ..core.state import ResearchState
-from ..evidence.store import EvidenceStore
+from ..evidence.store import EvidenceStore, UnknownRecordError
 from ..execution.failure_classifier import diagnose_failure
 from ..persistence.state_store import FileStateStore
 from ..roles.base import ResearchRole, RoleContext, RoleInvocation, RoleName
@@ -118,13 +123,21 @@ from ..runtime.verification import (
     ValidityDimension,
     VerificationCheck,
     VerificationReport,
-    derive_validity,
     evaluate_controls,
-    outcome_standing,
     verify_analysis_coverage,
 )
+from ..runtime.verification_store import (
+    InMemoryVerificationStore,
+    VerificationStore,
+    verification_record,
+)
 from .critic_trigger import CriticTrigger
-from .debug_loop import DebugAttempt, ExperimentDebugger, is_debuggable
+from .debug_loop import (
+    DebugAttempt,
+    ExperimentDebugger,
+    ImplementationRepairTrigger,
+    is_debuggable,
+)
 from .director import Deliberation, FrontierDirector, deliberation_record
 from .routing import expected_proposals, route
 from .synthesis import SynthesisReview, SynthesisTrigger
@@ -153,6 +166,12 @@ class ValidationGateError(Exception):
         self.reports = reports
 
 
+class PromotionError(Exception):
+    """A proposal tried to promote unverified observation into trusted
+    scientific support. The observation itself is untouched — what is
+    rejected is the *use*, not the record."""
+
+
 @dataclass
 class _StepStats:
     """Verification/debugging accounting accumulated during one step and
@@ -161,6 +180,8 @@ class _StepStats:
     failure_category: str = ""
     debug_attempts: int = 0
     debug_resolved: bool = False
+    implementation_debug_attempts: int = 0
+    implementation_debug_resolved: bool = False
     verification: tuple[VerificationReport, ...] = ()
     verification_status: str = ""
     preflight_failed: bool = False
@@ -168,6 +189,7 @@ class _StepStats:
     methodology_rejected: bool = False
     implementation_rejected: bool = False
     analysis_rejected: bool = False
+    promotion_blocked: bool = False
     negative_result_verdict: str = ""
 
 
@@ -192,6 +214,12 @@ class StepReport:
 
     debug_attempts: int = 0
     debug_resolved: bool = False
+    implementation_debug_attempts: int = 0
+    implementation_debug_resolved: bool = False
+    """Implementation repair is accounted separately from execution repair:
+    the two entries share machinery but not preconditions, and the ablation
+    needs to see them apart."""
+
     notes: tuple[str, ...] = ()
     """Deterministic runtime notes raised this step (engineering failures,
     repeated execution failures, budget overruns, validity findings)."""
@@ -248,6 +276,14 @@ class ResearchRuntime:
     control_source: ControlSource | None = None
     """Experiment-specific positive controls, looked up per spec when
     ``config.positive_controls_enabled``."""
+
+    verifications: VerificationStore = field(
+        default_factory=InMemoryVerificationStore
+    )
+    """The durable verification record, keyed by result id. Written whenever
+    a completed result is verified (i.e. whenever any verification component
+    is wired); consulted by the scientific-promotion gate and projected into
+    role contexts. Swap in a ``FileVerificationStore`` for persistence."""
 
     _results_since_synthesis: int = field(default=0, init=False)
     _notes: tuple[str, ...] = field(default=(), init=False)
@@ -356,7 +392,7 @@ class ResearchRuntime:
         invocation = RoleInvocation(
             role=seat,
             assignment=action,
-            context=_context_for(state, self.store, action),
+            context=_context_for(state, self.store, self.verifications, action),
             allowed_actions=frozenset({action.action_type}),
             expected_output=expected_proposals(action.action_type),
             budget=estimated,
@@ -406,11 +442,14 @@ class ResearchRuntime:
             )
             try:
                 _check_contract(invocation, proposals, seat)
-                # The deterministic gate: nothing enters authoritative
-                # scientific state unless code has checked it. Raises before
-                # any commit. Unexpected exceptions from the checks
-                # themselves propagate — mislabeling an orchestration bug as
-                # a role failure would corrupt the record.
+                # The deterministic gates: nothing enters authoritative
+                # scientific state unless code has checked it, and no
+                # unverified observation is promoted into trusted support.
+                # Both raise before any commit. Unexpected exceptions from
+                # the checks themselves propagate — mislabeling an
+                # orchestration bug as a role failure would corrupt the
+                # record.
+                self._gate_promotions(proposals)
                 validation = _gate_results(
                     state, action, proposals, executed_results
                 )
@@ -424,6 +463,19 @@ class ResearchRuntime:
                         actual_cost=_actual_cost(executed_results, estimated),
                     ),
                     proposals=proposals,
+                )
+            except PromotionError as exc:
+                failures = 1
+                stats.promotion_blocked = True
+                step_notes.append(
+                    f"scientific promotion blocked: {exc} — the observation "
+                    f"is preserved; resolve its validity (or cite it as "
+                    f"inconclusive) before using it as support"
+                )
+                bundle = _failed_bundle(
+                    attempt.id,
+                    str(exc),
+                    _actual_cost(executed_results, estimated),
                 )
             except ValidationGateError as exc:
                 failures = 1
@@ -471,25 +523,32 @@ class ResearchRuntime:
         # -- Tier 0 aftermath of committed results ---------------------------
         critic_reasons: tuple[str, ...] = ()
         critic_invoked = False
+        implementation_invalid: list[tuple[ExperimentResult, VerificationReport]] = []
         if outcome.status is AttemptStatus.SUCCEEDED and committed_results:
             completed = tuple(r for r in committed_results if r.succeeded)
             self._results_since_synthesis += len(completed)
             for result in completed:
                 state = self._transcribe(state, result)
+                # Verify before any reasoning consumes the result: the
+                # durable record must exist by the time a critic (or any
+                # later seat) could try to cite this result's evidence, or
+                # the promotion gate would have nothing to enforce.
+                verification_notes, verify_invocations, report_v = (
+                    self._verify_result(state, result, stats)
+                )
+                step_notes.extend(verification_notes)
+                invocations += verify_invocations
+                if report_v is not None and _implementation_failures(report_v):
+                    implementation_invalid.append((result, report_v))
                 reasons = self._critic_reasons(state, result)
                 if reasons and not critic_reasons:
                     critic_reasons = reasons
                     if self.config.critic_enabled:
                         state, invoked = self._invoke_critic(
-                            state, result, reasons
+                            state, result, reasons, stats, step_notes
                         )
                         invocations += invoked
                         critic_invoked = invoked > 0
-                verification_notes, verify_invocations = self._verify_result(
-                    state, result, stats
-                )
-                step_notes.extend(verification_notes)
-                invocations += verify_invocations
             step_notes.extend(
                 self._execution_failure_notes(state, committed_results)
             )
@@ -505,6 +564,30 @@ class ResearchRuntime:
                 )
                 invocations += debug_invocations
                 executed_results = (*executed_results, *debug_results)
+                if exhausted:
+                    return self._finish(
+                        state, record, deliberation, tier, invocations, started,
+                        attempt_id=attempt.id, outcome=outcome, seat=seat,
+                        validation=validation, critic_reasons=critic_reasons,
+                        critic_invoked=critic_invoked, failures=failures,
+                        executed_results=executed_results,
+                        notes=tuple(step_notes), stats=stats,
+                        halt_reason="budget exhausted during debugging",
+                    )
+
+            # A completed run indicted by implementation-invalidity evidence
+            # (failed control, verifier FAIL) enters bounded implementation
+            # repair — the one path by which a *completed* run may be
+            # repaired, and it is unreachable from a prediction test.
+            if implementation_invalid:
+                invalid_result, invalid_report = implementation_invalid[0]
+                state, repair_invocations, repair_results, exhausted = (
+                    self._handle_implementation_invalidity(
+                        state, invalid_result, invalid_report, stats, step_notes
+                    )
+                )
+                invocations += repair_invocations
+                executed_results = (*executed_results, *repair_results)
                 if exhausted:
                     return self._finish(
                         state, record, deliberation, tier, invocations, started,
@@ -624,15 +707,21 @@ class ResearchRuntime:
 
     def _verify_result(
         self, state: ResearchState, result: ExperimentResult, stats: _StepStats
-    ) -> tuple[list[str], int]:
-        """Assemble the validity record of one committed completed result.
+    ) -> tuple[list[str], int, VerificationReport | None]:
+        """Assemble the validity record of one committed completed result
+        and store it durably, keyed by result id.
 
         Deterministic checks come first and are never overridable; the
         semantic verifier is consulted only when a deterministic signal (a
         failed or uncertain control) or an uncovered conclusive negative
-        justifies the spend. Returns the notes raised and the reasoning
-        invocations added.
+        justifies the spend. With no verification component wired at all
+        (full ablation), no record is produced — absence of a record is the
+        explicit marker of legacy, ungoverned results, and the promotion
+        gate treats it as such. Returns the notes raised, the reasoning
+        invocations added, and the report (``None`` when ablated).
         """
+        if not self._verification_wired():
+            return [], 0, None
         spec = state.experiment(result.spec_id)
         assert spec is not None  # the result could not have committed otherwise
         prediction = state.prediction(spec.prediction_id)
@@ -732,12 +821,16 @@ class ResearchRuntime:
         )
 
         report = VerificationReport(checks=tuple(checks))
-        validity = derive_validity(report)
+        # The verdict becomes a durable record: this — not a step-local
+        # note — is what the promotion gate and later steps consult.
+        verdict = self.verifications.record(
+            verification_record(result.id, result.spec_id, report)
+        )
         stats.verification = (*stats.verification, report)
-        stats.verification_status = validity.value
+        stats.verification_status = verdict.validity.value
 
         if negative:
-            if outcome_standing(validity) is OutcomeStanding.VERIFIED_EVIDENCE:
+            if verdict.standing is OutcomeStanding.VERIFIED_EVIDENCE:
                 stats.negative_result_verdict = "accepted"
                 notes.append(
                     f"verified scientific negative: result {result.id} "
@@ -747,14 +840,13 @@ class ResearchRuntime:
                 )
             else:
                 stats.negative_result_verdict = "deferred"
-                if self._verification_wired():
-                    notes.append(
-                        f"negative outcome observed but validity unresolved "
-                        f"({validity}): observation preserved without "
-                        f"promotion to scientific evidence — and not routed "
-                        f"to debugging for being negative"
-                    )
-        return notes, invocations
+                notes.append(
+                    f"negative outcome observed but validity unresolved "
+                    f"({verdict.validity}): observation preserved without "
+                    f"promotion to scientific evidence — and not routed "
+                    f"to debugging for being negative"
+                )
+        return notes, invocations, report
 
     def _verification_wired(self) -> bool:
         return (
@@ -762,6 +854,173 @@ class ResearchRuntime:
             or self.implementation_verifier is not None
             or self.methodology_reviewer is not None
         )
+
+    # -- the scientific-promotion gate ---------------------------------------
+
+    def _gate_promotions(self, proposals: tuple[Proposal, ...]) -> None:
+        """Refuse to commit trusted scientific use of unverified observation.
+
+        The rule, applied per cited evidence: a result with **no**
+        verification record was run with the verification layer ablated and
+        keeps legacy semantics; a result **with** a record may serve as
+        trusted support (a SUPPORTS/CONTRADICTS link, a conclusive
+        assessment) only when its standing is ``VERIFIED_EVIDENCE``.
+        Inconclusive links and ``UNDETERMINED`` assessments remain open to
+        any observation — inspection is never blocked, promotion is.
+        Raises :class:`PromotionError`; deterministic, no model consulted.
+        """
+        for proposal in proposals:
+            match proposal:
+                case ClaimProposal():
+                    for link in proposal.links:
+                        if link.relation is EvidenceRelation.INCONCLUSIVE:
+                            continue
+                        self._require_verified(
+                            proposals,
+                            link.evidence_id,
+                            use=(
+                                f"a {link.relation} link into claim "
+                                f"{link.claim_id}"
+                            ),
+                        )
+                case AssessmentProposal():
+                    assessment = proposal.assessment
+                    if assessment.verdict is AssessmentVerdict.UNDETERMINED:
+                        continue
+                    for evidence_id in assessment.evidence_ids:
+                        self._require_verified(
+                            proposals,
+                            evidence_id,
+                            use=(
+                                f"a {assessment.verdict} assessment of "
+                                f"{assessment.subject_id}"
+                            ),
+                        )
+                case _:
+                    continue
+
+    def _require_verified(
+        self, proposals: tuple[Proposal, ...], evidence_id: str, *, use: str
+    ) -> None:
+        evidence = self._evidence_named(proposals, evidence_id)
+        if evidence is None:
+            # Referential integrity is the transition layer's check, not
+            # this gate's; a dangling reference is rejected there.
+            return
+        verdict = self.verifications.get(evidence.result_id)
+        if verdict is None:
+            return  # never verified: legacy (ablated) semantics apply
+        if verdict.standing is not OutcomeStanding.VERIFIED_EVIDENCE:
+            raise PromotionError(
+                f"evidence {evidence_id} rests on result "
+                f"{evidence.result_id}, whose verification stands at "
+                f"{verdict.validity} ({verdict.standing}); it may be "
+                f"inspected but cannot serve as {use}"
+            )
+
+    def _evidence_named(
+        self, proposals: tuple[Proposal, ...], evidence_id: str
+    ) -> Evidence | None:
+        """The cited evidence — proposed in this same bundle, or already in
+        the store."""
+        for proposal in proposals:
+            if (
+                isinstance(proposal, EvidenceProposal)
+                and proposal.evidence.id == evidence_id
+            ):
+                return proposal.evidence
+        try:
+            return self.store.get_evidence(evidence_id)
+        except UnknownRecordError:
+            return None
+
+    def _handle_implementation_invalidity(
+        self,
+        state: ResearchState,
+        result: ExperimentResult,
+        report: VerificationReport,
+        stats: _StepStats,
+        step_notes: list[str],
+    ) -> tuple[ResearchState, int, tuple[ExperimentResult, ...], bool]:
+        """Bounded implementation repair of one completed-but-indicted run.
+
+        Entry demands typed implementation-invalidity evidence (the failed
+        checks become the :class:`ImplementationRepairTrigger`), never the
+        scientific outcome. The original result and its adverse verification
+        record are preserved untouched; each rerun is a new billed DEBUG
+        attempt that must *earn* its own verification, and the repair counts
+        as resolved only when the fresh record's implementation dimension no
+        longer fails.
+        """
+        if (
+            not self.config.debug_enabled
+            or self.debugger is None
+            or self.debugger.implementation_strategy is None
+        ):
+            return state, 0, (), False
+        trigger = ImplementationRepairTrigger(
+            result_id=result.id, checks=_implementation_failures(report)
+        )
+        spec = state.experiment(result.spec_id)
+        assert spec is not None  # committed results always name a known spec
+
+        invocations = 0
+        reruns: list[ExperimentResult] = []
+        current = result
+        for number in range(1, self.config.max_debug_attempts + 1):
+            if not state.budget.can_afford(spec.estimated_cost):
+                step_notes.append(
+                    f"implementation repair stopped before attempt {number}: "
+                    f"insufficient budget"
+                )
+                return state, invocations, tuple(reruns), False
+            session = self.debugger.repair_implementation(
+                spec, current, trigger, max_attempts=1
+            )
+            if not session.attempts:
+                step_notes.append(
+                    f"implementation repair stopped: {session.stop_reason}"
+                )
+                return state, invocations, tuple(reruns), False
+            (attempt_record,) = session.attempts
+            invocations += 1  # the repair proposal is reasoning-seat work
+            stats.implementation_debug_attempts += 1
+            retry = attempt_record.result
+            reruns.append(retry)
+            state, committed, exhausted = self._commit_debug_attempt(
+                state, spec, attempt_record, number, step_notes
+            )
+            if exhausted:
+                return state, invocations, tuple(reruns), True
+            if retry.succeeded and committed:
+                state = self._transcribe(state, retry)
+                # The rerun earns its own verification — nothing is
+                # transferred from the run it replaces.
+                notes, verify_invocations, retry_report = self._verify_result(
+                    state, retry, stats
+                )
+                step_notes.extend(notes)
+                invocations += verify_invocations
+                if retry_report is not None and not _implementation_failures(
+                    retry_report
+                ):
+                    stats.implementation_debug_resolved = True
+                    step_notes.append(
+                        f"implementation repair succeeded on attempt "
+                        f"{number}: the reimplementation of {spec.id} no "
+                        f"longer fails its implementation checks — its "
+                        f"scientific outcome stands on its own"
+                    )
+                    return state, invocations, tuple(reruns), False
+            if retry.succeeded and not committed:
+                return state, invocations, tuple(reruns), False
+            current = retry
+        step_notes.append(
+            f"implementation repair stopped after "
+            f"{self.config.max_debug_attempts} attempt(s) without a valid "
+            f"implementation of {spec.id}"
+        )
+        return state, invocations, tuple(reruns), False
 
     def _handle_failed_execution(
         self,
@@ -821,7 +1080,7 @@ class ResearchRuntime:
                     f"outcome stands on its own"
                 )
                 state = self._transcribe(state, retry)
-                notes, verify_invocations = self._verify_result(
+                notes, verify_invocations, _ = self._verify_result(
                     state, retry, stats
                 )
                 step_notes.extend(notes)
@@ -853,7 +1112,7 @@ class ResearchRuntime:
             action_type=ResearchActionType.DEBUG,
             rationale=(
                 f"repair attempt {number} for {spec.id}: "
-                f"{record.diagnosis.category} — {record.repair_rationale}"
+                f"{record.basis} — {record.repair_rationale}"
             ),
             targets=(spec.id,),
         )
@@ -966,6 +1225,8 @@ class ResearchRuntime:
         state: ResearchState,
         result: ExperimentResult,
         reasons: tuple[str, ...],
+        stats: _StepStats,
+        step_notes: list[str],
     ) -> tuple[ResearchState, int]:
         critic = self.roles.get(RoleName.RESULT_ANALYST)
         if critic is None:
@@ -980,16 +1241,20 @@ class ResearchRuntime:
         invocation = RoleInvocation(
             role=RoleName.RESULT_ANALYST,
             assignment=action,
-            context=_critic_context(state, self.store, result, reasons),
+            context=_critic_context(
+                state, self.store, self.verifications, result, reasons
+            ),
             allowed_actions=frozenset({ResearchActionType.ANALYZE}),
             expected_output=expected_proposals(ResearchActionType.ANALYZE),
         )
         try:
             proposals = critic.perform(invocation)
-            # The critic is under the same mechanical output contract as
-            # every other seat: an unauthorized proposal kind rejects the
-            # whole bundle and the critic attempt resolves as failed.
+            # The critic is under the same mechanical output contract and
+            # the same promotion gate as every other seat: an unauthorized
+            # proposal kind, or trusted use of unverified observation,
+            # rejects the whole bundle and the critic attempt fails.
             _check_contract(invocation, proposals, RoleName.RESULT_ANALYST)
+            self._gate_promotions(proposals)
             bundle = CommitBundle(
                 attempt_id=attempt.id,
                 outcome=ActionOutcome(
@@ -1001,6 +1266,16 @@ class ResearchRuntime:
                 proposals=proposals,
             )
             state = commit_bundle(state, bundle, self.store)
+        except PromotionError as exc:
+            stats.promotion_blocked = True
+            step_notes.append(
+                f"scientific promotion blocked: {exc} — the observation is "
+                f"preserved; resolve its validity (or cite it as "
+                f"inconclusive) before using it as support"
+            )
+            state = commit_bundle(
+                state, _failed_bundle(attempt.id, str(exc), NO_COST), self.store
+            )
         except Exception as exc:
             # A critic that fails leaves the record showing it was asked.
             state = commit_bundle(
@@ -1189,12 +1464,19 @@ class ResearchRuntime:
                     failure_category=stats.failure_category,
                     debug_attempts=stats.debug_attempts,
                     debug_resolved=stats.debug_resolved,
+                    implementation_debug_attempts=(
+                        stats.implementation_debug_attempts
+                    ),
+                    implementation_debug_resolved=(
+                        stats.implementation_debug_resolved
+                    ),
                     verification_status=stats.verification_status,
                     preflight_failed=stats.preflight_failed,
                     control_failures=stats.control_failures,
                     methodology_rejected=stats.methodology_rejected,
                     implementation_rejected=stats.implementation_rejected,
                     analysis_rejected=stats.analysis_rejected,
+                    promotion_blocked=stats.promotion_blocked,
                     negative_result_verdict=stats.negative_result_verdict,
                     rationale=deliberation.reasoning,
                     notes=(
@@ -1221,6 +1503,8 @@ class ResearchRuntime:
             verification=stats.verification,
             debug_attempts=stats.debug_attempts,
             debug_resolved=stats.debug_resolved,
+            implementation_debug_attempts=stats.implementation_debug_attempts,
+            implementation_debug_resolved=stats.implementation_debug_resolved,
             notes=notes,
             halt_reason=halt_reason,
         )
@@ -1389,6 +1673,19 @@ def _clamp(cost: ResourceCost, budget: ResearchBudget) -> ResourceCost:
 # -- helpers -----------------------------------------------------------------
 
 
+def _implementation_failures(
+    report: VerificationReport,
+) -> tuple[VerificationCheck, ...]:
+    """The implementation-dimension FAIL checks of one report — the only
+    admissible evidence for implementation repair."""
+    return tuple(
+        check
+        for check in report.checks
+        if check.dimension is ValidityDimension.IMPLEMENTATION
+        and check.state is CheckState.FAIL
+    )
+
+
 def _assessed_hypothesis(state: ResearchState, subject_id: str) -> str | None:
     """The hypothesis a new assessment bears on — directly, or through the
     claim it judges. ``None`` when the subject reaches no hypothesis."""
@@ -1445,13 +1742,41 @@ def _outcome_of(state: ResearchState, attempt_id: str) -> ActionOutcome:
     return attempt.outcome
 
 
+def _standing_notes(
+    evidence: tuple[Evidence, ...], verifications: VerificationStore
+) -> tuple[str, ...]:
+    """Verification standing, projected into a role's context notes.
+
+    This is how a scientific reasoning seat distinguishes verified evidence
+    from observed-but-unresolved evidence without receiving global state:
+    each piece of evidence it is shown arrives annotated with the durable
+    verdict governing its result. Evidence without a record carries no
+    annotation — it predates or was excluded from verification.
+    """
+    notes: list[str] = []
+    for item in evidence:
+        verdict = verifications.get(item.result_id)
+        if verdict is None:
+            continue
+        notes.append(
+            f"verification: evidence {item.id} (result {item.result_id}) "
+            f"stands at {verdict.validity} — {verdict.standing}"
+        )
+    return tuple(notes)
+
+
 def _context_for(
-    state: ResearchState, store: EvidenceStore, action: ResearchAction
+    state: ResearchState,
+    store: EvidenceStore,
+    verifications: VerificationStore,
+    action: ResearchAction,
 ) -> RoleContext:
     """The projection each seat receives: exactly what the assignment needs.
 
     This is where worker lifetime is separated from lab lifetime — an
     executor sees a spec and its prior runs, never the research history.
+    Evidence shown to scientific seats arrives annotated with its durable
+    verification standing (:func:`_standing_notes`).
     """
     target = action.targets[0] if action.targets else None
     match action.action_type:
@@ -1493,15 +1818,18 @@ def _context_for(
                 results=prior,
             )
         case ResearchActionType.SYNTHESIZE_FINDING:
-            return _synthesis_context(state, store, target)
+            return _synthesis_context(state, store, verifications, target)
         case ResearchActionType.ASSESS_CLAIM:
-            return _assessment_context(state, store, target)
+            return _assessment_context(state, store, verifications, target)
         case _:
             return RoleContext(objective=state.objective)
 
 
 def _synthesis_context(
-    state: ResearchState, store: EvidenceStore, evidence_id: str | None
+    state: ResearchState,
+    store: EvidenceStore,
+    verifications: VerificationStore,
+    evidence_id: str | None,
 ) -> RoleContext:
     if evidence_id is None:
         return RoleContext(objective=state.objective)
@@ -1519,11 +1847,15 @@ def _synthesis_context(
         prediction_tests=tuple(tests),
         experiments=(spec,) if spec else (),
         evidence=(evidence,),
+        notes=_standing_notes((evidence,), verifications),
     )
 
 
 def _assessment_context(
-    state: ResearchState, store: EvidenceStore, claim_id: str | None
+    state: ResearchState,
+    store: EvidenceStore,
+    verifications: VerificationStore,
+    claim_id: str | None,
 ) -> RoleContext:
     claim = state.claim(claim_id) if claim_id else None
     if claim is None:
@@ -1542,21 +1874,24 @@ def _assessment_context(
         for prediction in predictions
         for test in state.tests_for(prediction.id)
     )
+    evidence = tuple(store.get_evidence(link.evidence_id) for link in links)
     return RoleContext(
         objective=state.objective,
         hypotheses=(hypothesis,) if hypothesis else (),
         predictions=tuple(predictions),
         prediction_tests=tests,
-        evidence=tuple(store.get_evidence(link.evidence_id) for link in links),
+        evidence=evidence,
         claims=(claim,),
         evidence_links=links,
         assessments=state.assessments,
+        notes=_standing_notes(evidence, verifications),
     )
 
 
 def _critic_context(
     state: ResearchState,
     store: EvidenceStore,
+    verifications: VerificationStore,
     result: ExperimentResult,
     reasons: tuple[str, ...],
 ) -> RoleContext:
@@ -1589,5 +1924,5 @@ def _critic_context(
         results=family,
         evidence=evidence,
         assessments=state.assessments,
-        notes=reasons,
+        notes=(*reasons, *_standing_notes(evidence, verifications)),
     )
