@@ -1,118 +1,99 @@
-"""The claim-evidence graph.
+"""The claim-evidence graph: a factual read model, not an epistemology.
 
-This is the domain abstraction, not a storage engine. Claims and links live in
-:class:`~autonomous_research_lab.core.state.ResearchState`; evidence lives in
-the store; this module is the read model that joins them and answers the
-questions a research director actually needs to ask:
+This module joins claims and links (held in
+:class:`~autonomous_research_lab.core.state.ResearchState`) to evidence (held
+in the store) and answers *structural* questions:
 
-* which claims are weakly supported?
-* which claims does the evidence contradict?
-* where is belief running ahead of measurement?
+* what evidence bears on this claim, and how does each piece relate to it?
+* which claims does some evidence contradict?
+* which claims have never been epistemically assessed?
 
-A graph database is not warranted at this size and would fix the schema before
-the schema has earned it. The traversal is linear over tuples; when that stops
-being adequate, the interface here is what a backing store would implement.
+It deliberately answers no epistemic question. There is no method here that
+turns edge counts into a verdict — an earlier draft had an advisory one, and
+it was removed because anything that maps edges to a status will end up being
+treated as authoritative epistemology no matter what its docstring says.
+Whether a claim should be believed is the business of an
+:class:`~autonomous_research_lab.core.assessment.EpistemicAssessment`,
+which names its method, its evidence, and its confidence, and can be
+challenged.
+
+There is no graph database. At this size, traversal over tuples is adequate,
+and committing to a storage engine would fix the schema before the schema has
+earned it. This interface is what a backing store would eventually implement.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable
 from dataclasses import dataclass
 
-from ..core.claim import Claim, ClaimStatus, EvidenceLink, EvidenceRelation
+from ..core.claim import Claim, EvidenceRelation
 from ..core.evidence import Evidence
 from ..core.state import ResearchState
 from ..evidence.store import EvidenceStore
 
 
 @dataclass(frozen=True, slots=True)
-class ClaimSupport:
-    """The evidential standing of a single claim."""
+class ClaimEvidence:
+    """Everything factual the graph knows about one claim: the evidence
+    bearing on it, split by stated relation. No verdict — see the module
+    docstring for why none is offered."""
 
     claim: Claim
     supporting: tuple[Evidence, ...] = ()
     contradicting: tuple[Evidence, ...] = ()
-    support_weight: float = 0.0
-    contradiction_weight: float = 0.0
+    inconclusive: tuple[Evidence, ...] = ()
 
     @property
-    def net_weight(self) -> float:
-        return self.support_weight - self.contradiction_weight
-
-    @property
-    def is_unsupported(self) -> bool:
-        return not self.supporting and not self.contradicting
-
-    def suggested_status(self, *, support_threshold: float = 1.0) -> ClaimStatus:
-        """A deliberately crude reading of the edges.
-
-        It is advisory only -- nothing applies it automatically. Deciding that
-        evidence settles a claim is the statistician's and verifier's job, and
-        those roles do not exist yet. Encoding a confident rule here now would
-        quietly become the system's epistemology.
-        """
-        if self.is_unsupported:
-            return ClaimStatus.PROPOSED
-        if self.supporting and self.contradicting:
-            return ClaimStatus.CONTESTED
-        if self.contradicting:
-            return ClaimStatus.REFUTED
-        if self.support_weight >= support_threshold:
-            return ClaimStatus.SUPPORTED
-        return ClaimStatus.PROPOSED
+    def has_evidence(self) -> bool:
+        return bool(self.supporting or self.contradicting or self.inconclusive)
 
 
 class ClaimEvidenceGraph:
-    def __init__(
-        self,
-        claims: Iterable[Claim],
-        links: Iterable[EvidenceLink],
-        store: EvidenceStore,
-    ) -> None:
-        self._claims = {claim.id: claim for claim in claims}
-        self._links = tuple(links)
+    def __init__(self, state: ResearchState, store: EvidenceStore) -> None:
+        self._state = state
         self._store = store
 
     @classmethod
     def from_state(
         cls, state: ResearchState, store: EvidenceStore
     ) -> ClaimEvidenceGraph:
-        return cls(state.claims, state.evidence_links, store)
+        return cls(state, store)
 
-    def support_for(self, claim_id: str) -> ClaimSupport:
-        claim = self._claims[claim_id]
-        supporting: list[Evidence] = []
-        contradicting: list[Evidence] = []
-        support_weight = 0.0
-        contradiction_weight = 0.0
-        for link in self._links:
-            if link.claim_id != claim_id:
-                continue
-            if link.relation is EvidenceRelation.SUPPORTS:
-                supporting.append(self._store.get_evidence(link.evidence_id))
-                support_weight += link.weight
-            elif link.relation is EvidenceRelation.CONTRADICTS:
-                contradicting.append(self._store.get_evidence(link.evidence_id))
-                contradiction_weight += link.weight
-        return ClaimSupport(
+    def evidence_for(self, claim_id: str) -> ClaimEvidence:
+        claim = self._state.claim(claim_id)
+        if claim is None:
+            raise KeyError(claim_id)
+        by_relation: dict[EvidenceRelation, list[Evidence]] = {
+            relation: [] for relation in EvidenceRelation
+        }
+        for link in self._state.evidence_links:
+            if link.claim_id == claim_id:
+                by_relation[link.relation].append(
+                    self._store.get_evidence(link.evidence_id)
+                )
+        return ClaimEvidence(
             claim=claim,
-            supporting=tuple(supporting),
-            contradicting=tuple(contradicting),
-            support_weight=support_weight,
-            contradiction_weight=contradiction_weight,
+            supporting=tuple(by_relation[EvidenceRelation.SUPPORTS]),
+            contradicting=tuple(by_relation[EvidenceRelation.CONTRADICTS]),
+            inconclusive=tuple(by_relation[EvidenceRelation.INCONCLUSIVE]),
         )
 
-    def all_support(self) -> tuple[ClaimSupport, ...]:
-        return tuple(self.support_for(claim_id) for claim_id in self._claims)
+    def all_claims(self) -> tuple[ClaimEvidence, ...]:
+        return tuple(self.evidence_for(claim.id) for claim in self._state.claims)
 
-    def weakly_supported(self, *, threshold: float = 1.0) -> tuple[ClaimSupport, ...]:
-        """Claims whose net evidential weight falls below ``threshold``.
+    def without_evidence(self) -> tuple[Claim, ...]:
+        """Claims nothing measured has ever touched — the cheapest kind for a
+        fluent system to produce, hence the first place to look."""
+        return tuple(c.claim for c in self.all_claims() if not c.has_evidence)
 
-        Includes claims with no evidence at all: an unsupported claim is the
-        weakest kind, and it is exactly the kind a fluent system produces most
-        easily.
-        """
-        return tuple(s for s in self.all_support() if s.net_weight < threshold)
+    def contradicted(self) -> tuple[ClaimEvidence, ...]:
+        return tuple(c for c in self.all_claims() if c.contradicting)
 
-    def contradicted(self) -> tuple[ClaimSupport, ...]:
-        return tuple(s for s in self.all_support() if s.contradicting)
+    def unassessed(self) -> tuple[Claim, ...]:
+        """Claims with no current epistemic assessment: belief running ahead
+        of judgment."""
+        return tuple(
+            claim
+            for claim in self._state.claims
+            if self._state.current_assessment(claim.id) is None
+        )

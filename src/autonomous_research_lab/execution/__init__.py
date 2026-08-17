@@ -1,6 +1,7 @@
 """Running experiments, and the interface that keeps where they run swappable."""
 
 from .executor import (
+    DuplicateJobError,
     Executor,
     ExperimentJob,
     JobNotFinishedError,
@@ -10,6 +11,7 @@ from .executor import (
 from .local import LocalExecutor, MalformedMetricsError
 
 __all__ = [
+    "DuplicateJobError",
     "Executor",
     "ExperimentJob",
     "JobNotFinishedError",

@@ -1,10 +1,15 @@
 """Hypotheses.
 
-``falsification_criterion`` is a required field. A statement that cannot be
-stated together with the observation that would refute it is not admissible as
-a hypothesis in this system -- it is a research question, an assumption, or a
-slogan. Requiring it at construction time makes that rule structural rather
-than aspirational.
+A hypothesis is a general, revisable statement about the world. Its
+*falsifiable content* lives in the :class:`~.prediction.Prediction` objects
+derived from it — each one a concrete, pre-registered commitment about a
+measurable quantity. A hypothesis with no predictions is not yet testable,
+and candidate generation treats deriving one as open work.
+
+``status`` is an operational lifecycle marker, updated only through the
+transition layer — typically when an :class:`~.assessment.EpistemicAssessment`
+targeting the hypothesis is committed. It is a cache of the current standing,
+never a substitute for the assessment that justified it.
 """
 
 from __future__ import annotations
@@ -35,12 +40,11 @@ class HypothesisStatus(StrEnum):
 @dataclass(frozen=True, slots=True)
 class Hypothesis:
     statement: str
-    falsification_criterion: str
     rationale: str = ""
     assumptions: tuple[str, ...] = ()
     question_id: str | None = None
     parent_id: str | None = None
-    """Set when this hypothesis is a refinement of another, so that refinement
+    """Set when this hypothesis is a refinement of another, so refinement
     lineage survives in the state rather than only in a conversation log."""
 
     status: HypothesisStatus = HypothesisStatus.PROPOSED
@@ -49,19 +53,12 @@ class Hypothesis:
     def __post_init__(self) -> None:
         if not self.statement.strip():
             raise ValueError("hypothesis statement must be non-empty")
-        if not self.falsification_criterion.strip():
-            raise ValueError(
-                "hypothesis requires a falsification criterion; "
-                f"none given for {self.statement!r}"
-            )
         if not self.id:
             object.__setattr__(
-                self,
-                "id",
-                content_id(
-                    "hyp", self.statement, self.falsification_criterion, self.parent_id
-                ),
+                self, "id", content_id("hyp", self.statement, self.parent_id)
             )
 
     def with_status(self, status: HypothesisStatus) -> Hypothesis:
+        """Status changes preserve identity: a falsified hypothesis is the
+        same hypothesis, or every reference to it would dangle."""
         return replace(self, status=status)

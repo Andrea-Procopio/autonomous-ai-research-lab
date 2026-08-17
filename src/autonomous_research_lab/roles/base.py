@@ -2,24 +2,34 @@
 
 A role is not a persona and not a prompt. It is the triple of
 
-1. **objective** -- the utility it maximises;
-2. **information access** -- what it is allowed to see;
-3. **authority** -- which actions it may perform.
+1. **objective** — the utility it maximises;
+2. **information access** — what it is allowed to see;
+3. **authority** — which actions it may perform.
 
 Two roles backed by the identical foundation model are still different agents
-if those three differ. That is the separation worth having: a skeptic that is
-rewarded for finding flaws behaves differently from a generator rewarded for
-producing hypotheses, even with the same weights behind both.
+if those three differ: a skeptic rewarded for finding flaws behaves differently
+from a generator rewarded for producing hypotheses, even with the same weights
+behind both.
 
-Crucially, roles do not share a scalar reward. Each carries its own
-:class:`UtilityFunction`. The interface is intentionally weak about how utility
-is computed -- a hand-written heuristic, a model evaluation, and a learned
-scorer all satisfy it -- because which of those is right is an open research
-question, not a settled design.
+**Architectural invariant: roles never mutate ResearchState.** A role reads
+state and produces :mod:`~autonomous_research_lab.core.proposals` — typed,
+attributable requests — which only the transition layer validates and commits.
+This is enforced structurally by ``tests/test_layering.py``: no module in this
+package may call a state mutator. The payoff is provenance (every change names
+its proposer), safe search branching, and one place for conflict resolution
+when multiple agents propose concurrently.
+
+Roles do not share a scalar reward. Each carries its own role-level
+:class:`UtilityFunction`, used by assignment to decide *who* performs a chosen
+action — how much this role, by its own objective, values doing the work. This
+is deliberately distinct from
+:class:`~autonomous_research_lab.core.decision.ActionUtility`, which estimates
+an action's *scientific* value for the program regardless of who performs it.
 
 Execution (``perform``) is not part of this interface yet: performing most
 actions requires a model provider, which is out of scope until the contracts
-below have been exercised.
+here have been exercised. When it arrives, its signature returns proposals —
+never a state.
 """
 
 from __future__ import annotations
@@ -54,9 +64,8 @@ class RoleName(StrEnum):
 class UtilityScore:
     value: float
     components: Mapping[str, float] = field(default_factory=dict)
-    """Named contributions to ``value`` -- novelty, falsifiability, expected
-    information gain, and so on. Kept separate from the scalar so that a
-    decision can be audited rather than merely ranked."""
+    """Named contributions to ``value``, kept separate from the scalar so that
+    an assignment can be audited rather than merely ranked."""
 
     rationale: str = ""
 
@@ -72,12 +81,8 @@ class UtilityFunction(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class WeightedUtility:
-    """A utility built from named component scorers and weights.
-
-    Included because it makes the "each role has its own objective" claim
-    concrete without pretending to know the right components. The weights are
-    an explicit, editable statement of what a role is being asked to maximise.
-    """
+    """A role utility built from named component scorers and weights — an
+    explicit, editable statement of what a role is being asked to maximise."""
 
     weights: Mapping[str, float]
     scorers: Mapping[str, UtilityFunction]
@@ -107,7 +112,7 @@ class ResearchRole(ABC):
 
     @abstractmethod
     def utility(self, state: ResearchState, action: ResearchAction) -> UtilityScore:
-        """This role's own valuation of taking ``action`` in ``state``."""
+        """This role's own valuation of performing ``action`` in ``state``."""
 
     def can_perform(self, action_type: ResearchActionType) -> bool:
         return action_type in self.supported_actions

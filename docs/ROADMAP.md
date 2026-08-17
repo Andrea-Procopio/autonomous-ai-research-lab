@@ -31,12 +31,13 @@ in the loop, producing results that survive scrutiny.
   as structured objects carrying their sources.
 - **Real experiment execution.** ML training runs under the existing executor
   contract — checkpoints, longer timeouts, GPU accounting.
-- **Statistician and Verifier.** Turning the crude
-  `ClaimSupport.suggested_status()` heuristic into actual inference, and
-  checking claims against provenance.
-- **Trajectory instrumentation.** Every action, utility score, decision and
-  result recorded in a form that can be analysed later. This is the input to
-  everything in the ICLR plan below, so it has to exist from the first real run.
+- **Statistician and Verifier.** Real inference behind `EpistemicAssessment` —
+  today's assessments are demo-grade prediction checks; these roles bring
+  power, uncertainty, and multiple-comparison awareness — plus provenance
+  checking of claims.
+- **Trajectory analysis.** The decision log (`DecisionRecord` + JSONL) exists;
+  what Horizon 1 adds is the analysis code that reads it — utility calibration,
+  cost prediction error, failure-mode tallies — feeding the ICLR plan below.
 
 **Done when:** the system runs a real ML research question end to end, and the
 resulting claims survive independent checking — including the cases where the

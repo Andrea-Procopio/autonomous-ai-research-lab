@@ -3,17 +3,23 @@
 Three separate concepts, deliberately not merged:
 
 ``ExperimentSpec``
-    The *scientific* design: what is being tested, against what baseline, by
-    what procedure, and what observation would falsify it. Contains no commands,
-    paths, or infrastructure.
+    The *scientific* design: which prediction is being tested, by what
+    procedure, measuring what. Contains no commands, paths, or infrastructure.
+    Semantic identity — the same design is the same spec.
 
 ``ExperimentResult``
     The immutable record of one execution. Produced only by an executor, from
     a process that actually ran. No component may synthesise one from
-    reasoning.
+    reasoning. Its id derives from the job's occurrence id: the record of a
+    distinct event is a distinct record.
 
 ``Environment``
     The provenance needed to attempt a re-run.
+
+A spec no longer carries its own falsification criterion: the pre-registered,
+machine-checkable commitment is the :class:`~.prediction.Prediction` the spec
+tests, fixed before the run and checked mechanically when evidence is
+committed.
 
 The binding between a spec and a runnable process lives in
 :mod:`autonomous_research_lab.execution`, which keeps scientific design free of
@@ -49,17 +55,14 @@ class ExperimentStatus(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class ExperimentSpec:
-    hypothesis_id: str
+    prediction_id: str
     objective: str
     procedure: str
     metrics: tuple[str, ...]
-    """Names of the metrics the experiment is expected to emit. Declared up
+    """Names of the metrics the experiment is expected to emit, declared up
     front so that a result reporting different metrics is detectable rather
-    than reinterpreted after the fact."""
-
-    falsification_criterion: str
-    """The condition on ``metrics`` that would count against the hypothesis,
-    fixed before the run so it cannot be adjusted to fit the outcome."""
+    than reinterpreted after the fact. Must include the tested prediction's
+    metric — validated at commit time."""
 
     baselines: tuple[str, ...] = ()
     controls: tuple[str, ...] = ()
@@ -76,11 +79,10 @@ class ExperimentSpec:
                 "id",
                 content_id(
                     "exp",
-                    self.hypothesis_id,
+                    self.prediction_id,
                     self.objective,
                     self.procedure,
                     self.metrics,
-                    self.falsification_criterion,
                     self.seeds,
                 ),
             )

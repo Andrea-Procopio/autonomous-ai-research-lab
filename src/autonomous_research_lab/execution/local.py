@@ -31,7 +31,13 @@ from pathlib import Path
 
 from ..core.budget import ResourceCost
 from ..core.experiment import Environment, ExperimentResult, ExperimentStatus
-from .executor import Executor, ExperimentJob, JobStatus, UnknownJobError
+from .executor import (
+    DuplicateJobError,
+    Executor,
+    ExperimentJob,
+    JobStatus,
+    UnknownJobError,
+)
 
 METRICS_FILENAME = "metrics.json"
 CONFIG_FILENAME = "config.json"
@@ -57,6 +63,11 @@ class LocalExecutor(Executor):
         self._status: dict[str, JobStatus] = {}
 
     def submit(self, job: ExperimentJob) -> str:
+        if job.id in self._status:
+            raise DuplicateJobError(
+                f"job {job.id} was already submitted; a retry is a new event — "
+                f"construct a new job"
+            )
         self._status[job.id] = JobStatus.RUNNING
         run_dir = self._run_root / job.id
         run_dir.mkdir(parents=True, exist_ok=True)

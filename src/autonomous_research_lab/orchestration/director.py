@@ -1,56 +1,72 @@
-"""Deciding what to do next.
+"""The research director: wiring for one orchestration decision.
 
-The director answers exactly one question: *given this scientific state, what
-action should the program take next?* It does not decide who performs the
-action (that is assignment), it does not perform it, and it does not judge the
-evidence that comes back.
+The director owns no scientific judgment of its own. It composes the three
+functions the decision splits into —
 
-The decision is split in two on purpose:
+    CandidateGenerator   what could we do?
+    UtilityEvaluator     how valuable might each option be?
+    SearchPolicy         what do we take, given uncertainty and resources?
 
-``candidate_actions``
-    enumerates what is scientifically available -- the part that needs domain
-    understanding;
+— and preserves the full decision as a
+:class:`~autonomous_research_lab.core.decision.DecisionRecord`: state before,
+every candidate with its utility, who generated and who evaluated, what was
+selected. The caller completes the record once the attempt's outcome is known.
 
-``propose``
-    filters by budget and defers the choice to a
-    :class:`~autonomous_research_lab.search.policy.SearchPolicy`.
-
-So a subclass supplies scientific judgement about *what is possible*, and the
-search policy supplies the strategy for *what is worth doing*. Swapping greedy
-for a bandit later changes no director.
+Any of the three parts swaps independently: a model-backed generator, a learned
+evaluator, or a bandit policy each slot in without touching the other two.
 """
 
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
-from collections.abc import Sequence
+from dataclasses import dataclass
 
 from ..core.actions import ResearchAction
+from ..core.decision import DecisionRecord, EvaluatedCandidate
 from ..core.state import ResearchState
-from ..search.policy import GreedySearchPolicy, SearchPolicy
+from ..search.policy import SearchPolicy
+from .candidates import CandidateGenerator
+from .evaluation import UtilityEvaluator
 
 
-class ResearchDirector(ABC):
-    def __init__(self, policy: SearchPolicy | None = None) -> None:
-        self._policy = policy if policy is not None else GreedySearchPolicy()
+@dataclass(frozen=True, slots=True)
+class Decision:
+    """One decision: the selected candidate (if any) and its full record."""
+
+    record: DecisionRecord
+    selected: EvaluatedCandidate | None
 
     @property
-    def policy(self) -> SearchPolicy:
-        return self._policy
+    def action(self) -> ResearchAction | None:
+        return self.selected.action if self.selected else None
 
-    @abstractmethod
-    def candidate_actions(self, state: ResearchState) -> Sequence[ResearchAction]:
-        """Actions that are scientifically available in ``state``."""
 
-    def propose(self, state: ResearchState) -> ResearchAction | None:
-        """Return the next action, or ``None`` when the program should halt.
+class ResearchDirector:
+    def __init__(
+        self,
+        generator: CandidateGenerator,
+        evaluator: UtilityEvaluator,
+        policy: SearchPolicy,
+    ) -> None:
+        self._generator = generator
+        self._evaluator = evaluator
+        self._policy = policy
 
-        Returning ``None`` is a legitimate outcome. A system that always finds
-        something else to try is not doing research; it is spending budget.
-        """
-        affordable = [
-            action
-            for action in self.candidate_actions(state)
-            if state.budget.can_afford(action.estimated_cost)
-        ]
-        return self._policy.select(state, affordable)
+    def decide(self, state: ResearchState) -> Decision:
+        candidates = self._generator.generate(state)
+        evaluated = tuple(
+            EvaluatedCandidate(
+                candidate=candidate,
+                utility=self._evaluator.evaluate(state, candidate),
+            )
+            for candidate in candidates
+        )
+        selected = self._policy.select(state, evaluated)
+        record = DecisionRecord(
+            state_before_id=state.id,
+            evaluated=evaluated,
+            selected_action_id=selected.action.id if selected else None,
+            generator=self._generator.name,
+            evaluator=self._evaluator.name,
+            policy=self._policy.name,
+        )
+        return Decision(record=record, selected=selected)

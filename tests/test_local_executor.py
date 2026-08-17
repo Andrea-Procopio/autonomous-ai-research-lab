@@ -3,8 +3,14 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 from autonomous_research_lab.core.experiment import ExperimentStatus
-from autonomous_research_lab.execution.executor import ExperimentJob, JobStatus
+from autonomous_research_lab.execution.executor import (
+    DuplicateJobError,
+    ExperimentJob,
+    JobStatus,
+)
 from autonomous_research_lab.execution.local import LocalExecutor
 
 
@@ -84,12 +90,25 @@ def test_non_numeric_metrics_are_rejected(tmp_path: Path) -> None:
     assert "not a number" in str(executor.collect(job_id).failure_reason)
 
 
-def test_replications_of_one_spec_get_distinct_records(tmp_path: Path) -> None:
-    executor = LocalExecutor(tmp_path / "runs")
-    first = script_job(tmp_path, WRITES_METRICS, config={"scale": 1})
-    second = script_job(tmp_path, WRITES_METRICS, config={"scale": 1}, attempt=1)
+class TestOccurrenceSemantics:
+    def test_identical_executions_yield_distinct_records(self, tmp_path: Path) -> None:
+        """Two identically configured runs of one spec are two events with two
+        records — replications never collide."""
+        executor = LocalExecutor(tmp_path / "runs")
+        first = script_job(tmp_path, WRITES_METRICS, config={"scale": 1})
+        second = script_job(tmp_path, WRITES_METRICS, config={"scale": 1})
 
-    assert first.id != second.id
-    assert executor.collect(executor.submit(first)).id != executor.collect(
-        executor.submit(second)
-    ).id
+        assert first.id != second.id
+        first_result = executor.collect(executor.submit(first))
+        second_result = executor.collect(executor.submit(second))
+        assert first_result.id != second_result.id
+        assert first_result.metrics == second_result.metrics
+
+    def test_a_job_submits_at_most_once(self, tmp_path: Path) -> None:
+        """Resubmitting the same job object would silently overwrite its run
+        directory and record; a retry must be a new job."""
+        executor = LocalExecutor(tmp_path / "runs")
+        job = script_job(tmp_path, WRITES_METRICS, config={"scale": 1})
+        executor.submit(job)
+        with pytest.raises(DuplicateJobError):
+            executor.submit(job)

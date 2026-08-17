@@ -1,13 +1,20 @@
 """Typed scientific actions.
 
 Research progress is modelled as a choice among typed actions rather than as a
-fixed pipeline of stages. An orchestrator enumerates candidate actions; a search
-policy chooses among them; a role executes the chosen one.
+fixed pipeline of stages.
 
-A :class:`ResearchAction` is a *decision record* -- what to do, to what, why,
-and at what expected cost. It deliberately does not carry the artefact the
-action produces; that artefact is a typed domain object created by whoever
-performs the action.
+A :class:`ResearchAction` is pure scientific *intent*: what to do, to what, and
+why. It deliberately carries nothing else —
+
+* cost and value estimates belong to :class:`~.decision.ActionUtility`,
+  because an estimate is an opinion about the action, not part of it;
+* execution status belongs to :class:`~.attempt.ActionAttempt`, because one
+  intent may be attempted many times;
+* the artefact the action produces is a typed domain object created by whoever
+  performs it.
+
+Actions are semantic objects with content identity: proposing the same action
+twice is proposing the same action.
 """
 
 from __future__ import annotations
@@ -15,7 +22,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import StrEnum
 
-from .budget import NO_COST, ResourceCost
 from .ids import content_id
 
 
@@ -23,6 +29,7 @@ class ResearchActionType(StrEnum):
     SEARCH_LITERATURE = "search_literature"
     GENERATE_HYPOTHESIS = "generate_hypothesis"
     REFINE_HYPOTHESIS = "refine_hypothesis"
+    DERIVE_PREDICTION = "derive_prediction"
     DESIGN_EXPERIMENT = "design_experiment"
     IMPLEMENT = "implement"
     DEBUG = "debug"
@@ -34,6 +41,7 @@ class ResearchActionType(StrEnum):
     EXPLORE_ALTERNATIVE = "explore_alternative"
     SCALE_EXPERIMENT = "scale_experiment"
     SYNTHESIZE_FINDING = "synthesize_finding"
+    ASSESS_CLAIM = "assess_claim"
     STOP_INVESTIGATION = "stop_investigation"
 
 
@@ -44,12 +52,6 @@ class ResearchAction:
     targets: tuple[str, ...] = ()
     """Ids of the domain objects this action operates on."""
 
-    estimated_cost: ResourceCost = NO_COST
-    expected_information_gain: float | None = None
-    """Expected reduction in scientific uncertainty, in whatever units the
-    scoring policy defines. ``None`` means "not estimated"; policies must not
-    silently read that as zero value."""
-
     id: str = field(default="")
 
     def __post_init__(self) -> None:
@@ -57,7 +59,5 @@ class ResearchAction:
             object.__setattr__(
                 self,
                 "id",
-                content_id(
-                    "act", self.action_type, self.rationale, self.targets
-                ),
+                content_id("act", self.action_type, self.rationale, self.targets),
             )

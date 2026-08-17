@@ -1,5 +1,5 @@
-"""Pluggable search over scientific states and actions."""
+"""Pluggable selection policies over evaluated candidates."""
 
-from .policy import GreedySearchPolicy, ScoredAction, SearchPolicy
+from .policy import GreedySearchPolicy, SearchPolicy
 
-__all__ = ["GreedySearchPolicy", "ScoredAction", "SearchPolicy"]
+__all__ = ["GreedySearchPolicy", "SearchPolicy"]

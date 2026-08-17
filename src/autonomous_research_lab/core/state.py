@@ -11,10 +11,28 @@ state whose ``parent_id`` points at its predecessor. That makes the research
 trajectory inspectable after the fact, and lets a search policy branch over
 states without any component having to defensively copy.
 
-States hold *beliefs* -- questions, hypotheses, claims, links. They hold
-*references* to facts -- results and evidence live in the append-only evidence
-store, shared across every branch, because a fact does not become a different
-fact on a different branch of the search.
+States hold *beliefs* — questions, hypotheses, predictions, claims,
+assessments. They hold *references* to facts — results and evidence live in
+the append-only evidence store, shared across every branch, because a fact
+does not become a different fact on a different branch of the search.
+
+Two bookkeeping fields deserve explicit contracts:
+
+``attempts``
+    The operational record of action execution. Whether work is done is a
+    question about attempts with **succeeded** outcomes
+    (:meth:`ResearchState.has_succeeded`) — a failed attempt leaves the work
+    open, and a retry is a new attempt.
+
+``history``
+    An audit trail of the actions selected, in order. **Never** a source of
+    operational truth: nothing may infer completion, or anything else, from an
+    action's presence here.
+
+The mutator methods on this class are the commit layer's API. Roles do not
+call them — roles produce proposals, and the transition layer in
+``orchestration`` validates and commits (enforced structurally by
+``tests/test_layering.py``).
 """
 
 from __future__ import annotations
@@ -22,12 +40,15 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from typing import Any, Protocol, TypeVar
 
-from .actions import ResearchAction
+from .actions import ResearchAction, ResearchActionType
+from .assessment import EpistemicAssessment
+from .attempt import ActionAttempt
 from .budget import ResearchBudget, ResourceCost
 from .claim import Claim, EvidenceLink
 from .experiment import ExperimentSpec, ResultRef
 from .hypothesis import Hypothesis
 from .ids import content_id
+from .prediction import Prediction
 from .question import ResearchQuestion
 
 
@@ -36,11 +57,14 @@ class ResearchState:
     objective: str
     questions: tuple[ResearchQuestion, ...] = ()
     hypotheses: tuple[Hypothesis, ...] = ()
+    predictions: tuple[Prediction, ...] = ()
     experiments: tuple[ExperimentSpec, ...] = ()
     results: tuple[ResultRef, ...] = ()
     evidence_ids: tuple[str, ...] = ()
     claims: tuple[Claim, ...] = ()
     evidence_links: tuple[EvidenceLink, ...] = ()
+    assessments: tuple[EpistemicAssessment, ...] = ()
+    attempts: tuple[ActionAttempt, ...] = ()
     budget: ResearchBudget = field(default_factory=ResearchBudget.zero)
     history: tuple[ResearchAction, ...] = ()
     parent_id: str | None = None
@@ -55,18 +79,21 @@ class ResearchState:
                     "st",
                     self.objective,
                     tuple(q.id for q in self.questions),
-                    tuple(h.id for h in self.hypotheses),
+                    tuple((h.id, h.status) for h in self.hypotheses),
+                    tuple((p.id, p.status) for p in self.predictions),
                     tuple(e.id for e in self.experiments),
                     tuple(r.result_id for r in self.results),
                     self.evidence_ids,
                     tuple(c.id for c in self.claims),
                     tuple(link.id for link in self.evidence_links),
+                    tuple(a.id for a in self.assessments),
+                    tuple((a.id, a.status) for a in self.attempts),
                     tuple(a.id for a in self.history),
                     self.parent_id,
                 ),
             )
 
-    # -- evolution ---------------------------------------------------------
+    # -- evolution (commit-layer API; roles produce proposals instead) ------
 
     def _evolve(self, **changes: Any) -> ResearchState:
         """Derive a successor state. The one loosely typed seam in the domain:
@@ -79,6 +106,9 @@ class ResearchState:
 
     def upsert_hypothesis(self, hypothesis: Hypothesis) -> ResearchState:
         return self._evolve(hypotheses=_upsert(self.hypotheses, hypothesis))
+
+    def upsert_prediction(self, prediction: Prediction) -> ResearchState:
+        return self._evolve(predictions=_upsert(self.predictions, prediction))
 
     def add_experiment(self, spec: ExperimentSpec) -> ResearchState:
         return self._evolve(experiments=_upsert(self.experiments, spec))
@@ -99,27 +129,89 @@ class ResearchState:
     def link_evidence(self, link: EvidenceLink) -> ResearchState:
         return self._evolve(evidence_links=_upsert(self.evidence_links, link))
 
+    def record_assessment(self, assessment: EpistemicAssessment) -> ResearchState:
+        return self._evolve(assessments=_upsert(self.assessments, assessment))
+
+    def begin_attempt(self, attempt: ActionAttempt) -> ResearchState:
+        if attempt.status.is_terminal:
+            raise ValueError(f"attempt {attempt.id} began in a terminal status")
+        return self._evolve(attempts=_upsert(self.attempts, attempt))
+
+    def resolve_attempt(self, attempt: ActionAttempt) -> ResearchState:
+        """Record the terminal form of an attempt begun earlier. The attempt
+        keeps its id; the state keeps every attempt, failed ones included."""
+        if not attempt.status.is_terminal:
+            raise ValueError(f"attempt {attempt.id} is not terminal")
+        if not any(a.id == attempt.id for a in self.attempts):
+            raise ValueError(f"attempt {attempt.id} was never begun on this state")
+        return self._evolve(attempts=_upsert(self.attempts, attempt))
+
     def apply(self, action: ResearchAction) -> ResearchState:
-        """Record that ``action`` was taken. Does not charge the budget: the
-        estimate that justified the action is not the cost that was paid."""
+        """Append to the audit trail. Nothing operational may read ``history``."""
         return self._evolve(history=(*self.history, action))
 
     def charge(self, cost: ResourceCost) -> ResearchState:
         return self._evolve(budget=self.budget.spend(cost))
 
-    # -- queries -----------------------------------------------------------
+    # -- queries ------------------------------------------------------------
 
     def hypothesis(self, hypothesis_id: str) -> Hypothesis | None:
         return next((h for h in self.hypotheses if h.id == hypothesis_id), None)
 
+    def prediction(self, prediction_id: str) -> Prediction | None:
+        return next((p for p in self.predictions if p.id == prediction_id), None)
+
     def claim(self, claim_id: str) -> Claim | None:
         return next((c for c in self.claims if c.id == claim_id), None)
 
-    def experiments_for(self, hypothesis_id: str) -> tuple[ExperimentSpec, ...]:
-        return tuple(e for e in self.experiments if e.hypothesis_id == hypothesis_id)
+    def experiment(self, spec_id: str) -> ExperimentSpec | None:
+        return next((e for e in self.experiments if e.id == spec_id), None)
+
+    def predictions_for(self, hypothesis_id: str) -> tuple[Prediction, ...]:
+        return tuple(p for p in self.predictions if p.hypothesis_id == hypothesis_id)
+
+    def experiments_for(self, prediction_id: str) -> tuple[ExperimentSpec, ...]:
+        return tuple(e for e in self.experiments if e.prediction_id == prediction_id)
 
     def results_for(self, spec_id: str) -> tuple[ResultRef, ...]:
         return tuple(r for r in self.results if r.spec_id == spec_id)
+
+    def attempts_for(self, action_id: str) -> tuple[ActionAttempt, ...]:
+        return tuple(a for a in self.attempts if a.action.id == action_id)
+
+    def has_succeeded(
+        self, action_type: ResearchActionType, target: str | None = None
+    ) -> bool:
+        """Whether the work is *done*: some attempt of this action type (on
+        ``target``, if given) resolved with a succeeded outcome. Failed
+        attempts do not count — that is the point."""
+        return any(
+            a.succeeded
+            and a.action.action_type is action_type
+            and (target is None or target in a.action.targets)
+            for a in self.attempts
+        )
+
+    def in_flight(
+        self, action_type: ResearchActionType, target: str | None = None
+    ) -> bool:
+        """Whether such work is currently queued or running."""
+        return any(
+            not a.status.is_terminal
+            and a.action.action_type is action_type
+            and (target is None or target in a.action.targets)
+            for a in self.attempts
+        )
+
+    def current_assessment(self, subject_id: str) -> EpistemicAssessment | None:
+        """The latest assessment targeting ``subject_id``, honouring
+        supersession: an assessment that another one names in ``supersedes``
+        is no longer current."""
+        superseded = {a.supersedes for a in self.assessments if a.supersedes}
+        for assessment in reversed(self.assessments):
+            if assessment.subject_id == subject_id and assessment.id not in superseded:
+                return assessment
+        return None
 
 
 class _HasId(Protocol):

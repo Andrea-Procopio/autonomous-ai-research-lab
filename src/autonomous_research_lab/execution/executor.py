@@ -3,10 +3,16 @@
 An :class:`ExperimentJob` is the infrastructure-facing binding of a scientific
 :class:`~autonomous_research_lab.core.experiment.ExperimentSpec` to something a
 machine can run. Keeping them separate means a spec can be re-bound to a
-different backend -- laptop today, cluster later -- without editing the science.
+different backend — laptop today, cluster later — without editing the science.
 
-The :class:`Executor` interface is deliberately three methods. It is shaped for
-asynchronous, long-running, remote work, even though the only implementation
+A job is an **occurrence**, not a semantic object: submitting the same
+spec twice — a retry, a replication — is two events, so two identically
+configured jobs carry distinct ids, and each job may be submitted exactly
+once. This is what keeps every execution a distinct record with its own
+provenance.
+
+The :class:`Executor` interface is deliberately three methods, shaped for
+asynchronous, long-running, remote work even though the only implementation
 today is local and synchronous: ``submit`` returns a handle rather than a
 result, so no caller can be written in a way that assumes the result is
 already available.
@@ -20,7 +26,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 
 from ..core.experiment import ExperimentResult
-from ..core.ids import content_id
+from ..core.ids import occurrence_id
 from ..core.types import ConfigValue, freeze_mapping
 
 
@@ -44,6 +50,11 @@ class JobNotFinishedError(RuntimeError):
     """Raised when collecting a job that has not reached a terminal state."""
 
 
+class DuplicateJobError(RuntimeError):
+    """Raised when a job object is submitted more than once. A retry is a new
+    event: construct a new job."""
+
+
 @dataclass(frozen=True, slots=True)
 class ExperimentJob:
     spec_id: str
@@ -53,11 +64,6 @@ class ExperimentJob:
     env: Mapping[str, str] = field(default_factory=dict)
     seed: int | None = None
     timeout_seconds: float | None = None
-    attempt: int = 0
-    """Discriminates replications of an otherwise identical job, so that
-    re-running the same spec produces a distinct record rather than colliding
-    with the original."""
-
     id: str = field(default="")
 
     def __post_init__(self) -> None:
@@ -66,24 +72,13 @@ class ExperimentJob:
         if not self.command:
             raise ValueError("job command must be non-empty")
         if not self.id:
-            object.__setattr__(
-                self,
-                "id",
-                content_id(
-                    "job",
-                    self.spec_id,
-                    self.command,
-                    self.config,
-                    self.seed,
-                    self.attempt,
-                ),
-            )
+            object.__setattr__(self, "id", occurrence_id("job"))
 
 
 class Executor(ABC):
     @abstractmethod
     def submit(self, job: ExperimentJob) -> str:
-        """Enqueue ``job`` and return its id."""
+        """Enqueue ``job`` and return its id. Each job submits at most once."""
 
     @abstractmethod
     def status(self, job_id: str) -> JobStatus: ...

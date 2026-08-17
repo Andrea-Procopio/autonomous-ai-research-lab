@@ -1,33 +1,37 @@
 """Claims and their links to evidence.
 
-A claim never contains its own supporting numbers. Support is expressed as
-:class:`EvidenceLink` edges into the evidence store, so that "how well
-supported is this?" is a question answered by traversing the graph rather than
-by trusting a summary written alongside the claim.
+A claim is a statement someone is prepared to assert, scoped to the conditions
+under which it is asserted. It carries **no status and no numbers**:
+
+* its factual support is the set of :class:`EvidenceLink` edges into the
+  evidence store;
+* its epistemic standing is the latest
+  :class:`~.assessment.EpistemicAssessment` targeting it.
+
+The omission of a status field is deliberate. A status stored on the claim
+invites exactly the shortcut this architecture forbids — deciding truth by
+counting edges. How an observation *relates* to a claim (below) is a factual
+annotation; whether the claim should be believed is a separate judgment with
+its own object, author, and rationale.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from enum import StrEnum
 
 from .ids import content_id
 
 
-class ClaimStatus(StrEnum):
-    PROPOSED = "proposed"
-    SUPPORTED = "supported"
-    CONTESTED = "contested"
-    """Supporting and contradicting evidence both exist and neither dominates."""
-
-    REFUTED = "refuted"
-    WITHDRAWN = "withdrawn"
-
-
 class EvidenceRelation(StrEnum):
+    """How one piece of evidence bears on one claim. A description of
+    relevance, not a verdict."""
+
     SUPPORTS = "supports"
     CONTRADICTS = "contradicts"
-    NEUTRAL = "neutral"
+    INCONCLUSIVE = "inconclusive"
+    """Bears on the claim but neither supports nor contradicts it — an
+    underpowered run, a confounded comparison, an ambiguous measurement."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,7 +43,6 @@ class Claim:
     in spirit."""
 
     hypothesis_id: str | None = None
-    status: ClaimStatus = ClaimStatus.PROPOSED
     id: str = field(default="")
 
     def __post_init__(self) -> None:
@@ -50,25 +53,16 @@ class Claim:
                 self, "id", content_id("clm", self.statement, self.scope)
             )
 
-    def with_status(self, status: ClaimStatus) -> Claim:
-        return replace(self, status=status)
-
 
 @dataclass(frozen=True, slots=True)
 class EvidenceLink:
     claim_id: str
     evidence_id: str
     relation: EvidenceRelation
-    weight: float = 1.0
-    """Strength of the relation. Left as an opaque scalar for now: a principled
-    weighting needs the statistician role, which does not exist yet."""
-
     rationale: str = ""
     id: str = field(default="")
 
     def __post_init__(self) -> None:
-        if self.weight < 0.0:
-            raise ValueError("evidence link weight must be non-negative")
         if not self.id:
             object.__setattr__(
                 self,
