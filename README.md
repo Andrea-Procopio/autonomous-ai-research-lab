@@ -1,96 +1,90 @@
 # Autonomous AI Research Lab
 
-Infrastructure for autonomous systems that conduct scientific research:
-forming hypotheses, running experiments, and evaluating evidence under an
-explicit budget.
+Infrastructure for AI systems that do scientific research on their own:
+form hypotheses, run experiments, and weigh the evidence, all within a
+budget.
 
-The central design problem is that language models can produce
-research-shaped output — hypotheses, narratives, conclusions — that is not
-anchored to anything measured. The architecture is built to make that
-failure hard: experimental results are immutable and can only be produced by
-a process that actually ran, claims link to the evidence behind them, and
-belief status is recorded as versioned assessments rather than as mutable
-fields on hypotheses.
+The problem this project is built around: language models are good at
+producing text that looks like research even when nothing behind it was
+actually measured. The codebase is designed so that this cannot happen
+quietly.
+
+- A result can only come from a process that actually ran. No component
+  can write one from reasoning.
+- Results are never edited after the fact.
+- Every claim points to the evidence behind it.
+- Whether a hypothesis is currently believed is a separate, dated record
+  with an author. Changing a verdict means adding a new record, not
+  editing the old one.
 
 ## Status
 
-Early-stage, experimental. The repository contains the domain model and one
-working orchestration loop over it. There is no model provider integration,
-no literature access, no cloud execution, and no manuscript generation. The
-current orchestrator is a rule-based reference implementation used to
-exercise the contracts.
+Early and experimental. What exists is the data model and one working
+loop that runs experiments end to end. What does not exist yet: any
+connection to a language model, literature search, cloud execution, or
+paper writing. The current decision-making is a simple rule-based
+placeholder.
 
-Interfaces will change.
+Expect interfaces to change.
 
-## Architecture
+## How the code is organized
 
-The package is organized as layers. Dependencies point downward only, and
-`core` imports nothing from the other packages; a test enforces this.
-
-| Layer | Responsibility |
+| Package | What it does |
 | --- | --- |
-| `core` | Domain types: research state, actions and attempts, questions, hypotheses, predictions and prediction tests, experiments, evidence, claims, assessments, proposals, commit bundles, decisions, budgets, replication groups. No dependencies. |
-| `evidence` | Append-only stores for results and evidence; the evidence-chain validator. |
-| `execution` | Runs experiment jobs as subprocesses with a job-private working directory, home directory, and filtered environment. Collects metrics and artifacts and records their hashes in a manifest. |
-| `knowledge` | Read models: the claim–evidence graph, lessons. |
-| `persistence` | Content-addressed state snapshots, reconstructible offline. |
-| `runtime` | Frontier view, deterministic result validation, reasoning tiers and escalation, runtime metrics, playbooks, evaluation seam. Depends only on `core`. |
-| `search` | Selection policies over evaluated candidates. |
-| `roles` | Role interfaces: explicit invocations in, typed proposals out. Roles do not mutate state. |
-| `orchestration` | The director, the runtime loop, static routing, critic and synthesis triggers, the transition layer, the trajectory log. |
-| `publication` | Reporting. Currently empty. |
+| `core` | The basic data types: questions, hypotheses, predictions, experiments, results, evidence, claims, assessments, budgets, and the research state that ties them together. Depends on nothing else. |
+| `evidence` | Storage for results and evidence. Records can be added but never changed. |
+| `execution` | Runs an experiment as a subprocess. Each job gets its own working directory, its own home directory, and a minimal environment. Output files are collected and hashed. |
+| `knowledge` | Read-only views over the data, such as the graph linking claims to evidence. |
+| `persistence` | Saves every state to disk so a run can be inspected or replayed later. |
+| `runtime` | Bookkeeping around the loop: what work is open, validation of results, cost tracking, metrics. |
+| `search` | Policies for choosing the next action among candidates. |
+| `roles` | Interfaces for the agents (director, engineer, critic). A role receives a task and returns proposals. It never edits state directly. |
+| `orchestration` | The main loop: pick an action, route it to a role, validate what comes back, commit it, log everything. |
+| `publication` | Paper writing. Empty for now. |
 
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) explains the reasoning behind
-each layer; [docs/ROADMAP.md](docs/ROADMAP.md) describes planned work.
+Dependencies point one way: higher packages import lower ones, never the
+reverse, and `core` imports nothing. A test checks this.
 
-## Design rules
+More detail in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and
+[docs/ROADMAP.md](docs/ROADMAP.md).
 
-State and evidence:
+## The main rules
 
-- The authoritative state of a research program is a structured, immutable
-  `ResearchState`, not a model's conversation history.
-- Hypotheses, predictions, and claims carry no truth status. What a run
-  observed about a prediction is a per-run `PredictionTest`; what is
-  currently believed is a versioned `EpistemicAssessment`. Standing is
-  computed by query.
-- Hypotheses are tested through pre-registered, machine-checkable
-  predictions (metric, comparator, threshold), evaluated mechanically when a
-  result is committed.
-- An `ExperimentResult` is produced only by an executor that ran a process,
-  and is never edited afterwards. Replications are stored as separate
-  records, grouped by protocol identity.
-- Evidence links (how a piece of evidence bears on a claim) are separate
-  from assessments (whether the claim should be believed). Verdicts are
-  never derived by counting evidence edges.
-- Failed runs, inconsistent prediction tests, failed attempts, and
-  contradicted claims are recorded outcomes with provenance.
+How data is kept:
 
-Execution and commits:
+- The full state of a research program lives in one immutable data
+  structure, not in a model's chat history.
+- A hypothesis never stores whether it is true. Each run records whether
+  its outcome matched the prediction, and belief in the hypothesis is a
+  separate signed record. New judgments are added; old ones stay.
+- Predictions are registered before the experiment runs: which metric,
+  which comparison, which threshold. The check against the result is done
+  by code, so the criterion cannot be adjusted afterwards to fit the
+  outcome.
+- Only the executor can produce a result, and only from a process that
+  ran. Repeat runs of the same experiment are stored as separate records.
+- Failed runs and negative results are recorded like any other outcome,
+  not dropped.
 
-- Work is a search over typed actions, not a fixed pipeline. An action's
-  intent is separate from each attempt at executing it; a failed attempt
-  leaves the action open.
-- Roles receive explicit invocations (context, allowed actions, output
-  contract) and return typed proposals. An attempt's proposals and outcome
-  commit atomically as a `CommitBundle`; a successful attempt cannot claim
-  outputs that were not committed. Decisions are logged and every
-  decision-boundary state is snapshotted.
+How the loop works:
 
-Validation and accounting:
-
-- An ordinary experiment step makes two reasoning-seat invocations: one
-  director deliberation and one role invocation. A critic runs only when a
-  deterministic trigger fires. Provider calls and token counts are recorded
-  separately, from provider reports.
-- Every returned result, failed executions included, is validated
-  deterministically before commit: it must reference its assigned experiment
-  and pass artifact-integrity checks, and a successful result must also
-  carry its declared metrics, finite values, and seed. Roles, the critic
-  included, can commit only the proposal kinds their invocation's output
-  contract allows.
-- Execution cost is tracked separately from scientific state. Work rejected
-  by validation is still billed at its actual cost and runtime. Budget
-  overruns are recorded and halt the run.
+- Work is a sequence of typed actions: generate a hypothesis, design an
+  experiment, run it, analyze the result, and so on. A failed attempt
+  leaves the action open. It never counts as done.
+- Roles return proposals. A separate transition layer checks and commits
+  them. Everything an attempt produced is committed together or not at
+  all.
+- A normal step makes two reasoning calls: one for the director to pick
+  an action, one for the role that performs it. A critic is consulted
+  only when a fixed rule says the result warrants it, for example when
+  two runs of the same experiment disagree.
+- Every result is checked by code before it enters the record: does it
+  belong to the assigned experiment, are the output files intact, are the
+  declared metrics present, are the numbers finite. Failed runs are
+  checked too.
+- Costs are tracked even when a result is rejected: whatever actually ran
+  is billed against the budget. If the budget runs out, the program
+  stops.
 
 ## Setup
 
@@ -110,18 +104,17 @@ pip install -e ".[dev]"
 python examples/runtime_loop.py
 ```
 
-Runs the runtime twice on a small question (whether a seeded draw stream is
-biased) and prints both trajectories with their invocation accounting.
+Runs the loop twice on a toy question: is a seeded random stream biased?
 
 ```
-frontier → director deliberates once → static routing → executor
-→ validation gate → critic trigger (false) → atomic commit → new frontier
+frontier → director picks an action → routed to a role → executor runs it
+→ result validated → commit → next step
 ```
 
-The normal scenario completes each experiment iteration in two reasoning
-invocations, with zero model calls. The escalated scenario produces a
-contradictory replication, which fires the critic trigger and a synthesis
-pass.
+The first run is the normal path: each experiment step costs two
+reasoning calls and no critic. The second run is set up so that two runs
+of the same experiment disagree, which triggers the critic and a
+synthesis pass. The script prints both trajectories and the call counts.
 
 ### examples/minimal_loop.py
 
@@ -129,20 +122,11 @@ pass.
 python examples/minimal_loop.py
 ```
 
-Demonstrates the decomposed decision path (candidate generation → utility
-evaluation → selection policy) at finer action granularity:
-
-```
-ResearchState → director → ActionAttempt → proposals → transition layer
-→ ExperimentSpec → LocalExecutor → ExperimentResult → evidence
-→ prediction checked → assessment → ResearchState'
-```
-
-The demo's hypothesis is refuted: metrics are read from a `metrics.json`
-written by the subprocess, the pre-registered prediction is tested
-mechanically at commit, and the refuted standing is recorded as an
-assessment. Decisions are written to a JSONL trajectory log and each
-decision-boundary state is persisted as a content-addressed snapshot.
+An earlier, more granular demo of the same contracts. Its hypothesis gets
+refuted: the metric is read from a file written by the subprocess, the
+pre-registered prediction check fails, and the refutation is recorded as
+an assessment. Every decision is logged and every intermediate state is
+saved to disk.
 
 ## Tests and checks
 
@@ -154,4 +138,4 @@ mypy
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE).
