@@ -69,6 +69,7 @@ from .preflight import (
 )
 from .providers import (
     DEFAULT_TIMEOUT_SECONDS,
+    CallAccounting,
     FakeModelProvider,
     InvalidModelResponseError,
     Message,
@@ -78,6 +79,7 @@ from .providers import (
     ModelRequest,
     ModelResponse,
     OutputSchema,
+    ProviderConfigurationError,
     ProviderRateLimitError,
     ProviderTimeoutError,
     ProviderTransportError,
@@ -131,6 +133,7 @@ __all__ = [
     "MUSE_SPARK_1_2",
     "NO_USAGE",
     "AdmissibilityCheck",
+    "CallAccounting",
     "CheckState",
     "CompactValuation",
     "Contradiction",
@@ -168,6 +171,7 @@ __all__ = [
     "PositiveControl",
     "PreflightCheck",
     "PreflightError",
+    "ProviderConfigurationError",
     "ProviderRateLimitError",
     "ProviderTimeoutError",
     "ProviderTransportError",

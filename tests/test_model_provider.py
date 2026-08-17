@@ -11,6 +11,7 @@ import pytest
 from autonomous_research_lab.core.budget import ResourceCost
 from autonomous_research_lab.runtime.metrics import ProviderUsage
 from autonomous_research_lab.runtime.providers import (
+    CallAccounting,
     FakeModelProvider,
     InvalidModelResponseError,
     Message,
@@ -20,6 +21,7 @@ from autonomous_research_lab.runtime.providers import (
     ModelRequest,
     ModelResponse,
     OutputSchema,
+    ProviderConfigurationError,
     ProviderRateLimitError,
     ProviderTimeoutError,
     ProviderTransportError,
@@ -342,26 +344,78 @@ def test_provider_failures_propagate_to_the_caller(
         provider.invoke(_request())
 
 
-def test_the_five_failure_kinds_are_distinguishable() -> None:
-    """A caller can tell a timeout from a rate limit from a schema violation
-    without string matching, and every one of them is a runtime error rather
-    than anything scientific."""
+def test_the_failure_kinds_are_distinguishable() -> None:
+    """A caller can tell misconfiguration from a timeout from a rate limit
+    from a schema violation without string matching, and every one of them
+    is a runtime error rather than anything scientific."""
     kinds = (
+        ProviderConfigurationError("x"),
         ProviderTransportError("x"),
         ProviderTimeoutError("x", timeout_seconds=1.0),
         ProviderRateLimitError("x"),
         InvalidModelResponseError("x"),
         StructuredOutputError("x", schema="s"),
     )
-    assert len({type(k) for k in kinds}) == 5
+    assert len({type(k) for k in kinds}) == 6
     for kind in kinds:
         assert isinstance(kind, ModelProviderError)
         assert isinstance(kind, RuntimeError)
     # A schema violation is not merely an invalid response: different fault,
-    # different handling.
+    # different handling. And local misconfiguration is not the transport
+    # family: one is permanent, the other worth retrying.
     assert not isinstance(
         StructuredOutputError("x", schema="s"), InvalidModelResponseError
     )
+    assert not isinstance(
+        ProviderConfigurationError("x"), ProviderTransportError
+    )
+
+
+def test_errors_can_carry_observed_call_accounting() -> None:
+    """A failure after the provider replied may still have been billed; the
+    accounting rides on the error, and absent accounting means unknown."""
+    fresh = StructuredOutputError("bad output", schema="s")
+    assert fresh.accounting is None  # unknown until an adapter observed it
+
+    accounting = CallAccounting(
+        usage=ProviderUsage(
+            calls=1, input_tokens=52, output_tokens=2048, model="m-1"
+        ),
+        latency_seconds=9.5,
+        request_id="req-1",
+        model="m-1",
+        nominal_cost=None,
+    )
+    error = StructuredOutputError("bad output", schema="s").with_accounting(
+        accounting
+    )
+    assert error.accounting is not None
+    assert error.accounting.usage.output_tokens == 2048
+    assert error.accounting.nominal_cost is None  # unknown, not zero
+
+
+def test_the_ledger_records_failed_call_accounting_without_double_count() -> None:
+    ledger = UsageLedger()
+    provider = FakeModelProvider(["one two three"])
+    ledger.record(provider.invoke(_request()))
+
+    billed_failure = InvalidModelResponseError("truncated").with_accounting(
+        CallAccounting(
+            usage=ProviderUsage(
+                calls=1, input_tokens=52, output_tokens=2048, model="m-1"
+            ),
+            latency_seconds=9.5,
+        )
+    )
+    unbilled_failure = ProviderTransportError("connection reset")
+
+    assert ledger.record_failure(billed_failure) is True
+    assert ledger.record_failure(unbilled_failure) is False  # unknown adds 0
+
+    drained = ledger.drain()
+    assert drained.calls == 2  # one success + one billed failure, no more
+    assert drained.output_tokens == 2048 + 3
+    assert ledger.drain() == ProviderUsage()
 
 
 def test_failure_details_survive_for_the_caller_to_act_on() -> None:

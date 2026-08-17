@@ -31,10 +31,17 @@ kind. Nothing in this module can reach ``ResearchState`` — model output
 becomes a proposal only after a role builds one and the transition layer
 commits it.
 
-The five distinctions callers can act on: transport (:class:`ProviderTransportError`),
+The six distinctions callers can act on: local misconfiguration
+(:class:`ProviderConfigurationError`), transport (:class:`ProviderTransportError`),
 timeout (:class:`ProviderTimeoutError`), rate limit (:class:`ProviderRateLimitError`),
 unusable reply (:class:`InvalidModelResponseError`), and schema violation
 (:class:`StructuredOutputError`).
+
+A failure observed *after* the provider replied may still have been billed.
+Adapters attach the observed :class:`CallAccounting` to such errors, and
+:meth:`UsageLedger.record_failure` folds it into the same per-step usage
+the loop already drains — so a truncated or contract-violating reply keeps
+its cost on the books instead of vanishing from the accounting.
 """
 
 from __future__ import annotations
@@ -45,7 +52,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from types import MappingProxyType
-from typing import Final
+from typing import Final, Self
 
 from ..core.budget import ResourceCost
 from ..core.ids import content_id, occurrence_id
@@ -60,11 +67,53 @@ experiment job does: "wait forever" is not an option the contract offers."""
 # -- failures -----------------------------------------------------------------
 
 
+@dataclass(frozen=True, slots=True)
+class CallAccounting:
+    """What one model call observably cost, independent of whether its
+    reply was usable.
+
+    Every field records what the provider reported, exactly: unknown
+    values stay unknown (``None`` cost, absent accounting) rather than
+    becoming invented zeros. Attached to failures so that a billed call
+    that raised keeps its spend on the books.
+    """
+
+    usage: ProviderUsage
+    latency_seconds: float
+    request_id: str | None = None
+    model: str = ""
+    nominal_cost: ResourceCost | None = None
+
+
 class ModelProviderError(RuntimeError):
     """Base class for every model-call failure.
 
     A failed model call is an infrastructure event, never a scientific
     result. Nothing derived from this class may be recorded as evidence.
+
+    A failure observed after the provider replied may still have been
+    billed; adapters attach the observed :class:`CallAccounting` via
+    :meth:`with_accounting`. ``None`` means no accounting was observed —
+    unknown spend, not zero spend.
+    """
+
+    accounting: CallAccounting | None = None
+
+    def with_accounting(self, accounting: CallAccounting) -> Self:
+        """Attach the observed cost of this failed call; returns self."""
+        self.accounting = accounting
+        return self
+
+
+class ProviderConfigurationError(ModelProviderError):
+    """The caller's own provider configuration is missing or malformed —
+    an absent API key, an unusable endpoint — detected before any request
+    is made.
+
+    Distinct from the transport family because it is permanent until a
+    human fixes it: no retry or backoff can help. A key the *provider*
+    rejects is :class:`ProviderTransportError` territory — that verdict
+    came from the remote side, and only it knows.
     """
 
 
@@ -507,7 +556,8 @@ class ModelProvider(ABC):
     def invoke(self, request: ModelRequest) -> ModelResponse:
         """Perform ``request`` and return a validated response.
 
-        Raises :class:`ProviderTimeoutError`, :class:`ProviderRateLimitError`,
+        Raises :class:`ProviderConfigurationError`,
+        :class:`ProviderTimeoutError`, :class:`ProviderRateLimitError`,
         :class:`ProviderTransportError`, :class:`InvalidModelResponseError`,
         or :class:`StructuredOutputError`.
         """
@@ -526,6 +576,20 @@ class UsageLedger:
 
     def record(self, response: ModelResponse) -> None:
         self._pending = self._pending + response.usage
+
+    def record_failure(self, error: ModelProviderError) -> bool:
+        """Add the accounting a failed call carried, when it carried any.
+
+        Returns whether anything was recorded, so a caller can tell
+        recorded spend from unknown spend. A failure without accounting
+        adds nothing — unknown is not zero. Record each failed call
+        exactly once; a failure never also produced a ``ModelResponse``,
+        so it can never be double-counted against :meth:`record`.
+        """
+        if error.accounting is None:
+            return False
+        self._pending = self._pending + error.accounting.usage
+        return True
 
     def drain(self) -> ProviderUsage:
         drained, self._pending = self._pending, NO_USAGE

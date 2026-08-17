@@ -62,11 +62,13 @@ from typing import Final, Protocol
 
 from .metrics import ProviderUsage
 from .providers import (
+    CallAccounting,
     InvalidModelResponseError,
     ModelProvider,
     ModelProviderError,
     ModelRequest,
     ModelResponse,
+    ProviderConfigurationError,
     ProviderRateLimitError,
     ProviderTimeoutError,
     ProviderTransportError,
@@ -101,8 +103,8 @@ class MuseSparkProvider(ModelProvider):
         return "muse"
 
     def invoke(self, request: ModelRequest) -> ModelResponse:
+        api_key = _api_key()  # configuration first: no key, no work
         payload = json.dumps(build_payload(request)).encode("utf-8")
-        api_key = _api_key()
         started = time.monotonic()
         raw, headers = self._post(payload, api_key, request.timeout_seconds)
         latency = time.monotonic() - started
@@ -252,7 +254,7 @@ def _api_key() -> str:
         value = os.environ.get(name, "").strip()
         if value:
             return value
-    raise ProviderTransportError(
+    raise ProviderConfigurationError(
         "no Muse API key available: set MUSE_API_KEY (or MODEL_API_KEY, the "
         "name the official documentation uses)"
     )
@@ -277,13 +279,24 @@ def parse_response(
     dropped. Nominal cost is ``None``: the account's actual rate (tier,
     cached-token discounts) is not knowable from the response, and a wrong
     price is worse than an honest unknown.
+
+    Accounting is extracted *before* the reply's content is judged: a
+    truncated or contract-violating reply was still billed, so the raised
+    error carries the observed :class:`CallAccounting` rather than
+    discarding it.
     """
-    finish_reason, content = _first_choice(body)
-    if request.schema is not None:
-        structured = request.schema.parse(content)
-        schema_name = request.schema.name
-    else:
-        structured, schema_name = None, ""
+    accounting = _call_accounting(body, headers, request=request, latency=latency)
+    try:
+        finish_reason, content = _first_choice(body)
+        if request.schema is not None:
+            structured = request.schema.parse(content)
+            schema_name = request.schema.name
+        else:
+            structured, schema_name = None, ""
+    except ModelProviderError as exc:
+        if accounting is not None:
+            exc.with_accounting(accounting)
+        raise
 
     usage = body.get("usage")
     usage = usage if isinstance(usage, Mapping) else {}
@@ -320,6 +333,40 @@ def parse_response(
         request_fingerprint=request.fingerprint,
         schema_name=schema_name,
         metadata=metadata,
+    )
+
+
+def _call_accounting(
+    body: Mapping[str, object],
+    headers: Mapping[str, str],
+    *,
+    request: ModelRequest,
+    latency: float,
+) -> CallAccounting | None:
+    """What the provider reported having spent, independent of whether the
+    reply is usable. ``None`` when the body carries no usage counts —
+    unknown spend stays unknown rather than becoming a reported zero."""
+    usage = body.get("usage")
+    if not isinstance(usage, Mapping):
+        return None
+    prompt = usage.get("prompt_tokens")
+    completion = usage.get("completion_tokens")
+    if not isinstance(prompt, int) or isinstance(prompt, bool):
+        return None
+    if not isinstance(completion, int) or isinstance(completion, bool):
+        return None
+    served_model = str(body.get("model") or request.model)
+    return CallAccounting(
+        usage=ProviderUsage(
+            calls=1,
+            input_tokens=prompt,
+            output_tokens=completion,
+            model=served_model,
+        ),
+        latency_seconds=latency,
+        request_id=headers.get("x-request-id") or (str(body.get("id") or "") or None),
+        model=served_model,
+        nominal_cost=None,
     )
 
 

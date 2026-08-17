@@ -19,6 +19,7 @@ SRC = Path(__file__).resolve().parents[1] / "src" / PACKAGE
 CORE = SRC / "core"
 ROLES = SRC / "roles"
 PROVIDERS = SRC / "runtime" / "providers.py"
+PROVIDER_MODULES = (PROVIDERS, SRC / "runtime" / "muse.py")
 
 #: Vendor SDKs that must never be imported by the provider-neutral seam. An
 #: adapter for one of these belongs in its own module, behind the interface.
@@ -125,22 +126,28 @@ def test_the_provider_seam_imports_no_vendor_sdk() -> None:
 
 def test_the_provider_seam_cannot_touch_scientific_state() -> None:
     """Model output is text until a role turns it into a proposal and the
-    transition layer commits it. The seam has no way to shortcut that."""
-    tree = ast.parse(PROVIDERS.read_text(), filename=str(PROVIDERS))
+    transition layer commits it. Neither the seam nor an adapter has a way
+    to shortcut that — provider failures stay runtime events."""
     violations: list[str] = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom):
-            module = node.module or ""
-            if "state" in module or "proposals" in module:
-                violations.append(f"imports {module}")
-        elif (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr in STATE_MUTATORS
-        ):
-            violations.append(f"{node.lineno}: calls .{node.func.attr}(...)")
-        elif isinstance(node, ast.Name) and node.id == "ResearchState":
-            violations.append(f"{node.lineno}: references ResearchState")
+    for path in PROVIDER_MODULES:
+        tree = ast.parse(path.read_text(), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+                if "state" in module or "proposals" in module:
+                    violations.append(f"{path.name}: imports {module}")
+            elif (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr in STATE_MUTATORS
+            ):
+                violations.append(
+                    f"{path.name}:{node.lineno}: calls .{node.func.attr}(...)"
+                )
+            elif isinstance(node, ast.Name) and node.id == "ResearchState":
+                violations.append(
+                    f"{path.name}:{node.lineno}: references ResearchState"
+                )
     assert violations == []
 
 

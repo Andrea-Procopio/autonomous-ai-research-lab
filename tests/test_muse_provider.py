@@ -26,6 +26,7 @@ from typing import Any, ClassVar
 import pytest
 
 from autonomous_research_lab.runtime import muse
+from autonomous_research_lab.runtime.metrics import ProviderUsage
 from autonomous_research_lab.runtime.muse import (
     KEY_ENV_VARS,
     MUSE_SPARK_1_2,
@@ -39,12 +40,15 @@ from autonomous_research_lab.runtime.providers import (
     InvalidModelResponseError,
     Message,
     MessageRole,
+    ModelProviderError,
     ModelRequest,
     OutputSchema,
+    ProviderConfigurationError,
     ProviderRateLimitError,
     ProviderTimeoutError,
     ProviderTransportError,
     StructuredOutputError,
+    UsageLedger,
 )
 
 HYPOTHESIS_SCHEMA = OutputSchema(
@@ -408,7 +412,7 @@ def test_the_key_is_read_at_invocation_time_from_the_environment(
 ) -> None:
     for name in KEY_ENV_VARS:
         monkeypatch.delenv(name, raising=False)
-    with pytest.raises(ProviderTransportError, match="MUSE_API_KEY"):
+    with pytest.raises(ProviderConfigurationError, match="MUSE_API_KEY"):
         _api_key()
 
     monkeypatch.setenv("MODEL_API_KEY", "dummy-official-name")
@@ -424,7 +428,7 @@ def test_a_whitespace_key_counts_as_missing(
     for name in KEY_ENV_VARS:
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("MUSE_API_KEY", "   ")
-    with pytest.raises(ProviderTransportError, match="no Muse API key"):
+    with pytest.raises(ProviderConfigurationError, match="no Muse API key"):
         _api_key()
 
 
@@ -691,6 +695,96 @@ def test_wire_injection_never_touches_enum_literals() -> None:
     # ...while the schema nodes themselves are still closed on the wire.
     assert wire["additionalProperties"] is False
     assert wire["properties"]["payload"]["additionalProperties"] is False
+
+
+# -- audit regressions: accounting survives failures --------------------------
+
+
+def test_a_truncated_billed_reply_raises_and_keeps_its_accounting() -> None:
+    """OBSERVED live: the truncation reply billed 2048 completion tokens.
+    The raised error must carry that spend, exactly as reported."""
+    with pytest.raises(InvalidModelResponseError) as caught:
+        parse_response(
+            _TRUNCATED_BODY, _SUCCESS_HEADERS, request=_request(), latency=9.5
+        )
+
+    accounting = caught.value.accounting
+    assert accounting is not None
+    assert accounting.usage.calls == 1
+    assert accounting.usage.input_tokens == 52
+    assert accounting.usage.output_tokens == 2048
+    assert accounting.usage.model == "muse-spark-1.2"
+    assert accounting.model == "muse-spark-1.2"
+    assert accounting.latency_seconds == 9.5
+    assert accounting.request_id == "00000000-0000-4000-8000-000000000000"
+    assert accounting.nominal_cost is None  # unknown, never invented
+
+
+def test_a_schema_invalid_billed_reply_keeps_its_accounting() -> None:
+    body = json.loads(json.dumps(_SUCCESS_BODY))
+    body["choices"][0]["message"]["content"] = _EXTRA_FIELDS_CONTENT
+
+    with pytest.raises(StructuredOutputError) as caught:
+        parse_response(body, _SUCCESS_HEADERS, request=_request(), latency=2.0)
+
+    accounting = caught.value.accounting
+    assert accounting is not None
+    assert accounting.usage.input_tokens == 52
+    assert accounting.usage.output_tokens == 1537
+
+
+def test_failed_call_accounting_reaches_the_ledger_exactly_once() -> None:
+    ledger = UsageLedger()
+    failures: list[ModelProviderError] = []
+    for body, expected in (
+        (_TRUNCATED_BODY, InvalidModelResponseError),
+        (json.loads(json.dumps(_SUCCESS_BODY)), StructuredOutputError),
+    ):
+        if expected is StructuredOutputError:
+            body["choices"][0]["message"]["content"] = _EXTRA_FIELDS_CONTENT
+        with pytest.raises(expected) as caught:
+            parse_response(
+                body, _SUCCESS_HEADERS, request=_request(), latency=1.0
+            )
+        failures.append(caught.value)
+
+    for failure in failures:
+        assert ledger.record_failure(failure) is True
+
+    drained = ledger.drain()
+    assert drained.calls == 2
+    assert drained.input_tokens == 52 + 52
+    assert drained.output_tokens == 2048 + 1537
+    assert ledger.drain() == ProviderUsage()  # nothing left to double-count
+
+
+def test_a_failure_without_reported_usage_stays_unknown() -> None:
+    """A body with no usage block yields an error with no accounting —
+    unknown spend is absent, never a reported zero with calls=1."""
+    body = json.loads(json.dumps(_TRUNCATED_BODY))
+    del body["usage"]
+
+    with pytest.raises(InvalidModelResponseError) as caught:
+        parse_response(body, _SUCCESS_HEADERS, request=_request(), latency=1.0)
+
+    assert caught.value.accounting is None
+    ledger = UsageLedger()
+    assert ledger.record_failure(caught.value) is False
+    assert ledger.drain() == ProviderUsage()
+
+
+def test_missing_configuration_raises_before_any_network_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen = _stub_urlopen(monkeypatch, _FakeReply(b"{}", {}))
+    for name in KEY_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+
+    with pytest.raises(ProviderConfigurationError) as caught:
+        MuseSparkProvider().invoke(_request())
+
+    assert seen == []  # the wire was never touched
+    assert isinstance(caught.value, ModelProviderError)  # still runtime-typed
 
 
 def test_the_adapter_satisfies_the_provider_seam() -> None:
