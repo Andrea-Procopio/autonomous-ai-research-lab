@@ -50,13 +50,15 @@ documentation uses) — and appears in nothing but the request header.
 
 from __future__ import annotations
 
+import http.client
 import json
+import math
 import os
 import time
 import urllib.error
 import urllib.request
 from collections.abc import Iterable, Mapping
-from typing import Final
+from typing import Final, Protocol
 
 from .metrics import ProviderUsage
 from .providers import (
@@ -73,6 +75,19 @@ from .providers import (
 DEFAULT_BASE_URL: Final = "https://api.meta.ai/v1"
 MUSE_SPARK_1_2: Final = "muse-spark-1.2"
 KEY_ENV_VARS: Final = ("MUSE_API_KEY", "MODEL_API_KEY")
+
+_CHUNK_BYTES: Final = 64 * 1024
+_MAX_BODY_BYTES: Final = 64 * 1024 * 1024
+"""Upper bound on a success body. A reply larger than this is a fault to
+classify, not a result to buffer until the process dies."""
+
+_MAX_ERROR_BODY_BYTES: Final = 1024 * 1024
+"""Error envelopes are a few hundred bytes; anything past this cap is
+truncated, and a truncated envelope degrades to the status-code fallback."""
+
+_TRUNCATING_FINISH_REASONS: Final = frozenset({"length"})
+"""finish_reason values that mean the generation did not run to completion.
+Only the observed value; a future adapter datum can extend it."""
 
 
 class MuseSparkProvider(ModelProvider):
@@ -93,7 +108,7 @@ class MuseSparkProvider(ModelProvider):
         latency = time.monotonic() - started
         try:
             body = json.loads(raw)
-        except json.JSONDecodeError as exc:
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
             raise InvalidModelResponseError(
                 f"the reply is not valid JSON: {exc}"
             ) from exc
@@ -116,12 +131,16 @@ class MuseSparkProvider(ModelProvider):
             },
             method="POST",
         )
+        deadline = time.monotonic() + timeout
         try:
             with urllib.request.urlopen(http_request, timeout=timeout) as reply:
-                return reply.read(), _lowered(reply.headers.items())
+                body = _read_bounded(reply, deadline=deadline, timeout=timeout)
+                return body, _lowered(reply.headers.items())
         except urllib.error.HTTPError as exc:
             raise _error_for_status(
-                exc.code, _lowered(exc.headers.items()), exc.read()
+                exc.code,
+                _lowered(exc.headers.items()),
+                exc.read(_MAX_ERROR_BODY_BYTES + 1),
             ) from exc
         except urllib.error.URLError as exc:
             if isinstance(exc.reason, TimeoutError):
@@ -136,6 +155,15 @@ class MuseSparkProvider(ModelProvider):
             raise ProviderTimeoutError(
                 f"no reply from the Muse endpoint within {timeout}s",
                 timeout_seconds=timeout,
+            ) from exc
+        except http.client.HTTPException as exc:
+            # BadStatusLine, IncompleteRead, LineTooLong and kin are not
+            # OSError, so without this clause they would escape the seam
+            # untyped: a reply that cannot even be framed is a transport
+            # failure like any other.
+            raise ProviderTransportError(
+                f"malformed HTTP exchange with the Muse endpoint: "
+                f"{type(exc).__name__}: {exc}"
             ) from exc
         except OSError as exc:
             raise ProviderTransportError(
@@ -176,18 +204,38 @@ def _wire_schema(schema: Mapping[str, object]) -> dict[str, object]:
     closed-by-default semantics explicit wherever a schema does not opt
     out — the provider reads an absent ``additionalProperties`` as open,
     the validator reads it as closed, and the model should be constrained
-    to what validation will accept."""
-    thawed = {key: _thaw(value) for key, value in schema.items()}
+    to what validation will accept.
+
+    The walk is structural, not shape-guessing: recursion into child
+    *schemas* happens only where the subset grammar puts them (each value
+    under ``properties``, and ``items``). Everything else — ``enum``
+    literals above all — is data and is thawed without modification, so a
+    mapping-valued enum entry can never grow an injected key.
+    """
+    thawed: dict[str, object] = {}
+    for key, value in schema.items():
+        if key == "properties" and isinstance(value, Mapping):
+            thawed[key] = {
+                str(name): _wire_schema(child)
+                for name, child in value.items()
+                if isinstance(child, Mapping)
+            }
+        elif key == "items" and isinstance(value, Mapping):
+            thawed[key] = _wire_schema(value)
+        else:
+            thawed[key] = _plain(value)
     if thawed.get("type") == "object" and "additionalProperties" not in thawed:
         thawed["additionalProperties"] = False
     return thawed
 
 
-def _thaw(value: object) -> object:
+def _plain(value: object) -> object:
+    """Thaw a data value verbatim: frozen mappings become dicts, tuples
+    become lists, nothing is injected."""
     if isinstance(value, Mapping):
-        return _wire_schema(value)
+        return {str(key): _plain(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
-        return [_thaw(item) for item in value]
+        return [_plain(item) for item in value]
     return value
 
 
@@ -285,14 +333,19 @@ def _first_choice(body: Mapping[str, object]) -> tuple[str, str]:
     if not isinstance(first, Mapping):
         raise InvalidModelResponseError("the reply's first choice is not an object")
     finish_reason = str(first.get("finish_reason") or "")
+    if finish_reason in _TRUNCATING_FINISH_REASONS:
+        # The authoritative truncation signal. Observed live with content
+        # null, but a truncated generation that still carries partial text
+        # is equally unusable — content emptiness is a symptom, not the
+        # test.
+        raise InvalidModelResponseError(
+            f"the generation was truncated (finish_reason {finish_reason!r})"
+        )
     message = first.get("message")
     if not isinstance(message, Mapping):
         raise InvalidModelResponseError("the reply's choice carries no message")
     content = message.get("content")
     if not isinstance(content, str) or not content.strip():
-        # Observed live: exhausting max_tokens on reasoning yields
-        # finish_reason "length" with content null. A reply with nothing
-        # in it is unusable, whatever the status code said.
         refusal = message.get("refusal")
         detail = f" (refusal: {refusal})" if isinstance(refusal, str) else ""
         raise InvalidModelResponseError(
@@ -358,22 +411,65 @@ def _error_fields(raw: bytes, status: int) -> tuple[str, str | None]:
     if not isinstance(error, Mapping):
         return fallback, None
     message = error.get("message")
-    code = error.get("code") or error.get("type")
+    # The first usable identifier wins: a non-string "code" (some gateways
+    # send numbers) must not short-circuit away a perfectly good "type".
+    code = next(
+        (
+            value
+            for value in (error.get("code"), error.get("type"))
+            if isinstance(value, str) and value
+        ),
+        None,
+    )
     return (
         f"{fallback}: {message}" if isinstance(message, str) else fallback,
-        code if isinstance(code, str) else None,
+        code,
     )
 
 
 def _retry_after(headers: Mapping[str, str]) -> float | None:
-    value = headers.get("retry-after", "")
+    """The server's wait, accepted only when it is a usable number: finite
+    and non-negative. 'nan' would crash a caller's time.sleep, 'inf' would
+    sleep forever, and the HTTP-date form degrades to None."""
     try:
-        return float(value)
+        seconds = float(headers.get("retry-after", ""))
     except ValueError:
         return None
+    return seconds if math.isfinite(seconds) and seconds >= 0 else None
 
 
 def _lowered(items: Iterable[tuple[str, str]]) -> dict[str, str]:
     """Header pairs as a plain lower-cased dict — the last urllib-shaped
     object converted before anything leaves the adapter."""
     return {key.lower(): value for key, value in items}
+
+
+class _Reader(Protocol):
+    def read(self, amount: int, /) -> bytes: ...
+
+
+def _read_bounded(reply: _Reader, *, deadline: float, timeout: float) -> bytes:
+    """The whole success body, bounded in both time and size.
+
+    urllib's ``timeout`` is a per-socket-operation limit, so a server that
+    drips one chunk per interval could otherwise hold the call open far past
+    the caller's deadline; the check between chunks converts that into
+    :class:`ProviderTimeoutError`. The size cap converts a body no sane
+    completion produces into :class:`InvalidModelResponseError` instead of
+    unbounded memory growth.
+    """
+    chunks = bytearray()
+    while True:
+        if time.monotonic() > deadline:
+            raise ProviderTimeoutError(
+                f"the reply body did not complete within {timeout}s",
+                timeout_seconds=timeout,
+            )
+        chunk = reply.read(_CHUNK_BYTES)
+        if not chunk:
+            return bytes(chunks)
+        chunks += chunk
+        if len(chunks) > _MAX_BODY_BYTES:
+            raise InvalidModelResponseError(
+                f"the reply body exceeds {_MAX_BODY_BYTES} bytes"
+            )

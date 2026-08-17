@@ -14,16 +14,18 @@ keys in this file are obvious dummies.
 
 from __future__ import annotations
 
+import http.client
 import io
 import json
 import urllib.error
 import urllib.request
 from collections.abc import Mapping
 from email.message import Message as EmailMessage
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 
+from autonomous_research_lab.runtime import muse
 from autonomous_research_lab.runtime.muse import (
     KEY_ENV_VARS,
     MUSE_SPARK_1_2,
@@ -445,12 +447,32 @@ def test_the_credential_is_passed_verbatim_never_rewritten(
 class _FakeReply:
     def __init__(self, body: bytes, headers: dict[str, str]) -> None:
         self._body = body
+        self._offset = 0
         self.headers = headers
 
-    def read(self) -> bytes:
-        return self._body
+    def read(self, amount: int = -1) -> bytes:
+        if amount < 0:
+            amount = len(self._body) - self._offset
+        chunk = self._body[self._offset : self._offset + amount]
+        self._offset += len(chunk)
+        return chunk
 
     def __enter__(self) -> _FakeReply:
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        return None
+
+
+class _DrippingReply:
+    """A body that never ends: each read yields another chunk."""
+
+    headers: ClassVar[dict[str, str]] = {}
+
+    def read(self, amount: int = -1) -> bytes:
+        return b"drip"
+
+    def __enter__(self) -> _DrippingReply:
         return self
 
     def __exit__(self, *exc_info: object) -> None:
@@ -543,6 +565,132 @@ def test_a_non_json_success_body_is_an_invalid_response(
 
     with pytest.raises(InvalidModelResponseError, match="not valid JSON"):
         MuseSparkProvider().invoke(_request())
+
+
+# -- audit regressions: adapter-local hardening -------------------------------
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        http.client.BadStatusLine("garbage status line"),
+        http.client.IncompleteRead(b"partial body"),
+        http.client.LineTooLong("header line"),
+    ],
+)
+def test_http_client_exceptions_map_to_transport_errors(
+    monkeypatch: pytest.MonkeyPatch, exc: Exception
+) -> None:
+    """http.client's exception family is not OSError, so without an explicit
+    clause a malformed status line or a connection dropped mid-body escapes
+    the seam as a raw stdlib exception."""
+    _stub_urlopen(monkeypatch, exc)
+
+    with pytest.raises(ProviderTransportError, match="malformed HTTP"):
+        MuseSparkProvider().invoke(_request())
+
+
+def test_truncated_reply_with_partial_content_is_invalid() -> None:
+    """CONSTRUCTED variant of the OBSERVED truncation reply: same envelope,
+    the null content replaced by partial text. Truncation must be decided by
+    finish_reason — and with a schema it must surface as an invalid
+    response, not as a schema violation by the model."""
+    body = json.loads(json.dumps(_TRUNCATED_BODY))
+    body["choices"][0]["message"]["content"] = '{"statement": "The stream is bia'
+
+    with pytest.raises(InvalidModelResponseError, match="length"):
+        parse_response(
+            body, _SUCCESS_HEADERS, request=_request(schema=None), latency=1.0
+        )
+    with pytest.raises(InvalidModelResponseError, match="length"):
+        parse_response(body, _SUCCESS_HEADERS, request=_request(), latency=1.0)
+
+
+def test_a_non_utf8_success_body_is_an_invalid_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_urlopen(monkeypatch, _FakeReply(b"\xff\xfe\x01 not utf-8", {}))
+
+    with pytest.raises(InvalidModelResponseError, match="not valid JSON"):
+        MuseSparkProvider().invoke(_request())
+
+
+def test_a_dripping_body_hits_the_overall_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """urllib's timeout bounds each socket operation, not the exchange: a
+    server dripping chunks forever must still hit ProviderTimeoutError once
+    the whole-call deadline passes."""
+    from types import SimpleNamespace
+
+    tick = iter(range(100, 100_000, 100))
+    monkeypatch.setattr(
+        muse, "time", SimpleNamespace(monotonic=lambda: float(next(tick)))
+    )
+    _stub_urlopen(monkeypatch, _DrippingReply())  # type: ignore[arg-type]
+
+    with pytest.raises(ProviderTimeoutError, match="did not complete"):
+        MuseSparkProvider().invoke(_request(timeout_seconds=120.0))
+
+
+def test_an_oversized_body_is_rejected_not_buffered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(muse, "_MAX_BODY_BYTES", 64)
+    _stub_urlopen(monkeypatch, _FakeReply(b"x" * 200, {}))
+
+    with pytest.raises(InvalidModelResponseError, match="exceeds"):
+        MuseSparkProvider().invoke(_request())
+
+
+def test_retry_after_rejects_non_finite_and_negative_values() -> None:
+    for bad in ("nan", "inf", "-inf", "-5"):
+        assert muse._retry_after({"retry-after": bad}) is None
+    assert muse._retry_after({"retry-after": "12.5"}) == 12.5
+    assert muse._retry_after({"retry-after": "0"}) == 0.0
+
+
+def test_a_numeric_error_code_falls_back_to_the_string_type() -> None:
+    envelope = (
+        b'{"error":{"code":42901,"message":"Too many requests",'
+        b'"param":null,"type":"rate_limit_error"}}'
+    )
+    error = _error_for_status(500, {}, envelope)
+    assert isinstance(error, ProviderTransportError)
+    assert error.provider_error == "rate_limit_error"
+
+
+def test_wire_injection_never_touches_enum_literals() -> None:
+    """Enum entries are data, not schemas: a mapping-valued literal must
+    cross the wire byte-identical, or the wire constraint and the local
+    validator stop agreeing on what is permitted."""
+    schema = OutputSchema(
+        name="enum_v1",
+        json_schema={
+            "type": "object",
+            "properties": {
+                "payload": {
+                    "type": "object",
+                    "properties": {"kind": {"type": "string"}},
+                    "enum": [{"kind": "a"}, {"type": "object"}],
+                }
+            },
+        },
+    )
+    payload = build_payload(_request(schema=schema))
+    wire = payload["response_format"]["json_schema"]["schema"]  # type: ignore[index]
+
+    enum = wire["properties"]["payload"]["enum"]
+    assert {"kind": "a"} in enum
+    assert {"type": "object"} in enum  # the literal survives untouched
+    assert all(
+        "additionalProperties" not in entry
+        for entry in enum
+        if isinstance(entry, dict)
+    )
+    # ...while the schema nodes themselves are still closed on the wire.
+    assert wire["additionalProperties"] is False
+    assert wire["properties"]["payload"]["additionalProperties"] is False
 
 
 def test_the_adapter_satisfies_the_provider_seam() -> None:
