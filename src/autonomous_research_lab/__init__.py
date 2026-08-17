@@ -19,14 +19,19 @@ Package layout (dependencies point downward only):
     Read models over accumulated results — today, the claim-evidence graph.
 ``persistence``
     Content-addressed snapshots of research states on the local filesystem.
+``runtime``
+    The cost-aware layer: the frontier view, deterministic validation,
+    reasoning tiers and escalation, runtime metrics, playbooks, and the
+    development/held-out evaluation seam.
 ``search``
     Selection policies over evaluated candidates.
 ``roles``
     Specialized agents with their own objectives and authority. Roles receive
     explicit invocations and produce proposals; they never mutate state.
 ``orchestration``
-    Candidate generation, utility evaluation, decision wiring, the atomic
-    transition layer that commits proposals, and trajectory logging.
+    The director (single-invocation fast path and the decomposed path),
+    the research runtime loop, deterministic routing, critic and synthesis
+    triggers, the atomic transition layer, and trajectory logging.
 ``publication``
     Reporting. Deliberately empty for now.
 """
@@ -104,4 +109,4 @@ __all__ = [
     "__version__",
 ]
 
-__version__ = "0.0.3"
+__version__ = "0.0.4"

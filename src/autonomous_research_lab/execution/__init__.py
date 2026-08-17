@@ -8,9 +8,10 @@ from .executor import (
     JobStatus,
     UnknownJobError,
 )
-from .local import LocalExecutor, MalformedMetricsError
+from .local import MANIFEST_FILENAME, LocalExecutor, MalformedMetricsError
 
 __all__ = [
+    "MANIFEST_FILENAME",
     "DuplicateJobError",
     "Executor",
     "ExperimentJob",

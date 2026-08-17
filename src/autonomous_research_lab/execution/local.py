@@ -4,13 +4,24 @@ The contract between the lab and an experiment process is deliberately narrow:
 
 * the lab sets ``ARL_RUN_DIR``, ``ARL_CONFIG`` (path to a JSON file) and, when
   a seed is fixed, ``ARL_SEED``;
-* the process writes ``metrics.json`` -- a flat JSON object of numbers -- into
-  ``ARL_RUN_DIR``;
+* the process writes ``metrics.json`` -- a flat JSON object of finite numbers
+  -- into ``ARL_RUN_DIR``;
 * anything else it writes into the run directory is collected as an artifact.
 
 Metrics are *read from a file a process wrote*. No component may hand metrics
 to the executor, and no reasoning step may edit them afterwards. That is the
 whole point of routing every number through here.
+
+There is no silent success. A run that exits zero but writes no metrics, a
+metric that is not a finite number, or a declared required artifact that does
+not exist -- each is recorded as a failure, with the run directory preserved
+for diagnosis. Every run also gets a ``manifest.json`` of artifact hashes, so
+post-hoc edits to experiment outputs are detectable later.
+
+A job with no ``working_dir`` runs in a job-private ``workspace/`` inside its
+run directory: an executor-provided sandbox, so concurrent jobs cannot
+trample each other and a job touches shared code only when it explicitly asks
+to.
 
 Execution is synchronous: ``submit`` runs the job to completion before
 returning its id. That is a property of this backend, not of the interface --
@@ -20,7 +31,9 @@ correct when a genuinely asynchronous backend replaces it.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import math
 import os
 import platform
 import subprocess
@@ -43,6 +56,8 @@ METRICS_FILENAME = "metrics.json"
 CONFIG_FILENAME = "config.json"
 STDOUT_FILENAME = "stdout.log"
 STDERR_FILENAME = "stderr.log"
+MANIFEST_FILENAME = "manifest.json"
+WORKSPACE_DIRNAME = "workspace"
 
 _STATUS_MAP = {
     JobStatus.SUCCEEDED: ExperimentStatus.COMPLETED,
@@ -72,6 +87,13 @@ class LocalExecutor(Executor):
         run_dir = self._run_root / job.id
         run_dir.mkdir(parents=True, exist_ok=True)
 
+        if job.working_dir is not None:
+            working_dir = job.working_dir
+        else:
+            workspace = run_dir / WORKSPACE_DIRNAME
+            workspace.mkdir(parents=True, exist_ok=True)
+            working_dir = str(workspace)
+
         config_path = run_dir / CONFIG_FILENAME
         config_path.write_text(json.dumps(dict(job.config), indent=2, sort_keys=True))
 
@@ -87,7 +109,7 @@ class LocalExecutor(Executor):
         try:
             completed = subprocess.run(
                 job.command,
-                cwd=job.working_dir,
+                cwd=working_dir,
                 env=env,
                 capture_output=True,
                 text=True,
@@ -119,21 +141,37 @@ class LocalExecutor(Executor):
         elif failure_reason is None:
             failure_reason = f"exited with code {exit_code}"
 
+        if failure_reason is None:
+            missing = tuple(
+                relative
+                for relative in job.required_artifacts
+                if not (run_dir / relative).is_file()
+            )
+            if missing:
+                failure_reason = (
+                    f"required artifact(s) not produced: {', '.join(missing)}"
+                )
+
         job_status = (
             JobStatus.SUCCEEDED if failure_reason is None else JobStatus.FAILED
         )
         self._status[job.id] = job_status
+
+        # Everything the run left behind is preserved and hashed -- failures
+        # included, because a failed run's outputs are diagnostic evidence.
+        artifacts = _collect_artifacts(run_dir)
+        _write_manifest(run_dir, artifacts)
 
         result = ExperimentResult(
             spec_id=job.spec_id,
             job_id=job.id,
             status=_STATUS_MAP[job_status],
             command=job.command,
-            environment=_capture_environment(job.working_dir),
+            environment=_capture_environment(working_dir),
             metrics=metrics,
             config=job.config,
             seed=job.seed,
-            artifacts=_collect_artifacts(run_dir),
+            artifacts=artifacts,
             logs=(str(run_dir / STDOUT_FILENAME), str(run_dir / STDERR_FILENAME)),
             runtime_seconds=runtime,
             cost=ResourceCost(wall_clock_seconds=runtime),
@@ -169,16 +207,39 @@ def _read_metrics(path: Path) -> Mapping[str, float]:
     for key, value in payload.items():
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise MalformedMetricsError(f"metric {key!r} is not a number: {value!r}")
+        if not math.isfinite(value):
+            raise MalformedMetricsError(
+                f"metric {key!r} is not finite: {value!r}"
+            )
         metrics[str(key)] = float(value)
     return metrics
 
 
 def _collect_artifacts(run_dir: Path) -> tuple[str, ...]:
-    reserved = {STDOUT_FILENAME, STDERR_FILENAME, CONFIG_FILENAME}
+    reserved = {
+        STDOUT_FILENAME,
+        STDERR_FILENAME,
+        CONFIG_FILENAME,
+        MANIFEST_FILENAME,
+    }
     return tuple(
         sorted(
             str(p) for p in run_dir.rglob("*") if p.is_file() and p.name not in reserved
         )
+    )
+
+
+def _write_manifest(run_dir: Path, artifacts: tuple[str, ...]) -> None:
+    """Record a sha256 per artifact, keyed by run-dir-relative path, so that
+    later edits to experiment outputs are detectable rather than invisible."""
+    manifest = {
+        str(Path(artifact).relative_to(run_dir)): hashlib.sha256(
+            Path(artifact).read_bytes()
+        ).hexdigest()
+        for artifact in artifacts
+    }
+    (run_dir / MANIFEST_FILENAME).write_text(
+        json.dumps(manifest, indent=2, sort_keys=True)
     )
 
 

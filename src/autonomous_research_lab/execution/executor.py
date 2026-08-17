@@ -59,11 +59,20 @@ class DuplicateJobError(RuntimeError):
 class ExperimentJob:
     spec_id: str
     command: tuple[str, ...]
-    working_dir: str
+    working_dir: str | None = None
+    """Where the process runs. ``None`` means the executor provides an
+    isolated, job-private working directory — the default, so a job only
+    touches shared code when it explicitly asks to."""
+
     config: Mapping[str, ConfigValue] = field(default_factory=dict)
     env: Mapping[str, str] = field(default_factory=dict)
     seed: int | None = None
     timeout_seconds: float | None = None
+    required_artifacts: tuple[str, ...] = ()
+    """Paths (relative to the run directory) the process must produce. A run
+    that exits zero without them is recorded as a failure: a declared output
+    that does not exist is not a success with a caveat, it is a failure."""
+
     id: str = field(default="")
 
     def __post_init__(self) -> None:

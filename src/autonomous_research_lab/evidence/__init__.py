@@ -1,4 +1,4 @@
-"""Append-only storage of experimental facts."""
+"""Append-only storage of experimental facts, and the derived chain checker."""
 
 from .store import (
     EvidenceConflictError,
@@ -6,10 +6,14 @@ from .store import (
     InMemoryEvidenceStore,
     UnknownRecordError,
 )
+from .validation import ChainIssue, ChainIssueKind, validate_evidence_chain
 
 __all__ = [
+    "ChainIssue",
+    "ChainIssueKind",
     "EvidenceConflictError",
     "EvidenceStore",
     "InMemoryEvidenceStore",
     "UnknownRecordError",
+    "validate_evidence_chain",
 ]

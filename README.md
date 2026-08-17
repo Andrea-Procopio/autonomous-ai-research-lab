@@ -35,14 +35,20 @@ core          scientific vocabulary: state, actions + attempts, questions,
               hypotheses, predictions + their tests, experiments, evidence,
               claims, assessments, proposals, commit bundles, decisions,
               budgets, replication groups              (depends on nothing)
-evidence      append-only storage of what actually happened
-execution     binding an experiment design to a process, anywhere it runs
-knowledge     factual read models — today, the claim-evidence graph
+evidence      append-only storage of what actually happened, plus the
+              deterministic evidence-chain validator
+execution     binding an experiment design to a process, anywhere it runs —
+              isolated, artifact-aware, no silent success
+knowledge     factual read models — the claim-evidence graph, the lesson shape
 persistence   content-addressed state snapshots, reconstructible offline
+runtime       the cost-aware layer: frontier view, Tier-0 validation,
+              reasoning tiers + escalation, runtime metrics, playbooks,
+              development/held-out evaluation seam     (depends on core only)
 search        selection policies over evaluated candidates
 roles         specialized agents; explicit invocations in, proposals out
-orchestration candidates → utilities → decision, the atomic transition
-              layer, and the trajectory log
+orchestration the director (one deliberation: candidates → valuation →
+              selection), the runtime loop, deterministic routing, critic +
+              synthesis triggers, atomic transitions, the trajectory log
 publication   reporting (deliberately empty)
 ```
 
@@ -82,6 +88,12 @@ Eight commitments shape the rest:
   `CommitBundle` — all or nothing, and a successful attempt cannot claim
   outputs that were not committed. Every decision is trajectory-logged and
   every decision-boundary state is snapshot to disk, from step one.
+- **Rich state, sparse model calls.** A domain abstraction does not imply an
+  LLM call or an agent. An ordinary experiment iteration costs one director
+  deliberation and one executor invocation; validation, evidence
+  transcription, prediction checking, routing and critic/synthesis triggers
+  are deterministic code, and a critic is invoked only when a deterministic
+  trigger says the result is consequential.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the reasoning and
 [docs/ROADMAP.md](docs/ROADMAP.md) for where it is going.
@@ -101,11 +113,31 @@ The package has no runtime dependencies.
 ## Running
 
 ```bash
+python examples/runtime_loop.py
+```
+
+This runs the research runtime twice on a deliberately trivial question — is
+a seeded draw stream biased? — and prints both trajectories with their
+model-call accounting. The normal scenario walks
+
+```
+frontier → director deliberates once → deterministic routing → executor
+(isolated) → deterministic validation → critic trigger evaluates to false
+→ atomic commit → new frontier
+```
+
+at two conceptual model calls per experiment iteration; the escalated
+scenario produces a contradictory replication, the deterministic critic
+trigger fires, and a critic review (plus a slow-loop synthesis) is added —
+and only then.
+
+```bash
 python examples/minimal_loop.py
 ```
 
-This walks the full contract on a deliberately trivial question — is a seeded
-draw stream biased? — and prints the resulting trajectory:
+The original demo of the decomposed decision path (generator → utilities →
+policy). It walks the same contract at finer action granularity and prints
+the resulting trajectory:
 
 ```
 ResearchState → director (candidates → utilities → policy) → ActionAttempt

@@ -282,6 +282,174 @@ The generator offers `stop_investigation` only when nothing else is open:
 halting is a legitimate outcome, and a free stop action would dominate any
 value-per-cost ranking as a standing candidate.
 
+## Runtime philosophy
+
+> The framework intentionally separates rich internal scientific
+> representation from runtime agent count. A domain abstraction does not
+> imply an LLM call or autonomous agent.
+
+> Complexity should be added only when it addresses an observed failure mode
+> or produces measurable improvements in scientific quality, reliability, or
+> efficiency.
+
+> Ceteris paribus, simpler mechanisms are preferred.
+
+The ontology above is deliberately rich — seventeen action types, four
+kinds of proposition, versioned judgments — because cheap representation is
+what makes honest science checkable. None of that entitles the runtime to
+spend. The runtime optimizes, approximately,
+
+```
+meaningful scientific progress / (wall-clock + compute + inference cost)
+```
+
+and it does so by observing a ground-truth hierarchy:
+
+```
+executed result / artifact
+  > deterministic validation
+    > artifact-grounded independent judgment
+      > LLM opinion
+```
+
+An LLM is never asked to infer what code can determine. Concretely, per
+ordinary experiment iteration the model-call budget is a design invariant:
+
+```
+Director: 1        one deliberation — candidates, valuations, selection
+Executor: 1        one role invocation implements/runs the assignment
+Critic:   0        deterministic checks stand in for routine critique
+```
+
+A consequential result (contradictory replication, challenged standing,
+unexpectedly large effect, implementation uncertainty, repeated failures,
+or an explicit director request) adds exactly one critic invocation —
+decided by a deterministic trigger, never by a model.
+
+### The frontier: what the director actually sees
+
+`runtime/frontier.py` derives a `ResearchFrontier` — open questions, active
+hypotheses, work queues read from facts and succeeded attempts,
+contradictions, failed attempts worth revisiting, current best findings,
+remaining budget — from one `ResearchState`. It is a **view**: pure
+function of the state, no mutators, never persisted as authority, carrying
+the id of the state it projects. It exists to keep director prompts small
+and stable, and to give context selection one seam to grow behind.
+
+### The director fast path
+
+The runtime default is one reasoning seat, `FrontierDirector`: a single
+deliberation performs candidate generation, coarse valuation and selection
+together, and `deliberation_record` preserves the intermediate candidate
+set in the standard `DecisionRecord` — with the director named as
+generator, evaluator *and* policy, which is what happened. The decomposed
+`ResearchDirector` (generator → evaluator → policy) remains in the
+architecture for the ablation; the runtime never requires its three
+potential model calls per step.
+
+Valuations at runtime are deliberately coarse: HIGH / MEDIUM / LOW value
+and uncertainty plus an expected `ResourceCost` (`CompactValuation`),
+embedded into the rich `ActionUtility` as a named ordinal mapping. The
+runtime does not manufacture `novelty = 0.73` until calibration data says
+such numbers mean something. Where ranking is ambiguous the rule-based
+director records pairwise "prefer A over B because ..." rationale rather
+than absolute scores, and the raw reasoning is preserved in the runtime
+metrics.
+
+### Default search: directed refinement
+
+The loop's default is diagnose → modify → execute → observe, one branch at
+a time. There is no MCTS, no best-first tree search, and no default
+branching; the tree exists as *memory* (state lineage, content-addressed
+snapshots) rather than as a mandatory algorithm. Branching should return
+when there is a scientific reason — competing hypotheses, materially
+distinct strategies — and calibrated value estimates to steer it.
+
+### Deterministic validation before any critique
+
+`runtime/validation.py` checks what machines can check: the process exited
+zero, the result names its spec, declared metrics are present and finite,
+the seed is recorded, artifacts hash to the manifest their run wrote, and
+replications agree within stated tolerance. The executor itself refuses
+silent success: exit-zero without metrics, a non-finite metric, or a
+missing declared artifact is a recorded failure with the run directory
+preserved. Reading a completed result into `Evidence` is a transcription,
+not a judgment, so `evidence_from_result` does it in code — reusing the
+mechanical `PredictionTest` the commit already produced.
+
+### Deterministic routing
+
+Three runtime seats — scientist (`RESEARCH_DIRECTOR`), executor
+(`RESEARCH_ENGINEER`), critic/analyst (`RESULT_ANALYST`) — and a static
+table (`orchestration/routing.py`) mapping every action type to one of
+them, plus the proposal kinds each action may return. Nothing about the
+mapping is uncertain today, so nothing about it is inferred.
+`RoleSuitability` and `RegistryAssigner` stay for the day routing has
+empirical calibration behind it.
+
+Worker lifetime is separated from lab lifetime: the director is
+long-lived; every role invocation carries an explicit `RoleContext`
+projection built per assignment — an executor sees a spec and its prior
+runs, never the research history.
+
+### Two timescales, one director
+
+The fast loop optimizes throughput. The slow loop —
+`FrontierDirector.synthesize`, the same seat at a stronger reasoning tier,
+not a second agent — reviews what has actually been learned and recommends
+continue / replicate / pivot / branch / stop. Its cadence is deterministic
+(`SynthesisTrigger`): every N committed results, when a contradiction
+appears, and before stopping. Its recommendation reaches the next
+deliberation through the frontier's `open_decisions`.
+
+### Cost-aware escalation
+
+`runtime/escalation.py` encodes the spending ladder —
+
+```
+Tier 0  deterministic code
+Tier 1  cheap model / routine reasoning
+Tier 2  strongest model for difficult decisions
+Tier 3  multi-sample / debate, only when justified
+```
+
+— and a small rule table (`EscalationPolicy`) that picks the cheapest
+sufficient tier from decision importance, uncertainty, downstream resource
+commitment, and evidence conflict. It is not a model router; it is the
+place the principle lives so a router could one day replace it measurably.
+
+### Evidence-chain validation
+
+`evidence/validation.py` re-derives the whole chain — question →
+hypothesis → prediction → spec → result → test / evidence → assessment —
+against the state and store, deterministically: dangling references,
+facts missing from the store, prediction tests whose recorded observation
+or verdict disagrees with a mechanical re-check (the one place belief
+could quietly rewrite fact), claims without evidence, conclusive
+assessments citing none, and contradictions surfaced as facts. It is a
+query layer over existing objects; there is no graph database.
+
+### Held-out evaluation
+
+`runtime/evaluators.py` is only a seam, but a guarded one: a development
+evaluator the loop may consult freely, and a held-out evaluator that
+demands an explicit, recorded release — the autonomous loop holds no
+credential, which is how evaluator overfitting is prevented structurally
+rather than by policy.
+
+### Measured, removable complexity
+
+Every optional mechanism hangs off a typed flag in `RuntimeConfig` —
+critic on/off, playbook on/off, synthesis on/off, cheap/strong director
+floor — and every step writes a `StepMetrics` record: conceptual model
+calls, tokens where known, wall-clock, experiment compute, whether the
+critic fired and why, the reasoning tier, the outcome, and the raw
+decision rationale. The eventual research contribution is a measurement of
+which components earn their cost; the flags and the records are how that
+measurement stays possible. Playbooks (`runtime/playbook.py`) follow the
+same rule: an advisory prior over what usually comes next in empirical ML
+— never a stage machine, never checked for compliance.
+
 ## Roles: suitability, invocation, and the proposal invariant
 
 A role is a quadruple: **objective**, **information set**, **allowed
@@ -461,13 +629,16 @@ Every important research decision is reconstructible later.
 
 ```
 core          scientific vocabulary                    (no internal dependencies)
-evidence      what happened, append-only
+evidence      what happened, append-only + the chain validator
 execution     how to make things happen, anywhere
-knowledge     what it all means, joined — factually
+knowledge     what it all means, joined — factually; lesson scaffold
 persistence   snapshots of states, reconstructible offline
+runtime       frontier view, Tier-0 validation, tiers/escalation,
+              metrics, playbooks, evaluation seam     (depends on core only)
 search        which move to take
 roles         who does the work, under what contract
-orchestration candidates, utilities, decisions, atomic transitions, trajectory
+orchestration director, runtime loop, routing, triggers, atomic
+              transitions, trajectory
 publication   reporting  (empty)
 ```
 
