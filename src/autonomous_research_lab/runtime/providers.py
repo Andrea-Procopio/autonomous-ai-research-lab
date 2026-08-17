@@ -44,9 +44,10 @@ from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
+from types import MappingProxyType
 from typing import Final
 
-from ..core.budget import NO_COST, ResourceCost
+from ..core.budget import ResourceCost
 from ..core.ids import content_id, occurrence_id
 from ..core.types import freeze_mapping
 from .metrics import NO_USAGE, ProviderUsage
@@ -157,6 +158,23 @@ _SUPPORTED_TYPES: Final = frozenset(
 )
 
 
+def _deep_freeze(mapping: Mapping[str, object]) -> Mapping[str, object]:
+    """A recursively read-only view of ``mapping``. Core's ``freeze_mapping``
+    is shallow by design; schema bodies and structured payloads nest, and a
+    frozen record with mutable insides is not frozen."""
+    return MappingProxyType(
+        {str(key): _frozen(value) for key, value in mapping.items()}
+    )
+
+
+def _frozen(value: object) -> object:
+    if isinstance(value, Mapping):
+        return _deep_freeze(value)
+    if isinstance(value, (list, tuple)):
+        return tuple(_frozen(item) for item in value)
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class OutputSchema:
     """A JSON shape a reply must satisfy, in a subset of JSON Schema.
@@ -173,16 +191,17 @@ class OutputSchema:
     def __post_init__(self) -> None:
         if not self.name.strip():
             raise SchemaDefinitionError("schema name must be non-empty")
-        object.__setattr__(self, "json_schema", freeze_mapping(self.json_schema))
+        object.__setattr__(self, "json_schema", _deep_freeze(self.json_schema))
         _check_schema(self.json_schema, path="$")
+        if self.json_schema.get("type") != "object":
+            raise SchemaDefinitionError(
+                "$: the root schema must describe a JSON object — structured "
+                "output is a record, not a bare value"
+            )
 
     def validate(self, payload: object) -> Mapping[str, object]:
-        """Return ``payload`` if it satisfies the schema, else raise.
-
-        Raises :class:`StructuredOutputError`. A schema whose root is an
-        object yields a mapping; anything else is a definition error, since a
-        role's structured output is a record.
-        """
+        """Return ``payload``, recursively frozen, if it satisfies the
+        schema; raise :class:`StructuredOutputError` otherwise."""
         problems: list[str] = []
         _validate(payload, self.json_schema, path="$", problems=problems)
         if problems:
@@ -191,13 +210,10 @@ class OutputSchema:
                 schema=self.name,
                 detail="; ".join(problems),
             )
-        if not isinstance(payload, Mapping):
-            raise StructuredOutputError(
-                f"schema {self.name!r} must describe a JSON object",
-                schema=self.name,
-                detail=f"got {type(payload).__name__}",
-            )
-        return freeze_mapping(payload)
+        # The root schema is an object by construction, so a payload that
+        # validated is a mapping.
+        assert isinstance(payload, Mapping)
+        return _deep_freeze(payload)
 
     def parse(self, text: str) -> Mapping[str, object]:
         """Parse ``text`` as JSON and validate it. Fails closed on both."""
@@ -246,6 +262,19 @@ def _check_schema(schema: Mapping[str, object], *, path: str) -> None:
             )
     elif properties is not None:
         raise SchemaDefinitionError(f"{path}: only object schemas take properties")
+
+    additional = schema.get("additionalProperties")
+    if additional is not None:
+        if declared != "object":
+            raise SchemaDefinitionError(
+                f"{path}: only object schemas take additionalProperties"
+            )
+        if not isinstance(additional, bool):
+            raise SchemaDefinitionError(
+                f"{path}: 'additionalProperties' must be a boolean — a "
+                f"schema-valued additionalProperties is outside the "
+                f"supported subset"
+            )
 
     items = schema.get("items")
     if declared == "array":
@@ -392,17 +421,22 @@ class ModelRequest:
 
     @property
     def fingerprint(self) -> str:
-        """A content id over everything that determines the reply. Ties a
-        recorded response back to the exact request that produced it without
-        storing the prompt twice."""
+        """A content id over everything that determines the reply — the full
+        schema body and the timeout included, since two schemas may share a
+        name and a deadline shapes what can be generated. Ties a recorded
+        response back to the exact request that produced it without storing
+        the prompt twice. Caller ``metadata`` is provenance, not content, so
+        it deliberately does not participate."""
         return content_id(
             "mreq",
             self.model,
             self.instruction,
             tuple((m.role.value, m.content) for m in self.messages),
             self.schema.name if self.schema else "",
+            self.schema.json_schema if self.schema else "",
             self.max_output_tokens,
             self.temperature,
+            self.timeout_seconds,
         )
 
 
@@ -430,9 +464,11 @@ class ModelResponse:
 
     usage: ProviderUsage = NO_USAGE
     latency_seconds: float = 0.0
-    nominal_cost: ResourceCost = NO_COST
-    """What the call is priced at, when the adapter knows the rate. Zero
-    means unknown, not free; token counts in ``usage`` are the ground truth."""
+    nominal_cost: ResourceCost | None = None
+    """What the call is priced at, when the adapter knows the rate. ``None``
+    means unknown; a zero ``ResourceCost`` is a known zero, exactly as it is
+    everywhere in ``core``. Token counts in ``usage`` are the ground truth
+    either way."""
 
     request_id: str | None = None
     """The provider's own id for the call, when it returns one. The handle
@@ -448,7 +484,7 @@ class ModelResponse:
     def __post_init__(self) -> None:
         object.__setattr__(self, "metadata", freeze_mapping(self.metadata))
         if self.structured is not None:
-            object.__setattr__(self, "structured", freeze_mapping(self.structured))
+            object.__setattr__(self, "structured", _deep_freeze(self.structured))
         if not self.id:
             object.__setattr__(self, "id", occurrence_id("mcall"))
 
@@ -511,7 +547,9 @@ class ScriptedReply:
 
     finish_reason: str = "stop"
     request_id: str | None = None
-    nominal_cost: ResourceCost = NO_COST
+    nominal_cost: ResourceCost | None = None
+    """``None`` means the fake reports no price, mirroring an adapter that
+    does not know its rate card."""
 
 
 class FakeModelProvider(ModelProvider):

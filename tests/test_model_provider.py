@@ -110,9 +110,9 @@ def test_the_provider_returns_only_primitives() -> None:
     assert isinstance(response.text, str)
     assert isinstance(response.structured, Mapping)
     for value in response.structured.values():
-        assert isinstance(value, (str, int, float, bool, list, type(None)))
+        assert isinstance(value, (str, int, float, bool, tuple, type(None)))
     assert isinstance(response.usage, ProviderUsage)
-    assert isinstance(response.nominal_cost, ResourceCost)
+    assert response.nominal_cost is None  # unknown, and stated as unknown
 
 
 # -- structured output --------------------------------------------------------
@@ -222,6 +222,76 @@ def test_enum_values_are_enforced() -> None:
 
     with pytest.raises(StructuredOutputError, match="verdict_v1"):
         provider.invoke(_request(schema=schema))
+
+
+def test_structured_output_is_immutable_all_the_way_down() -> None:
+    """The shallow freeze was a hole: nested lists and objects inside a
+    validated payload could still be edited after the fact."""
+    payload = {
+        "statement": "Biased.",
+        "confidence": 0.6,
+        "assumptions": ["draws are independent"],
+    }
+    response = FakeModelProvider([json.dumps(payload)]).invoke(
+        _request(schema=HYPOTHESIS_SCHEMA)
+    )
+
+    structured = response.structured
+    assert structured is not None
+    with pytest.raises(TypeError):
+        structured["confidence"] = 0.99  # type: ignore[index]
+    assumptions = structured["assumptions"]
+    assert isinstance(assumptions, tuple)  # a tuple, not a mutable list
+
+
+def test_the_schema_body_is_immutable_all_the_way_down() -> None:
+    with pytest.raises(TypeError):
+        HYPOTHESIS_SCHEMA.json_schema["type"] = "array"  # type: ignore[index]
+    properties = HYPOTHESIS_SCHEMA.json_schema["properties"]
+    assert isinstance(properties, Mapping)
+    with pytest.raises(TypeError):
+        properties["escape"] = {"type": "string"}  # type: ignore[index]
+    statement = properties["statement"]
+    assert isinstance(statement, Mapping)
+    with pytest.raises(TypeError):
+        statement["type"] = "number"  # type: ignore[index]
+    assert isinstance(HYPOTHESIS_SCHEMA.json_schema["required"], tuple)
+
+
+def test_schema_valued_additional_properties_fails_at_construction() -> None:
+    """Full JSON Schema allows a schema there; this subset validates only
+    booleans, so anything else is rejected up front rather than silently
+    treated as permissive."""
+    with pytest.raises(SchemaDefinitionError, match="additionalProperties"):
+        OutputSchema(
+            name="leaky",
+            json_schema={
+                "type": "object",
+                "properties": {"x": {"type": "string"}},
+                "additionalProperties": {"type": "string"},
+            },
+        )
+    # The boolean forms stay constructible.
+    OutputSchema(
+        name="open",
+        json_schema={
+            "type": "object",
+            "properties": {"x": {"type": "string"}},
+            "additionalProperties": True,
+        },
+    )
+
+
+def test_a_non_object_root_schema_fails_at_construction() -> None:
+    """Structured output is a record. A bare-value root is discovered when
+    the schema is written, not after a model call has been paid for."""
+    for root in (
+        {"type": "string"},
+        {"type": "number"},
+        {"type": "array", "items": {"type": "string"}},
+    ):
+        with pytest.raises(SchemaDefinitionError, match="JSON object"):
+            OutputSchema(name="bare", json_schema=root)
 
 
 def test_a_schema_this_module_cannot_enforce_is_rejected_at_construction() -> None:
@@ -340,6 +410,7 @@ def test_usage_metadata_is_preserved_across_the_boundary() -> None:
     assert response.usage.output_tokens == 4
     assert response.usage.model == "test-model-1"
     assert response.request_id == "req_abc123"
+    assert response.nominal_cost is not None
     assert response.nominal_cost.usd == 0.004
     assert response.nominal_cost.model_tokens == 42
 
@@ -359,13 +430,20 @@ def test_the_usage_ledger_feeds_the_existing_metrics_seam() -> None:
     assert ledger.drain() == ProviderUsage()  # draining is not idempotent
 
 
-def test_unknown_nominal_cost_is_zero_not_invented() -> None:
-    provider = FakeModelProvider(["ok"])
+def test_unknown_cost_is_distinct_from_known_zero_cost() -> None:
+    """``None`` means the adapter does not know the price. A zero
+    ``ResourceCost`` already means known-free everywhere in core, so it
+    cannot double as "unknown"."""
+    unknown = FakeModelProvider(["ok"]).invoke(_request())
+    assert unknown.nominal_cost is None
+    assert unknown.usage.input_tokens > 0  # tokens stay the ground truth
 
-    response = provider.invoke(_request())
-
-    assert response.nominal_cost.is_zero  # unknown, and the tokens say so
-    assert response.usage.input_tokens > 0
+    priced_free = FakeModelProvider(
+        [ScriptedReply(text="ok", nominal_cost=ResourceCost())]
+    ).invoke(_request())
+    assert priced_free.nominal_cost is not None
+    assert priced_free.nominal_cost.is_zero
+    assert priced_free.nominal_cost != unknown.nominal_cost
 
 
 # -- the deterministic fake ---------------------------------------------------
@@ -413,6 +491,43 @@ def test_identical_requests_share_a_fingerprint_and_differing_ones_do_not() -> N
     assert (
         _request().fingerprint
         != _request(schema=HYPOTHESIS_SCHEMA).fingerprint
+    )
+
+
+def test_a_different_schema_body_changes_the_fingerprint() -> None:
+    """Two schemas may share a name; the contract is the body. A fingerprint
+    that stopped at the name would call two different contracts the same
+    request."""
+    loose = OutputSchema(
+        name="hypothesis_v1",
+        json_schema={
+            "type": "object",
+            "properties": {"statement": {"type": "string"}},
+            "required": ["statement"],
+        },
+    )
+    strict = OutputSchema(
+        name="hypothesis_v1",
+        json_schema={
+            "type": "object",
+            "properties": {"statement": {"type": "string"}},
+            "required": ["statement"],
+            "additionalProperties": True,
+        },
+    )
+
+    assert loose.name == strict.name
+    assert (
+        _request(schema=loose).fingerprint
+        != _request(schema=strict).fingerprint
+    )
+
+
+def test_the_timeout_changes_the_fingerprint() -> None:
+    """The deadline shapes what can be generated; it is invocation content."""
+    assert (
+        _request(timeout_seconds=120.0).fingerprint
+        != _request(timeout_seconds=30.0).fingerprint
     )
 
 
