@@ -109,4 +109,12 @@ def test_the_trigger_offers_no_engineering_inputs() -> None:
     parameters = inspect.signature(CriticTrigger.reasons).parameters
     assert "validation" not in parameters
     assert "result" not in parameters
-    assert set(parameters) == {"self", "state", "test", "director_request"}
+    # `admissible` is a scientific input (which observations carry
+    # scientific weight), not an engineering one.
+    assert set(parameters) == {
+        "self",
+        "state",
+        "test",
+        "director_request",
+        "admissible",
+    }

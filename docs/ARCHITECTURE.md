@@ -347,9 +347,15 @@ work cannot exist.
 hypotheses, work queues read from facts and succeeded attempts,
 contradictions, failed attempts worth revisiting, current best findings,
 remaining budget — from one `ResearchState`. It is a **view**: pure
-function of the state, no mutators, never persisted as authority, carrying
-the id of the state it projects. It exists to keep director prompts small
-and stable, and to give context selection one seam to grow behind.
+function of the state (plus an injected admissibility policy), no
+mutators, never persisted as authority, carrying the id of the state it
+projects. Scientific standing in the projection — which conclusive tests
+resolve a prediction, which oppositions count as contradictions — is
+filtered through `ScientificAdmissibility`; the frontier stores no verdict
+of its own and no "resolved" flag anywhere: the permanent truths remain
+`ResearchState` and the verification store. It exists to keep director
+prompts small and stable, and to give context selection one seam to grow
+behind.
 
 ### The director fast path
 
@@ -534,6 +540,28 @@ The pieces, all removable for ablation:
   reasoning seats annotated with their standing through context notes.
   For restart/resume, wire a `FileVerificationStore` alongside the file
   state store so verdicts reload with the state they govern.
+
+* **Scientific admissibility** (`ScientificAdmissibility` in
+  `runtime/verification_store.py`): the one canonical answer to *may this
+  recorded result participate in scientific inference?* — governance off →
+  everything recorded (explicit ablation); governance on → admissible iff
+  a durable record exists **and** stands at `VERIFIED_EVIDENCE`, with
+  missing, unresolved and invalid failing closed alike. Recorded and
+  admissible are deliberately different: `mechanically conclusive !=
+  scientifically admissible`. Every scientific control-plane consumer
+  takes this same policy rather than re-deriving it — frontier prediction
+  resolution and contradiction detection (and therefore escalation and
+  synthesis triggering downstream), critic triggering (an inadmissible
+  result raises no contradiction, standing-challenge, or large-effect
+  reasons), and analysis coverage (owed to the admissible conclusive
+  family only, which is what keeps the coverage gate and the promotion
+  gate from deadlocking over an invalid observation). Inadmissible results
+  are never hidden: they stay in the state and stores, remain visible in
+  contexts with their standing annotations, and simply do not *count*. So
+  after silent-bug repair, an invalid negative next to its verified
+  repaired positive creates no fake contradiction, no false resolution,
+  and no spurious critic or synthesis escalation — while both runs stay
+  permanently on the record.
 
 Deterministic checks always outrank semantic review: dimension aggregation
 treats any deterministic `FAIL` as final, so no model verdict can wash out

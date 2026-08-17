@@ -554,7 +554,15 @@ def test_unauthorized_critic_output_cannot_commit(tmp_path: Path) -> None:
     spec, prediction = _spec_and_prediction(threshold=0.5)
     engineer = StubEngineer(LocalExecutor(tmp_path / "runs"), value=0.9)
     critic = RogueCritic()
-    runtime, store, _ = _runtime(tmp_path, engineer, critic)
+    # This scenario tests the output contract, not verification: run the
+    # explicitly ablated lab so the scientific trigger still fires for an
+    # unverified result.
+    runtime, store, _ = _runtime(
+        tmp_path,
+        engineer,
+        critic,
+        config=RuntimeConfig(verification_governance_enabled=False),
+    )
 
     report = runtime.step(_prepared_state(spec, prediction))
 

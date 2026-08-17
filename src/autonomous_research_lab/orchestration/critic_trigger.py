@@ -23,20 +23,34 @@ before commit), and repeated execution failures produce a deterministic
 runtime note for the director — a debugging signal, not a question a critic
 could answer. Asking an LLM whether a metric is missing would be paying for
 an opinion about arithmetic.
+
+Nor is *unverified* science here: under an admissibility policy (the
+``admissible`` callback), a result that is not scientifically admissible
+raises no scientific trigger reasons at all — its mechanically conclusive
+test is a recorded observation, not a contradiction, a challenge, or a
+large-effect finding — and inadmissible tests do not count toward
+contradiction tallies. Implementation-invalid results have their own
+response (the bounded repair path), which is not scientific critique.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from ..core.prediction import Consistency, PredictionTest
 from ..core.state import ResearchState
+from ..runtime.frontier import AdmissibilityCheck
 
 _CHALLENGES = {
     # current settled verdict -> the test consistency that challenges it
     "supported": Consistency.INCONSISTENT,
     "refuted": Consistency.CONSISTENT,
 }
+
+
+def _admits(admissible: Callable[[str], bool] | None, result_id: str) -> bool:
+    return admissible is None or admissible(result_id)
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,20 +74,34 @@ class CriticTrigger:
         *,
         test: PredictionTest | None,
         director_request: str | None = None,
+        admissible: AdmissibilityCheck | None = None,
     ) -> tuple[str, ...]:
-        """Why this result deserves critique — empty means it does not."""
+        """Why this result deserves critique — empty means it does not.
+
+        A test whose result is not scientifically admissible produces no
+        scientific reasons: an unverified observation cannot contradict,
+        challenge standing, or count as a surprising effect. The explicit
+        director request is the one reason that survives regardless.
+        """
         reasons: list[str] = []
-        if test is not None:
-            reasons.extend(self._test_reasons(state, test))
+        if test is not None and _admits(admissible, test.result_id):
+            reasons.extend(self._test_reasons(state, test, admissible))
         if director_request:
             reasons.append(f"director request: {director_request}")
         return tuple(reasons)
 
     def _test_reasons(
-        self, state: ResearchState, test: PredictionTest
+        self,
+        state: ResearchState,
+        test: PredictionTest,
+        admissible: AdmissibilityCheck | None,
     ) -> list[str]:
         reasons: list[str] = []
-        tests = state.tests_for(test.prediction_id)
+        tests = tuple(
+            t
+            for t in state.tests_for(test.prediction_id)
+            if _admits(admissible, t.result_id)
+        )
         consistent = sum(
             1 for t in tests if t.consistency is Consistency.CONSISTENT
         )

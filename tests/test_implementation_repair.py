@@ -555,6 +555,127 @@ def test_crashed_reimplementation_transitions_to_execution_repair(
     ) is CheckState.PASS
 
 
+def test_invalid_negative_then_verified_positive_regression(
+    tmp_path: Path,
+) -> None:
+    """THE consistency scenario after silent-bug repair.
+
+    Run A: completes, PredictionTest INCONSISTENT, control FAIL →
+    IMPLEMENTATION_UNCERTAIN. Repair produces run B: completes,
+    PredictionTest CONSISTENT, controls PASS → VERIFIED. Everything stays
+    recorded; only B participates in scientific inference.
+    """
+    from autonomous_research_lab.core.assessment import (
+        AssessmentVerdict,
+        EpistemicAssessment,
+    )
+    from autonomous_research_lab.core.proposals import AssessmentProposal
+    from autonomous_research_lab.orchestration.loop import (
+        PromotionError,
+        _conclusive_evidence_ids,
+        _standing_notes,
+    )
+    from autonomous_research_lab.runtime.frontier import (
+        build_frontier,
+        find_contradictions,
+    )
+    from autonomous_research_lab.runtime.verification import OutcomeStanding
+    from autonomous_research_lab.runtime.verification_store import (
+        ScientificAdmissibility,
+    )
+
+    impl = ImplFix(metrics={"heads_rate": 0.52, "overfit_acc": 1.0})
+    runtime, store, _ = _runtime(
+        tmp_path, BUGGY, impl_strategy=impl, methodology=True
+    )
+    spec, prediction = _spec_and_prediction()
+
+    report = runtime.step(_prepared_state(spec, prediction))
+    state = report.state
+    assert report.implementation_debug_resolved
+
+    # -- RECORDED: every fact about A and B persists, immutably -------------
+    a_ref, b_ref = state.results
+    run_a = store.get_result(a_ref.result_id)
+    run_b = store.get_result(b_ref.result_id)
+    assert run_a.metrics["heads_rate"] == 0.45  # A result stored
+    assert run_b.metrics["heads_rate"] == 0.52  # B result stored
+    tests = {t.result_id: t.consistency for t in state.prediction_tests}
+    assert tests[run_a.id] is Consistency.INCONSISTENT  # A test stored
+    assert tests[run_b.id] is Consistency.CONSISTENT  # B test stored
+    evidence_of = {
+        store.get_evidence(eid).result_id: eid for eid in state.evidence_ids
+    }
+    assert run_a.id in evidence_of  # A evidence stored
+    assert run_b.id in evidence_of  # B evidence stored
+    verdict_a = runtime.verifications.get(run_a.id)
+    verdict_b = runtime.verifications.get(run_b.id)
+    assert verdict_a is not None and verdict_b is not None
+    assert (
+        verdict_a.validity
+        is ExperimentValidityStatus.IMPLEMENTATION_UNCERTAIN
+    )  # A adverse record stored
+    assert verdict_a.standing is OutcomeStanding.OBSERVED_UNRESOLVED
+    assert verdict_b.validity is ExperimentValidityStatus.VERIFIED
+
+    # -- ADMISSIBLE: only B participates in scientific inference ------------
+    policy = ScientificAdmissibility(
+        verifications=runtime.verifications, governance_enabled=True
+    )
+    assert not policy(run_a.id)
+    assert policy(run_b.id)
+
+    frontier = build_frontier(state, admissible=policy)
+    assert prediction not in frontier.unresolved_predictions  # resolved by B
+    assert frontier.contradictions == ()  # A opposes B mechanically only
+    assert find_contradictions(state, admissible=policy) == ()
+    assert len(find_contradictions(state)) == 1  # ...and history shows it
+
+    # A raised no scientific critic escalation, tier, or synthesis.
+    assert report.critic_reasons == ()
+    assert not report.critic_invoked
+    assert report.synthesis is None
+
+    # A conclusive assessment citing only B passes BOTH gates — the
+    # promotion/coverage deadlock is gone.
+    citing_b = AssessmentProposal(
+        assessment=EpistemicAssessment(
+            subject_id=HYPOTHESIS.id,
+            verdict=AssessmentVerdict.SUPPORTED,
+            method="test:direct",
+            evidence_ids=(evidence_of[run_b.id],),
+        ),
+        proposer="test",
+    )
+    runtime._gate_promotions((citing_b,))  # no raise
+    runtime._gate_analysis(state, (citing_b,))  # no raise: A not required
+    # Coverage owed = admissible family only; the mechanical family is wider.
+    assert _conclusive_evidence_ids(
+        state, store, HYPOTHESIS.id, admissible=policy
+    ) == (evidence_of[run_b.id],)
+    assert len(_conclusive_evidence_ids(state, store, HYPOTHESIS.id)) == 2
+
+    # Citing A conclusively is still blocked — inspectable, never trusted.
+    citing_a = AssessmentProposal(
+        assessment=EpistemicAssessment(
+            subject_id=HYPOTHESIS.id,
+            verdict=AssessmentVerdict.SUPPORTED,
+            method="test:direct",
+            evidence_ids=(evidence_of[run_a.id],),
+        ),
+        proposer="test",
+    )
+    with pytest.raises(PromotionError):
+        runtime._gate_promotions((citing_a,))
+
+    # Case G: A stays visible to reasoning, annotated with its standing.
+    (note,) = _standing_notes(
+        (store.get_evidence(evidence_of[run_a.id]),), runtime.verifications
+    )
+    assert "implementation_uncertain" in note
+    assert "observed_unresolved" in note
+
+
 def test_repair_is_off_without_debug_enabled(tmp_path: Path) -> None:
     impl = ImplFix(metrics=FIXED)
     runtime, _, _ = _runtime(

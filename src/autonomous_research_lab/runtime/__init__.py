@@ -36,6 +36,7 @@ from .evaluators import (
     ObjectiveEvaluator,
 )
 from .frontier import (
+    AdmissibilityCheck,
     Contradiction,
     ResearchFrontier,
     build_frontier,
@@ -93,6 +94,7 @@ from .verification import (
 from .verification_store import (
     FileVerificationStore,
     InMemoryVerificationStore,
+    ScientificAdmissibility,
     VerificationConflictError,
     VerificationIntegrityError,
     VerificationRecord,
@@ -104,6 +106,7 @@ __all__ = [
     "DEFAULT_PREFLIGHT_CHECKS",
     "MANIFEST_FILENAME",
     "NO_USAGE",
+    "AdmissibilityCheck",
     "CheckState",
     "CompactValuation",
     "Contradiction",
@@ -136,6 +139,7 @@ __all__ = [
     "ReplicationSummary",
     "ResearchFrontier",
     "RuntimeConfig",
+    "ScientificAdmissibility",
     "StepMetrics",
     "UsageSource",
     "ValidationCheck",

@@ -128,6 +128,7 @@ from ..runtime.verification import (
 )
 from ..runtime.verification_store import (
     InMemoryVerificationStore,
+    ScientificAdmissibility,
     VerificationRecord,
     VerificationStore,
 )
@@ -323,10 +324,12 @@ class ResearchRuntime:
         started = time.monotonic()
         step_notes: list[str] = []
         stats = _StepStats()
+        admissible = self._admissibility()
         frontier = build_frontier(
             state,
             recent_results=self.config.recent_results,
             open_decisions=self._notes,
+            admissible=admissible,
         )
         self._notes = ()
 
@@ -520,7 +523,9 @@ class ResearchRuntime:
                     _actual_cost(executed_results, estimated),
                 )
 
-        contradictions_before = len(find_contradictions(state))
+        contradictions_before = len(
+            find_contradictions(state, admissible=admissible)
+        )
         try:
             state = commit_bundle(state, bundle, self.store)
             if bundle.outcome.status is AttemptStatus.SUCCEEDED:
@@ -637,7 +642,9 @@ class ResearchRuntime:
 
         synthesis = self._maybe_synthesize(
             state,
-            new_contradiction=len(find_contradictions(state))
+            new_contradiction=len(
+                find_contradictions(state, admissible=admissible)
+            )
             > contradictions_before,
             stopping=False,
         )
@@ -874,6 +881,15 @@ class ResearchRuntime:
             or self.methodology_reviewer is not None
         )
 
+    def _admissibility(self) -> ScientificAdmissibility:
+        """The single scientific-admissibility policy every scientific
+        consumer of this runtime shares — frontier projection,
+        contradiction detection, critic triggering, analysis coverage."""
+        return ScientificAdmissibility(
+            verifications=self.verifications,
+            governance_enabled=self.config.verification_governance_enabled,
+        )
+
     # -- the scientific-promotion gate ---------------------------------------
 
     def _gate_promotions(self, proposals: tuple[Proposal, ...]) -> None:
@@ -931,6 +947,10 @@ class ResearchRuntime:
             # Referential integrity is the transition layer's check, not
             # this gate's; a dangling reference is rejected there.
             return
+        # The one canonical admissibility decision; the record is fetched
+        # again only to render the precise reason for the rejection.
+        if self._admissibility()(evidence.result_id):
+            return
         verdict = self.verifications.get(evidence.result_id)
         if verdict is None:
             # Fail closed: no record is indistinguishable from a lost or
@@ -942,13 +962,12 @@ class ResearchRuntime:
                 f"result is treated as unverified and cannot serve as "
                 f"{use} (disable governance explicitly to run ablated)"
             )
-        if verdict.standing is not OutcomeStanding.VERIFIED_EVIDENCE:
-            raise PromotionError(
-                f"evidence {evidence_id} rests on result "
-                f"{evidence.result_id}, whose verification stands at "
-                f"{verdict.validity} ({verdict.standing}); it may be "
-                f"inspected but cannot serve as {use}"
-            )
+        raise PromotionError(
+            f"evidence {evidence_id} rests on result "
+            f"{evidence.result_id}, whose verification stands at "
+            f"{verdict.validity} ({verdict.standing}); it may be "
+            f"inspected but cannot serve as {use}"
+        )
 
     def _evidence_named(
         self, proposals: tuple[Proposal, ...], evidence_id: str
@@ -998,10 +1017,17 @@ class ResearchRuntime:
                 )
             if hypothesis_id is None:
                 continue
+            # Coverage is owed to the scientifically admissible family
+            # only: an invalid observation may be inspected and discussed,
+            # but requiring it as trusted support would collide with the
+            # promotion gate, which forbids citing it conclusively.
             check = verify_analysis_coverage(
                 cited_evidence_ids=assessment.evidence_ids,
                 conclusive_evidence_ids=_conclusive_evidence_ids(
-                    state, self.store, hypothesis_id
+                    state,
+                    self.store,
+                    hypothesis_id,
+                    admissible=self._admissibility(),
                 ),
             )
             if check.state is CheckState.FAIL:
@@ -1286,7 +1312,9 @@ class ResearchRuntime:
             if prediction is not None
             else None
         )
-        return self.critic_trigger.reasons(state, test=test)
+        return self.critic_trigger.reasons(
+            state, test=test, admissible=self._admissibility()
+        )
 
     def _invoke_critic(
         self,
@@ -1380,7 +1408,11 @@ class ResearchRuntime:
         if not reasons:
             return None
         review = self.director.synthesize(
-            build_frontier(state, recent_results=self.config.recent_results),
+            build_frontier(
+                state,
+                recent_results=self.config.recent_results,
+                admissible=self._admissibility(),
+            ),
             tier=max(ReasoningTier.STRONG, self.config.director_tier_floor),
         )
         self._results_since_synthesis = 0
@@ -1775,15 +1807,25 @@ def _assessed_hypothesis(state: ResearchState, subject_id: str) -> str | None:
 
 
 def _conclusive_evidence_ids(
-    state: ResearchState, store: EvidenceStore, hypothesis_id: str
+    state: ResearchState,
+    store: EvidenceStore,
+    hypothesis_id: str,
+    *,
+    admissible: ScientificAdmissibility | None = None,
 ) -> tuple[str, ...]:
-    """Every recorded evidence resting on a conclusive test of the
-    hypothesis's predictions — what a complete analysis must consider."""
+    """Evidence resting on conclusive tests of the hypothesis's predictions.
+
+    With ``admissible`` given, only scientifically admissible results
+    qualify — what a complete *trusted* analysis must cover. Without it,
+    the full mechanical family — what an assessor should still be able to
+    *see* (context visibility, not coverage obligation).
+    """
     conclusive_results = {
         test.result_id
         for prediction in state.predictions_for(hypothesis_id)
         for test in state.tests_for(prediction.id)
         if test.consistency is not Consistency.INCONCLUSIVE
+        and (admissible is None or admissible(test.result_id))
     }
     return tuple(
         evidence_id

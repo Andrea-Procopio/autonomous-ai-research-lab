@@ -81,6 +81,45 @@ class VerificationRecord:
         object.__setattr__(self, "standing", outcome_standing(validity))
 
 
+@dataclass(frozen=True, slots=True)
+class ScientificAdmissibility:
+    """The canonical answer to one question: **may this recorded result
+    participate in scientific inference?**
+
+    Recorded and admissible are different things, on purpose. Every run,
+    result, test and evidence stays permanently recorded and inspectable —
+    an implementation-invalid observation is still useful for debugging,
+    audit, and reasoning about uncertainty. Admissibility governs the
+    *scientific control plane*: what resolves a prediction, what counts as
+    a contradiction, what a critic escalates over, and what an analysis is
+    required to cover. ``mechanically conclusive != scientifically
+    admissible``.
+
+    Semantics, deterministic and outcome-blind:
+
+    * governance disabled → everything recorded is admissible (the
+      explicitly ablated legacy lab);
+    * governance enabled → admissible iff a durable record exists **and**
+      stands at ``VERIFIED_EVIDENCE``. Missing, unresolved and invalid all
+      fail closed alike.
+
+    This is the one implementation; every consumer takes it (or the bare
+    callable it provides) rather than re-deriving the rule.
+    """
+
+    verifications: VerificationStore
+    governance_enabled: bool = True
+
+    def __call__(self, result_id: str) -> bool:
+        if not self.governance_enabled:
+            return True
+        record = self.verifications.get(result_id)
+        return (
+            record is not None
+            and record.standing is OutcomeStanding.VERIFIED_EVIDENCE
+        )
+
+
 class VerificationStore(Protocol):
     def record(self, record: VerificationRecord) -> VerificationRecord:
         """Store one record. Idempotent for identical content; a different

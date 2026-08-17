@@ -10,9 +10,9 @@ become smarter without touching the state.
 Three properties are load-bearing:
 
 * **Derived, always.** :func:`build_frontier` is a pure function of the
-  state. The frontier has no mutators, is never persisted as authority, and
-  carries the id of the state it projects so any consumer can go back to the
-  source.
+  state (plus an optional admissibility policy). The frontier has no
+  mutators, is never persisted as authority, and carries the id of the
+  state it projects so any consumer can go back to the source.
 * **Work queues are fact-based.** "This experiment has not been run" is read
   from results and succeeded attempts, exactly as candidate generation
   already does — never from history. In-flight work is excluded so nothing
@@ -20,10 +20,22 @@ Three properties are load-bearing:
 * **Standing is consumed, not decided.** A hypothesis is *settled* here iff
   its current epistemic assessment says SUPPORTED or REFUTED. The frontier
   reads judgments made elsewhere; it makes none.
+
+Scientific standing is governed the same way: the caller may inject an
+``admissible`` callback (canonically
+:class:`~autonomous_research_lab.runtime.verification_store.
+ScientificAdmissibility`), and only scientifically admissible conclusive
+tests then resolve predictions or form contradictions. Inadmissible tests
+stay fully recorded in the state — the frontier does not hide them, it
+declines to *count* them, and it stores no verdict of its own: the
+permanent truths remain ``ResearchState`` and the verification store, the
+frontier is only a projection of the two. ``None`` (the default) is the
+legacy projection in which everything recorded counts.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from ..core.actions import ResearchActionType
@@ -39,6 +51,13 @@ from ..core.state import ResearchState
 
 _SETTLED = frozenset({AssessmentVerdict.SUPPORTED, AssessmentVerdict.REFUTED})
 _REVISIT = frozenset({AttemptStatus.FAILED, AttemptStatus.TIMED_OUT})
+
+AdmissibilityCheck = Callable[[str], bool]
+"""``result_id -> may this result participate in scientific inference?``"""
+
+
+def _admits(admissible: AdmissibilityCheck | None, result_id: str) -> bool:
+    return admissible is None or admissible(result_id)
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,7 +91,10 @@ class ResearchFrontier:
     """Predictions with no experiment designed to test them."""
 
     unresolved_predictions: tuple[Prediction, ...]
-    """Predictions with an experiment but no conclusive test yet."""
+    """Predictions with an experiment but no scientifically admissible
+    conclusive test yet. A prediction whose only conclusive tests come from
+    unverified or invalid results remains scientifically unresolved, even
+    though those tests stay on the mechanical record."""
 
     pending_experiments: tuple[ExperimentSpec, ...]
     """Designed but never run."""
@@ -107,8 +129,14 @@ def build_frontier(
     *,
     recent_results: int = 5,
     open_decisions: tuple[str, ...] = (),
+    admissible: AdmissibilityCheck | None = None,
 ) -> ResearchFrontier:
-    """Project ``state`` into the view one deliberation needs."""
+    """Project ``state`` into the view one deliberation needs.
+
+    ``admissible`` governs which recorded results carry scientific weight
+    in the projection (prediction resolution, contradictions); ``None``
+    projects the ungoverned legacy view in which everything counts.
+    """
 
     def settled(hypothesis_id: str) -> bool:
         assessment = state.current_assessment(hypothesis_id)
@@ -139,6 +167,7 @@ def build_frontier(
         if state.experiments_for(p.id)
         and not any(
             t.consistency is not Consistency.INCONCLUSIVE
+            and _admits(admissible, t.result_id)
             for t in state.tests_for(p.id)
         )
     )
@@ -207,7 +236,7 @@ def build_frontier(
         recent_results=state.results[-recent_results:] if recent_results else (),
         unsynthesized_evidence=unsynthesized,
         unassessed_claims=unassessed,
-        contradictions=find_contradictions(state),
+        contradictions=find_contradictions(state, admissible=admissible),
         failed_attempts=failed,
         best_findings=findings,
         open_decisions=open_decisions,
@@ -215,16 +244,28 @@ def build_frontier(
     )
 
 
-def find_contradictions(state: ResearchState) -> tuple[Contradiction, ...]:
+def find_contradictions(
+    state: ResearchState,
+    *,
+    admissible: AdmissibilityCheck | None = None,
+) -> tuple[Contradiction, ...]:
     """Everything on the record that currently points both ways.
 
     Purely structural: mixed conclusive prediction tests, and claims with
     evidence linked on both sides. What a contradiction *means* is critic
-    business; that one exists is a fact.
+    business; that one exists is a fact. Under an admissibility policy,
+    only scientifically admissible tests can oppose each other — an
+    invalid negative next to a verified positive is *not* a scientific
+    contradiction, though both stay on the record. (Claim-side links are
+    already governed at commit time by the promotion gate.)
     """
     found: list[Contradiction] = []
     for prediction in state.predictions:
-        tests = state.tests_for(prediction.id)
+        tests = tuple(
+            t
+            for t in state.tests_for(prediction.id)
+            if _admits(admissible, t.result_id)
+        )
         consistent = sum(
             1 for t in tests if t.consistency is Consistency.CONSISTENT
         )
