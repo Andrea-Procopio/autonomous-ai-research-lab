@@ -1,0 +1,53 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "autonomous-research-lab"
+version = "0.0.1"
+description = "Infrastructure for autonomous systems that conduct scientific research."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+authors = [{ name = "Andrea Procopio" }]
+keywords = ["research-automation", "scientific-method", "agents"]
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "Intended Audience :: Science/Research",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+]
+# No runtime dependencies. The domain core is plain Python by choice; see
+# docs/ARCHITECTURE.md for why validation libraries are held at the boundary.
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.6", "mypy>=1.11"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/autonomous_research_lab"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF", "ARG", "PTH"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["ARG"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["autonomous_research_lab", "examples"]
+
+[tool.mypy]
+python_version = "3.11"
+files = ["src", "tests", "examples"]
+strict = true
+warn_unused_ignores = true
+warn_unreachable = true

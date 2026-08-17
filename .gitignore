@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.eggs/
+
+# Environments
+.venv/
+venv/
+env/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Experiment output. Run directories are reproducible from the recorded
+# provenance; a durable evidence store is a Horizon 1 item, not a git concern.
+runs/
+outputs/
+
+# Secrets. Never commit credentials for model providers or compute backends.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials.json
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
