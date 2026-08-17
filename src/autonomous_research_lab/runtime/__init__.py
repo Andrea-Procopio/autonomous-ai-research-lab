@@ -14,7 +14,9 @@ decoupled from the richness of the domain model:
   picks the cheapest sufficient tier;
 * ``metrics`` — per-step resource accounting, persisted from step one;
 * ``playbook`` — an advisory research prior, never a pipeline;
-* ``evaluators`` — the development / held-out evaluation seam.
+* ``evaluators`` — the development / held-out evaluation seam;
+* ``providers`` — the provider-neutral model boundary: validated structured
+  output in, auditable usage out, no vendor SDK types either way.
 
 Everything here depends on ``core`` only.
 """
@@ -64,6 +66,25 @@ from .preflight import (
     require_preflight,
     run_preflight,
 )
+from .providers import (
+    DEFAULT_TIMEOUT_SECONDS,
+    FakeModelProvider,
+    InvalidModelResponseError,
+    Message,
+    MessageRole,
+    ModelProvider,
+    ModelProviderError,
+    ModelRequest,
+    ModelResponse,
+    OutputSchema,
+    ProviderRateLimitError,
+    ProviderTimeoutError,
+    ProviderTransportError,
+    SchemaDefinitionError,
+    ScriptedReply,
+    StructuredOutputError,
+    UsageLedger,
+)
 from .validation import (
     MANIFEST_FILENAME,
     ReplicationSummary,
@@ -104,6 +125,7 @@ from .verification_store import (
 __all__ = [
     "COMPACT_METHOD",
     "DEFAULT_PREFLIGHT_CHECKS",
+    "DEFAULT_TIMEOUT_SECONDS",
     "MANIFEST_FILENAME",
     "NO_USAGE",
     "AdmissibilityCheck",
@@ -116,31 +138,47 @@ __all__ = [
     "EscalationSignals",
     "EvaluationHooks",
     "ExperimentValidityStatus",
+    "FakeModelProvider",
     "FileVerificationStore",
     "HeldOutAccess",
     "HeldOutAccessError",
     "ImplementationVerifier",
     "InMemoryVerificationStore",
+    "InvalidModelResponseError",
     "JobLike",
     "JsonlRuntimeMetrics",
     "Level",
+    "Message",
+    "MessageRole",
     "MethodologyReviewer",
     "MetricsSink",
+    "ModelProvider",
+    "ModelProviderError",
+    "ModelRequest",
+    "ModelResponse",
     "ObjectiveEvaluator",
     "OutcomeStanding",
+    "OutputSchema",
     "Playbook",
     "PlaybookAdvice",
     "PlaybookStage",
     "PositiveControl",
     "PreflightCheck",
     "PreflightError",
+    "ProviderRateLimitError",
+    "ProviderTimeoutError",
+    "ProviderTransportError",
     "ProviderUsage",
     "ReasoningTier",
     "ReplicationSummary",
     "ResearchFrontier",
     "RuntimeConfig",
+    "SchemaDefinitionError",
     "ScientificAdmissibility",
+    "ScriptedReply",
     "StepMetrics",
+    "StructuredOutputError",
+    "UsageLedger",
     "UsageSource",
     "ValidationCheck",
     "ValidationReport",
