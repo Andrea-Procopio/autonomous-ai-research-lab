@@ -8,6 +8,12 @@ from .executor import (
     JobStatus,
     UnknownJobError,
 )
+from .failure_classifier import (
+    FailureCategory,
+    FailureDiagnosis,
+    Repairability,
+    diagnose_failure,
+)
 from .local import MANIFEST_FILENAME, LocalExecutor, MalformedMetricsError
 
 __all__ = [
@@ -15,9 +21,13 @@ __all__ = [
     "DuplicateJobError",
     "Executor",
     "ExperimentJob",
+    "FailureCategory",
+    "FailureDiagnosis",
     "JobNotFinishedError",
     "JobStatus",
     "LocalExecutor",
     "MalformedMetricsError",
+    "Repairability",
     "UnknownJobError",
+    "diagnose_failure",
 ]

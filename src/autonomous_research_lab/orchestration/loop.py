@@ -40,10 +40,24 @@ Failure taxonomy, kept deliberately separate:
   note next step — never a critic, because no model opinion can override
   arithmetic;
 * a failed/cancelled *execution* is an honest execution record: it commits
-  with inconclusive scientific standing, and repeated failures of one
-  experiment raise a deterministic engineering note;
+  with inconclusive scientific standing, is deterministically diagnosed
+  (``execution.failure_classifier``), and — when a debugger is wired in —
+  enters the **bounded repair loop**, each retry a new auditable, billed
+  attempt; repeated failures of one experiment raise a deterministic
+  engineering note;
+* a **methodologically rejected** design never executes: the response is
+  *redesign the experiment*, not debugging and not a scientific negative;
+* an **analytically invalid** judgment (post-hoc run selection) raises a
+  *redo the analysis* note without blaming the executions it ignored;
 * a *scientifically valid* consequential result — contradiction, challenged
   standing, large effect — is what earns a critic.
+
+Validity and outcome stay orthogonal throughout (``runtime.verification``):
+a completed run's outcome is never routed to debugging for being
+disappointing, and a conclusive negative is promoted to verified scientific
+evidence only when execution, implementation, methodology and analysis are
+all positively resolved — otherwise the observation is preserved with its
+validity explicitly unresolved.
 """
 
 from __future__ import annotations
@@ -58,6 +72,7 @@ from ..core.budget import NO_COST, ResearchBudget, ResourceCost
 from ..core.commit import CommitBundle
 from ..core.decision import DecisionRecord
 from ..core.experiment import ExperimentResult, ExperimentSpec
+from ..core.prediction import Consistency
 from ..core.proposals import (
     EvidenceProposal,
     ExperimentProposal,
@@ -67,6 +82,7 @@ from ..core.proposals import (
 )
 from ..core.state import ResearchState
 from ..evidence.store import EvidenceStore
+from ..execution.failure_classifier import diagnose_failure
 from ..persistence.state_store import FileStateStore
 from ..roles.base import ResearchRole, RoleContext, RoleInvocation, RoleName
 from ..runtime.config import RuntimeConfig
@@ -85,6 +101,7 @@ from ..runtime.metrics import (
     UsageSource,
 )
 from ..runtime.playbook import Playbook, PlaybookAdvice
+from ..runtime.preflight import PreflightError
 from ..runtime.validation import (
     ValidationCheck,
     ValidationReport,
@@ -92,7 +109,22 @@ from ..runtime.validation import (
     validate_result,
     verify_artifact_integrity,
 )
+from ..runtime.verification import (
+    CheckState,
+    ControlSource,
+    ImplementationVerifier,
+    MethodologyReviewer,
+    OutcomeStanding,
+    ValidityDimension,
+    VerificationCheck,
+    VerificationReport,
+    derive_validity,
+    evaluate_controls,
+    outcome_standing,
+    verify_analysis_coverage,
+)
 from .critic_trigger import CriticTrigger
+from .debug_loop import DebugAttempt, ExperimentDebugger, is_debuggable
 from .director import Deliberation, FrontierDirector, deliberation_record
 from .routing import expected_proposals, route
 from .synthesis import SynthesisReview, SynthesisTrigger
@@ -121,6 +153,24 @@ class ValidationGateError(Exception):
         self.reports = reports
 
 
+@dataclass
+class _StepStats:
+    """Verification/debugging accounting accumulated during one step and
+    flushed into :class:`StepMetrics` and :class:`StepReport` at the end."""
+
+    failure_category: str = ""
+    debug_attempts: int = 0
+    debug_resolved: bool = False
+    verification: tuple[VerificationReport, ...] = ()
+    verification_status: str = ""
+    preflight_failed: bool = False
+    control_failures: int = 0
+    methodology_rejected: bool = False
+    implementation_rejected: bool = False
+    analysis_rejected: bool = False
+    negative_result_verdict: str = ""
+
+
 @dataclass(frozen=True, slots=True)
 class StepReport:
     """Everything one step decided, did, checked, and spent."""
@@ -135,9 +185,16 @@ class StepReport:
     critic_reasons: tuple[str, ...] = ()
     critic_invoked: bool = False
     synthesis: SynthesisReview | None = None
+    verification: tuple[VerificationReport, ...] = ()
+    """Verification reports of the completed results this step committed
+    (debug-loop recoveries included) — the validity record, orthogonal to
+    whatever the results' metrics say."""
+
+    debug_attempts: int = 0
+    debug_resolved: bool = False
     notes: tuple[str, ...] = ()
     """Deterministic runtime notes raised this step (engineering failures,
-    repeated execution failures, budget overruns)."""
+    repeated execution failures, budget overruns, validity findings)."""
 
     halt_reason: str | None = None
 
@@ -175,8 +232,30 @@ class ResearchRuntime:
     per step into the metrics record; ``None`` means actual model usage is
     honestly recorded as zero."""
 
+    debugger: ExperimentDebugger | None = None
+    """The bounded repair loop for failed executions. ``None`` (and
+    ``config.debug_enabled = False``) leaves failures diagnosed and noted
+    but never automatically repaired — the removable-component seam."""
+
+    methodology_reviewer: MethodologyReviewer | None = None
+    """Reviews each design once before its first execution, when
+    ``config.methodology_review_enabled``. A rejection means redesign."""
+
+    implementation_verifier: ImplementationVerifier | None = None
+    """Event-triggered faithfulness check (failed controls, uncovered
+    conclusive negatives), when ``config.implementation_verification_enabled``."""
+
+    control_source: ControlSource | None = None
+    """Experiment-specific positive controls, looked up per spec when
+    ``config.positive_controls_enabled``."""
+
     _results_since_synthesis: int = field(default=0, init=False)
     _notes: tuple[str, ...] = field(default=(), init=False)
+    _methodology_checks: dict[str, VerificationCheck] = field(
+        default_factory=dict, init=False
+    )
+    """Per-spec methodology verdicts: each design is reviewed at most once,
+    which is what keeps the review selective rather than per-run."""
 
     def __post_init__(self) -> None:
         if self.synthesis_trigger is None:
@@ -201,6 +280,8 @@ class ResearchRuntime:
         """One fast-loop iteration, with the slow loop run when due."""
         started = time.monotonic()
         step_notes: list[str] = []
+        stats = _StepStats()
+        assessments_before = {a.id for a in state.assessments}
         frontier = build_frontier(
             state,
             recent_results=self.config.recent_results,
@@ -256,6 +337,20 @@ class ResearchRuntime:
                 f"cost exceeds the remaining budget",
             )
 
+        # Methodology gate: reviewed once per design, before its first —
+        # potentially expensive — execution. Rejection means redesign; the
+        # code is never debugged for a flaw in the science.
+        if action.action_type in _SINGLE_RESULT_ACTIONS and action.targets:
+            methodology, reviewed = self._methodology_check(
+                state, action.targets[0]
+            )
+            invocations += reviewed
+            if methodology is not None and methodology.state is CheckState.FAIL:
+                return self._reject_methodology(
+                    state, record, deliberation, tier, invocations, started,
+                    action=action, check=methodology, stats=stats,
+                )
+
         attempt = ActionAttempt(action=action).started()
         state = state.begin_attempt(attempt)
         invocation = RoleInvocation(
@@ -289,12 +384,22 @@ class ResearchRuntime:
 
         if role_error is not None:
             failures = 1
-            step_notes.append(
-                f"engineering failure: {seat} raised during "
-                f"{action.action_type} — {role_error}"
-            )
-            # No result came back, so the estimate is the best known cost.
-            bundle = _failed_bundle(attempt.id, str(role_error), estimated)
+            if isinstance(role_error, PreflightError):
+                stats.preflight_failed = True
+                stats.failure_category = "preflight"
+                step_notes.append(
+                    f"engineering failure: preflight rejected the job before "
+                    f"execution — {role_error}; expensive execution prevented"
+                )
+                # Nothing launched: a prevented execution bills no compute.
+                bundle = _failed_bundle(attempt.id, str(role_error), NO_COST)
+            else:
+                step_notes.append(
+                    f"engineering failure: {seat} raised during "
+                    f"{action.action_type} — {role_error}"
+                )
+                # No result came back, so the estimate is the best known cost.
+                bundle = _failed_bundle(attempt.id, str(role_error), estimated)
         else:
             executed_results = tuple(
                 p.result for p in proposals if isinstance(p, ResultProposal)
@@ -380,9 +485,38 @@ class ResearchRuntime:
                         )
                         invocations += invoked
                         critic_invoked = invoked > 0
+                verification_notes, verify_invocations = self._verify_result(
+                    state, result, stats
+                )
+                step_notes.extend(verification_notes)
+                invocations += verify_invocations
             step_notes.extend(
                 self._execution_failure_notes(state, committed_results)
             )
+
+            # A committed failed execution enters the bounded repair loop —
+            # entry is by failure diagnosis, never by scientific outcome.
+            failed_runs = tuple(r for r in committed_results if not r.succeeded)
+            if failed_runs:
+                state, debug_invocations, debug_results, exhausted = (
+                    self._handle_failed_execution(
+                        state, failed_runs[0], stats, step_notes
+                    )
+                )
+                invocations += debug_invocations
+                executed_results = (*executed_results, *debug_results)
+                if exhausted:
+                    return self._finish(
+                        state, record, deliberation, tier, invocations, started,
+                        attempt_id=attempt.id, outcome=outcome, seat=seat,
+                        validation=validation, critic_reasons=critic_reasons,
+                        critic_invoked=critic_invoked, failures=failures,
+                        executed_results=executed_results,
+                        notes=tuple(step_notes), stats=stats,
+                        halt_reason="budget exhausted during debugging",
+                    )
+
+        step_notes.extend(self._analysis_notes(assessments_before, state, stats))
 
         state = state.apply(action)
         state, overrun_note, exhausted = _reconcile_cost(
@@ -397,6 +531,7 @@ class ResearchRuntime:
                 validation=validation, critic_reasons=critic_reasons,
                 critic_invoked=critic_invoked, failures=failures,
                 executed_results=executed_results, notes=tuple(step_notes),
+                stats=stats,
                 halt_reason="budget exhausted after cost overrun",
             )
 
@@ -416,7 +551,7 @@ class ResearchRuntime:
             validation=validation, critic_reasons=critic_reasons,
             critic_invoked=critic_invoked, failures=failures,
             executed_results=executed_results, synthesis=synthesis,
-            notes=tuple(step_notes),
+            notes=tuple(step_notes), stats=stats,
             halt_reason=None,
         )
 
@@ -460,6 +595,357 @@ class ResearchRuntime:
                     f"{spec_id} — debug the implementation before rerunning"
                 )
         return notes
+
+    # -- experiment validity -------------------------------------------------
+
+    def _methodology_check(
+        self, state: ResearchState, spec_id: str
+    ) -> tuple[VerificationCheck | None, int]:
+        """The one-time methodology review of a design, cached per spec —
+        that cache is what keeps the review selective rather than per-run.
+        Returns the verdict (``None`` when review is off or unwired) and
+        the reasoning invocations spent (1 on a cache miss, else 0)."""
+        if (
+            not self.config.methodology_review_enabled
+            or self.methodology_reviewer is None
+        ):
+            return None, 0
+        cached = self._methodology_checks.get(spec_id)
+        if cached is not None:
+            return cached, 0
+        spec = state.experiment(spec_id)
+        if spec is None:
+            return None, 0
+        check = self.methodology_reviewer.review(
+            spec, state.prediction(spec.prediction_id), objective=state.objective
+        )
+        self._methodology_checks[spec_id] = check
+        return check, 1
+
+    def _verify_result(
+        self, state: ResearchState, result: ExperimentResult, stats: _StepStats
+    ) -> tuple[list[str], int]:
+        """Assemble the validity record of one committed completed result.
+
+        Deterministic checks come first and are never overridable; the
+        semantic verifier is consulted only when a deterministic signal (a
+        failed or uncertain control) or an uncovered conclusive negative
+        justifies the spend. Returns the notes raised and the reasoning
+        invocations added.
+        """
+        spec = state.experiment(result.spec_id)
+        assert spec is not None  # the result could not have committed otherwise
+        prediction = state.prediction(spec.prediction_id)
+        test = (
+            state.test_for_result(prediction.id, result.id)
+            if prediction is not None
+            else None
+        )
+        notes: list[str] = []
+        invocations = 0
+        checks: list[VerificationCheck] = [
+            VerificationCheck(
+                dimension=ValidityDimension.EXECUTION,
+                name="deterministic_validation",
+                state=CheckState.PASS,
+                detail=(
+                    "process completed and passed the pre-commit gate "
+                    "(declared metrics, finite values, seed, artifact "
+                    "integrity)"
+                ),
+            )
+        ]
+
+        control_checks: tuple[VerificationCheck, ...] = ()
+        if self.config.positive_controls_enabled and self.control_source is not None:
+            control_checks = evaluate_controls(
+                self.control_source(spec), result.metrics
+            )
+            checks.extend(control_checks)
+            failed_controls = tuple(
+                c for c in control_checks if c.state is CheckState.FAIL
+            )
+            stats.control_failures += len(failed_controls)
+            for check in failed_controls:
+                notes.append(
+                    f"implementation uncertain: {check.name} failed "
+                    f"({check.detail}) — verify the implementation; this is "
+                    f"not a scientific negative"
+                )
+
+        negative = (
+            test is not None and test.consistency is Consistency.INCONSISTENT
+        )
+        unresolved_controls = any(
+            c.state in {CheckState.FAIL, CheckState.UNCERTAIN}
+            for c in control_checks
+        )
+        if (
+            self.config.implementation_verification_enabled
+            and self.implementation_verifier is not None
+            and (unresolved_controls or (negative and not control_checks))
+        ):
+            check = self.implementation_verifier.verify(
+                spec, result, prediction, tuple(checks)
+            )
+            checks.append(check)
+            invocations += 1
+            if check.state is CheckState.FAIL:
+                stats.implementation_rejected = True
+                notes.append(
+                    f"implementation rejected: {check.detail} — debug or "
+                    f"reimplement; the outcome is not scientific evidence"
+                )
+        if not any(
+            c.dimension is ValidityDimension.IMPLEMENTATION for c in checks
+        ):
+            checks.append(
+                VerificationCheck(
+                    dimension=ValidityDimension.IMPLEMENTATION,
+                    name="implementation_faithfulness",
+                    state=CheckState.UNCERTAIN,
+                    detail="no positive controls or verifier consulted",
+                )
+            )
+
+        methodology = self._methodology_checks.get(spec.id)
+        checks.append(
+            methodology
+            if methodology is not None
+            else VerificationCheck(
+                dimension=ValidityDimension.METHODOLOGY,
+                name="methodological_validity",
+                state=CheckState.UNCERTAIN,
+                detail="no methodology review performed",
+            )
+        )
+        checks.append(
+            VerificationCheck(
+                dimension=ValidityDimension.ANALYSIS,
+                name="raw_result_reading",
+                state=CheckState.PASS,
+                detail=(
+                    "outcome read by the pre-registered mechanical "
+                    "prediction check; no downstream aggregation involved"
+                ),
+            )
+        )
+
+        report = VerificationReport(checks=tuple(checks))
+        validity = derive_validity(report)
+        stats.verification = (*stats.verification, report)
+        stats.verification_status = validity.value
+
+        if negative:
+            if outcome_standing(validity) is OutcomeStanding.VERIFIED_EVIDENCE:
+                stats.negative_result_verdict = "accepted"
+                notes.append(
+                    f"verified scientific negative: result {result.id} "
+                    f"refutes its prediction with every validity dimension "
+                    f"resolved — preserved as evidence, not a debugging "
+                    f"matter"
+                )
+            else:
+                stats.negative_result_verdict = "deferred"
+                if self._verification_wired():
+                    notes.append(
+                        f"negative outcome observed but validity unresolved "
+                        f"({validity}): observation preserved without "
+                        f"promotion to scientific evidence — and not routed "
+                        f"to debugging for being negative"
+                    )
+        return notes, invocations
+
+    def _verification_wired(self) -> bool:
+        return (
+            self.control_source is not None
+            or self.implementation_verifier is not None
+            or self.methodology_reviewer is not None
+        )
+
+    def _handle_failed_execution(
+        self,
+        state: ResearchState,
+        result: ExperimentResult,
+        stats: _StepStats,
+        step_notes: list[str],
+    ) -> tuple[ResearchState, int, tuple[ExperimentResult, ...], bool]:
+        """Diagnose one committed failed execution and, when enabled and
+        wired, run the bounded repair loop. Returns the state, the
+        reasoning invocations added, every rerun result (for runtime
+        accounting), and whether the budget was exhausted."""
+        diagnosis = diagnose_failure(result)
+        stats.failure_category = diagnosis.category.value
+        step_notes.append(
+            f"engineering failure diagnosed: {diagnosis.category} "
+            f"({diagnosis.repairability}) — {diagnosis.rationale}"
+        )
+        if (
+            not self.config.debug_enabled
+            or self.debugger is None
+            or not is_debuggable(diagnosis)
+        ):
+            return state, 0, (), False
+        spec = state.experiment(result.spec_id)
+        assert spec is not None  # committed results always name a known spec
+
+        invocations = 0
+        reruns: list[ExperimentResult] = []
+        current = result
+        for number in range(1, self.config.max_debug_attempts + 1):
+            if not state.budget.can_afford(spec.estimated_cost):
+                step_notes.append(
+                    f"debugging stopped before attempt {number}: "
+                    f"insufficient budget"
+                )
+                return state, invocations, tuple(reruns), False
+            session = self.debugger.debug(spec, current, max_attempts=1)
+            if not session.attempts:
+                step_notes.append(f"debugging stopped: {session.stop_reason}")
+                return state, invocations, tuple(reruns), False
+            (attempt_record,) = session.attempts
+            invocations += 1  # the repair proposal is reasoning-seat work
+            stats.debug_attempts += 1
+            retry = attempt_record.result
+            reruns.append(retry)
+            state, committed, exhausted = self._commit_debug_attempt(
+                state, spec, attempt_record, number, step_notes
+            )
+            if exhausted:
+                return state, invocations, tuple(reruns), True
+            if retry.succeeded and committed:
+                stats.debug_resolved = True
+                step_notes.append(
+                    f"debugging succeeded on attempt {number}: a valid "
+                    f"execution of {spec.id} was recovered — its scientific "
+                    f"outcome stands on its own"
+                )
+                state = self._transcribe(state, retry)
+                notes, verify_invocations = self._verify_result(
+                    state, retry, stats
+                )
+                step_notes.extend(notes)
+                invocations += verify_invocations
+                return state, invocations, tuple(reruns), False
+            if retry.succeeded and not committed:
+                # Completed but gate-rejected: not re-diagnosable as an
+                # engineering failure of the process; stop and surface it.
+                return state, invocations, tuple(reruns), False
+            current = retry
+        step_notes.append(
+            f"debugging stopped after {self.config.max_debug_attempts} "
+            f"attempt(s) without a valid execution of {spec.id}"
+        )
+        return state, invocations, tuple(reruns), False
+
+    def _commit_debug_attempt(
+        self,
+        state: ResearchState,
+        spec: ExperimentSpec,
+        record: DebugAttempt,
+        number: int,
+        step_notes: list[str],
+    ) -> tuple[ResearchState, bool, bool]:
+        """Commit one repair rerun as its own auditable, billed attempt.
+        Returns the state, whether the rerun committed cleanly, and whether
+        the budget was exhausted paying for it."""
+        action = ResearchAction(
+            action_type=ResearchActionType.DEBUG,
+            rationale=(
+                f"repair attempt {number} for {spec.id}: "
+                f"{record.diagnosis.category} — {record.repair_rationale}"
+            ),
+            targets=(spec.id,),
+        )
+        attempt = ActionAttempt(action=action).started()
+        state = state.begin_attempt(attempt)
+        result = record.result
+        proposal = ResultProposal(result=result, proposer="runtime:debug-loop:v1")
+        committed = True
+        try:
+            if result.spec_id != spec.id:
+                raise ValidationGateError(
+                    f"repair rerun reports spec {result.spec_id}, "
+                    f"not {spec.id}",
+                    reports=(),
+                )
+            _gate_results(state, action, (proposal,), (result,))
+            bundle = CommitBundle(
+                attempt_id=attempt.id,
+                outcome=ActionOutcome(
+                    status=AttemptStatus.SUCCEEDED,
+                    produced=payload_ids(proposal),
+                    actual_cost=result.cost,
+                ),
+                proposals=(proposal,),
+            )
+        except ValidationGateError as exc:
+            committed = False
+            step_notes.append(
+                f"engineering failure: debug rerun rejected by the "
+                f"deterministic validation gate — {exc} (run outputs "
+                f"preserved)"
+            )
+            bundle = _failed_bundle(attempt.id, str(exc), result.cost)
+        state = commit_bundle(state, bundle, self.store)
+        state = state.apply(action)
+        estimated = (
+            spec.estimated_cost if not spec.estimated_cost.is_zero else result.cost
+        )
+        state, overrun_note, exhausted = _reconcile_cost(
+            state, result.cost, estimated
+        )
+        if overrun_note is not None:
+            step_notes.append(overrun_note)
+        return state, committed, exhausted
+
+    def _analysis_notes(
+        self,
+        before: set[str],
+        state: ResearchState,
+        stats: _StepStats,
+    ) -> list[str]:
+        """Deterministic post-hoc-selection guard over every judgment this
+        step added: an assessment citing only part of the conclusive
+        evidence available to it is an analysis error. The response is
+        *redo the analysis* — never rerun the valid experiments beneath it."""
+        notes: list[str] = []
+        for assessment in state.assessments:
+            if assessment.id in before:
+                continue
+            hypothesis_id = _assessed_hypothesis(state, assessment.subject_id)
+            if hypothesis_id is None:
+                continue
+            check = verify_analysis_coverage(
+                cited_evidence_ids=assessment.evidence_ids,
+                conclusive_evidence_ids=self._conclusive_evidence_ids(
+                    state, hypothesis_id
+                ),
+            )
+            if check.state is CheckState.FAIL:
+                stats.analysis_rejected = True
+                notes.append(
+                    f"analytical failure: assessment {assessment.id} — "
+                    f"{check.detail}; redo the analysis over the full result "
+                    f"family (the underlying executions remain valid)"
+                )
+        return notes
+
+    def _conclusive_evidence_ids(
+        self, state: ResearchState, hypothesis_id: str
+    ) -> tuple[str, ...]:
+        conclusive_results = {
+            test.result_id
+            for prediction in state.predictions_for(hypothesis_id)
+            for test in state.tests_for(prediction.id)
+            if test.consistency is not Consistency.INCONCLUSIVE
+        }
+        return tuple(
+            evidence_id
+            for evidence_id in state.evidence_ids
+            if self.store.get_evidence(evidence_id).result_id
+            in conclusive_results
+        )
 
     def _critic_reasons(
         self, state: ResearchState, result: ExperimentResult
@@ -552,6 +1038,51 @@ class ResearchRuntime:
 
     # -- bookkeeping ---------------------------------------------------------
 
+    def _reject_methodology(
+        self,
+        state: ResearchState,
+        record: DecisionRecord,
+        deliberation: Deliberation,
+        tier: ReasoningTier,
+        invocations: int,
+        started: float,
+        *,
+        action: ResearchAction,
+        check: VerificationCheck,
+        stats: _StepStats,
+    ) -> StepReport:
+        """A design the methodology review rejected never executes. The
+        response surfaced to the director is *redesign the experiment* —
+        explicitly not debugging, and no scientific negative is recorded."""
+        stats.methodology_rejected = True
+        attempt = ActionAttempt(action=action).started()
+        state = state.begin_attempt(attempt)
+        detail = check.detail or "the design cannot answer the stated question"
+        state = commit_bundle(
+            state,
+            _failed_bundle(
+                attempt.id,
+                f"methodologically invalid: {detail} — redesign the experiment",
+                NO_COST,
+            ),
+            self.store,
+        )
+        outcome = _outcome_of(state, attempt.id)
+        note = (
+            f"methodological failure: experiment {action.targets[0]} rejected "
+            f"before execution — redesign the experiment; do not debug the "
+            f"code, and record no scientific negative ({detail})"
+        )
+        state = state.apply(action)
+        self._notes = (*self._notes, note)
+        return self._finish(
+            state, record, deliberation, tier, invocations, started,
+            attempt_id=attempt.id, outcome=outcome, seat=None,
+            validation=(), critic_reasons=(), critic_invoked=False,
+            failures=0, executed_results=(), notes=(note,), stats=stats,
+            halt_reason=None,
+        )
+
     def _stop(
         self,
         state: ResearchState,
@@ -612,8 +1143,10 @@ class ResearchRuntime:
         executed_results: tuple[ExperimentResult, ...],
         notes: tuple[str, ...],
         synthesis: SynthesisReview | None = None,
+        stats: _StepStats | None = None,
         halt_reason: str | None,
     ) -> StepReport:
+        stats = stats if stats is not None else _StepStats()
         self._persist(state)
         usage = self.usage.drain() if self.usage is not None else NO_USAGE
         completed = record.completed(
@@ -653,6 +1186,16 @@ class ResearchRuntime:
                     critic_invoked=critic_invoked,
                     critic_reasons=critic_reasons,
                     synthesis_invoked=synthesis is not None,
+                    failure_category=stats.failure_category,
+                    debug_attempts=stats.debug_attempts,
+                    debug_resolved=stats.debug_resolved,
+                    verification_status=stats.verification_status,
+                    preflight_failed=stats.preflight_failed,
+                    control_failures=stats.control_failures,
+                    methodology_rejected=stats.methodology_rejected,
+                    implementation_rejected=stats.implementation_rejected,
+                    analysis_rejected=stats.analysis_rejected,
+                    negative_result_verdict=stats.negative_result_verdict,
                     rationale=deliberation.reasoning,
                     notes=(
                         *notes,
@@ -675,6 +1218,9 @@ class ResearchRuntime:
             critic_reasons=critic_reasons,
             critic_invoked=critic_invoked,
             synthesis=synthesis,
+            verification=stats.verification,
+            debug_attempts=stats.debug_attempts,
+            debug_resolved=stats.debug_resolved,
             notes=notes,
             halt_reason=halt_reason,
         )
@@ -841,6 +1387,15 @@ def _clamp(cost: ResourceCost, budget: ResearchBudget) -> ResourceCost:
 
 
 # -- helpers -----------------------------------------------------------------
+
+
+def _assessed_hypothesis(state: ResearchState, subject_id: str) -> str | None:
+    """The hypothesis a new assessment bears on — directly, or through the
+    claim it judges. ``None`` when the subject reaches no hypothesis."""
+    if state.hypothesis(subject_id) is not None:
+        return subject_id
+    claim = state.claim(subject_id)
+    return claim.hypothesis_id if claim is not None else None
 
 
 def _signals(frontier: ResearchFrontier) -> EscalationSignals:

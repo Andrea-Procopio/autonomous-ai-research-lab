@@ -8,6 +8,10 @@
   event-triggered critique, cadenced synthesis;
 * ``routing`` — static action-type → seat routing, zero model calls;
 * ``critic_trigger`` — deterministic rules for when a result earns a critic;
+* ``debug_loop`` — the bounded repair loop for failed executions, entered by
+  failure diagnosis and never by scientific outcome;
+* ``review`` — role-backed adapters for the runtime's semantic verification
+  hooks (methodology review, implementation verification);
 * ``synthesis`` — the slow loop's cadence and review types;
 * ``candidates`` / ``evaluation`` — the decomposed path's pieces;
 * ``transitions`` — the only path from a proposal to a state change;
@@ -19,6 +23,15 @@
 from .assignment import RegistryAssigner, RoleAssigner
 from .candidates import CandidateGenerator, RuleBasedCandidateGenerator
 from .critic_trigger import CriticTrigger
+from .debug_loop import (
+    DebugAttempt,
+    DebugSession,
+    ExperimentDebugger,
+    RepairProposal,
+    RepairStrategy,
+    ScientificOutcomeError,
+    is_debuggable,
+)
 from .director import (
     Decision,
     Deliberation,
@@ -35,6 +48,10 @@ from .loop import (
     RunOutcome,
     StepReport,
 )
+from .review import (
+    RoleBackedImplementationVerifier,
+    RoleBackedMethodologyReviewer,
+)
 from .routing import STATIC_ROUTES, expected_proposals, route
 from .synthesis import (
     SynthesisRecommendation,
@@ -48,19 +65,27 @@ __all__ = [
     "STATIC_ROUTES",
     "CandidateGenerator",
     "CriticTrigger",
+    "DebugAttempt",
+    "DebugSession",
     "Decision",
     "Deliberation",
+    "ExperimentDebugger",
     "FrontierDirector",
     "HeuristicUtilityEvaluator",
     "JsonlTrajectoryLogger",
     "MissingRoleError",
     "RegistryAssigner",
+    "RepairProposal",
+    "RepairStrategy",
     "ResearchDirector",
     "ResearchRuntime",
     "RoleAssigner",
+    "RoleBackedImplementationVerifier",
+    "RoleBackedMethodologyReviewer",
     "RuleBasedCandidateGenerator",
     "RuleBasedFrontierDirector",
     "RunOutcome",
+    "ScientificOutcomeError",
     "StepReport",
     "SynthesisRecommendation",
     "SynthesisReview",
@@ -72,5 +97,6 @@ __all__ = [
     "commit_bundle",
     "deliberation_record",
     "expected_proposals",
+    "is_debuggable",
     "route",
 ]

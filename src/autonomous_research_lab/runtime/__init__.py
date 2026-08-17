@@ -6,6 +6,10 @@ decoupled from the richness of the domain model:
 * ``config`` — typed feature flags, so optional machinery is measurable;
 * ``frontier`` — the derived view a director deliberates over;
 * ``validation`` — Tier-0 deterministic checks and readings of results;
+* ``verification`` — experiment validity, orthogonal to scientific outcome:
+  check states, positive controls, semantic review hooks, the
+  negative-result gate;
+* ``preflight`` — cheap deterministic checks before expensive execution;
 * ``escalation`` — reasoning tiers, coarse valuations, and the rule that
   picks the cheapest sufficient tier;
 * ``metrics`` — per-step resource accounting, persisted from step one;
@@ -51,6 +55,14 @@ from .playbook import (
     PlaybookAdvice,
     PlaybookStage,
 )
+from .preflight import (
+    DEFAULT_PREFLIGHT_CHECKS,
+    JobLike,
+    PreflightCheck,
+    PreflightError,
+    require_preflight,
+    run_preflight,
+)
 from .validation import (
     MANIFEST_FILENAME,
     ReplicationSummary,
@@ -62,26 +74,53 @@ from .validation import (
     validate_result,
     verify_artifact_integrity,
 )
+from .verification import (
+    CheckState,
+    ControlSource,
+    ExperimentValidityStatus,
+    ImplementationVerifier,
+    MethodologyReviewer,
+    OutcomeStanding,
+    PositiveControl,
+    ValidityDimension,
+    VerificationCheck,
+    VerificationReport,
+    derive_validity,
+    evaluate_controls,
+    outcome_standing,
+    verify_analysis_coverage,
+)
 
 __all__ = [
     "COMPACT_METHOD",
+    "DEFAULT_PREFLIGHT_CHECKS",
     "MANIFEST_FILENAME",
     "NO_USAGE",
+    "CheckState",
     "CompactValuation",
     "Contradiction",
+    "ControlSource",
     "EmpiricalMLPlaybook",
     "EscalationPolicy",
     "EscalationSignals",
     "EvaluationHooks",
+    "ExperimentValidityStatus",
     "HeldOutAccess",
     "HeldOutAccessError",
+    "ImplementationVerifier",
+    "JobLike",
     "JsonlRuntimeMetrics",
     "Level",
+    "MethodologyReviewer",
     "MetricsSink",
     "ObjectiveEvaluator",
+    "OutcomeStanding",
     "Playbook",
     "PlaybookAdvice",
     "PlaybookStage",
+    "PositiveControl",
+    "PreflightCheck",
+    "PreflightError",
     "ProviderUsage",
     "ReasoningTier",
     "ReplicationSummary",
@@ -91,12 +130,21 @@ __all__ = [
     "UsageSource",
     "ValidationCheck",
     "ValidationReport",
+    "ValidityDimension",
+    "VerificationCheck",
+    "VerificationReport",
     "as_action_utility",
     "build_frontier",
+    "derive_validity",
+    "evaluate_controls",
     "evidence_from_result",
     "find_contradictions",
+    "outcome_standing",
     "replication_summary",
+    "require_preflight",
+    "run_preflight",
     "sha256_of",
     "validate_result",
+    "verify_analysis_coverage",
     "verify_artifact_integrity",
 ]

@@ -396,10 +396,12 @@ gate: arithmetic is not a matter of opinion. Cardinality is part of the
 gate too — a run-type assignment must return exactly one result.
 
 Failed or cancelled *executions* are different: they commit as honest
-execution-failure records with mechanically inconclusive standing, and
-repeated failures of one experiment (counted from the results themselves)
-raise the same kind of deterministic engineering note — a debugging signal
-for the director, not scientific critique.
+execution-failure records with mechanically inconclusive standing, are
+deterministically diagnosed, and — when a debugger is wired in — enter the
+bounded repair loop (below); repeated failures of one experiment (counted
+from the results themselves) raise the same kind of deterministic
+engineering note — a debugging signal for the director, not scientific
+critique.
 
 The executor itself also refuses silent success: exit-zero without metrics,
 a non-finite metric, or a missing declared artifact is a recorded failure
@@ -407,6 +409,98 @@ with the run directory preserved. Reading a gate-valid completed result
 into `Evidence` is a transcription, not a judgment, so
 `evidence_from_result` does it in code — reusing the mechanical
 `PredictionTest` the commit already produced.
+
+### Scientific debugging and experiment verification
+
+The runtime distinguishes five ways an experiment can end, and gives each
+its own detection and its own response:
+
+```
+ENGINEERING FAILURE       crash, timeout, OOM, contract breach → repair execution
+IMPLEMENTATION FAILURE    runs, but is not the intended        → verify / debug /
+                          experiment (silent bug)                reimplement
+METHODOLOGICAL FAILURE    correct code, wrong experiment       → redesign experiment
+ANALYTICAL FAILURE        valid experiment, wrong inference    → redo analysis
+VERIFIED                  all four dimensions resolved         → outcome is evidence
+```
+
+The core principle: **a bad result is not a bug, a successful process is
+not a correct experiment, and a reproducible result is not automatically a
+scientifically valid one.** Debugging optimizes for obtaining a *valid*
+experiment, never for obtaining a positive result — the lab aggressively
+repairs invalid experiments and is equally aggressive about preserving
+disappointing results when the experiment itself is valid.
+
+The pieces, all removable for ablation:
+
+* **Validity model** (`runtime/verification.py`): every check carries an
+  explicit state — `PASS` / `FAIL` / `UNCERTAIN` / `NOT_APPLICABLE`, never
+  a manufactured confidence float — on one of four dimensions (execution,
+  implementation, methodology, analysis). A `VerificationReport` collapses
+  to an `ExperimentValidityStatus` with worst-dimension precedence, and
+  `VERIFIED` requires a positive determination on *every* dimension; an
+  axis nobody checked yields the explicit intermediate `UNVERIFIED` —
+  outcome observed, validity unresolved. Validity is orthogonal to
+  scientific outcome: `VERIFIED` plus an inconsistent prediction test is a
+  valid scientific negative, while `IMPLEMENTATION_UNCERTAIN` plus the same
+  test is a debugging question, not negative evidence.
+* **Failure classifier** (`execution/failure_classifier.py`): deterministic
+  first-pass diagnosis of failed executions from the executor's structured
+  failure reason and preserved stderr — timeout, launch, OOM, import,
+  missing path, missing/malformed metrics, missing artifact. Conservative
+  (`UNKNOWN`/`UNCERTAIN` when signals are ambiguous) and structurally blind
+  to science: a completed run is `NONE` no matter what its metrics say.
+* **Bounded debug loop** (`orchestration/debug_loop.py`): diagnose →
+  propose repair (with its rationale) → rerun as a *new* job → stop at
+  `max_debug_attempts`. Every retry is a separate auditable `DEBUG` attempt
+  committed through the same validation gate, billed at its actual cost,
+  with the previous result, logs and diagnosis preserved. Entry is by
+  failure diagnosis only: the debugger *raises* on a completed result, so
+  `while result_is_scientifically_bad: debug()` cannot be written.
+* **Preflight** (`runtime/preflight.py`): cheap deterministic pre-execution
+  checks (command resolves, declared input paths exist, seed propagated)
+  behind a small extensible interface; a failed check prevents the launch
+  and bills nothing. Checks decide their own applicability — nothing is
+  assumed universal.
+* **Positive controls** (`PositiveControl`): experiment-specific invariants
+  a faithful implementation must satisfy (tiny set overfits, zero learning
+  rate changes nothing, a known probe reads exactly right), evaluated
+  deterministically against reported metrics. A failed control makes the
+  result implementation-*uncertain*; it is never read as a scientific
+  negative, because it tests the instrument, not the hypothesis. Controls
+  live outside `core/` and are supplied per spec.
+* **Selective implementation verification**: a semantic hunt for silent
+  bugs (wrong loss, leaked data, bad split, wrong baseline), event-
+  triggered — on a failed/uncertain control, or on a conclusive negative
+  with no control coverage — never on every run. The hook is a protocol;
+  `orchestration/review.py` adapts an existing role to it via a `FALSIFY`
+  invocation (no new agent, no new action type), and the review verdict
+  feeds a check state without ever committing to scientific state.
+* **Methodology gate**: each design is reviewed once, before its first
+  execution — *even perfectly implemented, would this experiment answer the
+  question?* A rejected design never runs; the director sees `REDESIGN
+  EXPERIMENT`, explicitly not "debug" and not a recorded negative.
+* **Analysis validity**: raw results are distinguished from downstream
+  inference. A deterministic coverage guard rejects judgments citing only
+  part of the conclusive evidence available to them (post-hoc run
+  selection); the response is *redo the analysis*, never rerun the valid
+  experiments beneath it.
+* **Negative-result gate**: a conclusive negative becomes strong scientific
+  evidence only when execution, implementation, methodology and analysis
+  are all positively resolved. Anything less preserves the observation in
+  the explicit observed-but-unresolved state — and under no status is a
+  result routed to debugging merely for being negative (pinned by test).
+
+Deterministic checks always outrank semantic review: dimension aggregation
+treats any deterministic `FAIL` as final, so no model verdict can wash out
+a failed control or a broken artifact hash.
+
+An honest limit, stated rather than implied: no general system can prove
+the total absence of silent scientific bugs. Reliability here comes from
+layered deterministic checks, experiment-specific controls, selective
+independent judgment, and — later — replication; the verification record
+says which layers actually ran, so an unverified result is never mistaken
+for a verified one.
 
 ### Deterministic routing
 
@@ -472,11 +566,18 @@ rather than by policy.
 
 Every optional mechanism hangs off a typed flag in `RuntimeConfig` —
 critic on/off, playbook on/off, synthesis on/off, cheap/strong director
-floor, the repeated-failure threshold — and every step writes a
+floor, the repeated-failure threshold, and the verification family
+(`debug_enabled` + `max_debug_attempts`, `preflight_enabled`,
+`methodology_review_enabled`, `implementation_verification_enabled`,
+`positive_controls_enabled`) — and every step writes a
 `StepMetrics` record: reasoning invocations, provider-reported calls and
 tokens (zero without a provider), wall-clock, experiment compute, whether
 the critic fired and why, the reasoning tier, the outcome, deterministic
-runtime notes, and the raw decision rationale. The eventual research
+runtime notes, the raw decision rationale — plus the verification record:
+failure category, debug attempts and whether debugging recovered a valid
+execution (never conflated with scientific success), validity status,
+preflight/control/methodology/implementation/analysis rejections, and
+whether a conclusive negative was accepted as evidence or deferred. The eventual research
 contribution is a measurement of
 which components earn their cost; the flags and the records are how that
 measurement stays possible. Playbooks (`runtime/playbook.py`) follow the
@@ -663,15 +764,17 @@ Every important research decision is reconstructible later.
 ```
 core          scientific vocabulary                    (no internal dependencies)
 evidence      what happened, append-only + the chain validator
-execution     how to make things happen, anywhere
+execution     how to make things happen, anywhere; deterministic
+              failure classification
 knowledge     what it all means, joined — factually; lesson scaffold
 persistence   snapshots of states, reconstructible offline
-runtime       frontier view, Tier-0 validation, tiers/escalation,
-              metrics, playbooks, evaluation seam     (depends on core only)
+runtime       frontier view, Tier-0 validation, experiment verification
+              and preflight, tiers/escalation, metrics, playbooks,
+              evaluation seam                         (depends on core only)
 search        which move to take
 roles         who does the work, under what contract
-orchestration director, runtime loop, routing, triggers, atomic
-              transitions, trajectory
+orchestration director, runtime loop, routing, triggers, bounded debug
+              loop, role-backed review, atomic transitions, trajectory
 publication   reporting  (empty)
 ```
 

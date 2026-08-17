@@ -51,6 +51,34 @@ class RuntimeConfig:
     raises a deterministic engineering note for the director. An engineering
     signal, not a critic trigger: debugging is not scientific critique."""
 
+    debug_enabled: bool = True
+    """When off, engineering failures are diagnosed and noted but the
+    bounded repair loop never runs (it also never runs without a debugger
+    wired into the runtime)."""
+
+    max_debug_attempts: int = 3
+    """Hard ceiling on repair attempts per failed execution. Debugging
+    optimizes for obtaining a *valid* experiment, never a positive result;
+    a run that is still failing after this many repairs stops."""
+
+    preflight_enabled: bool = True
+    """When off, executor-side wiring skips deterministic pre-execution
+    checks. The runtime itself only records preflight rejections."""
+
+    methodology_review_enabled: bool = True
+    """When on (and a reviewer is wired in), each experiment design is
+    reviewed once before its first execution; a rejected design is never
+    run — the response is redesign, not debugging."""
+
+    implementation_verification_enabled: bool = True
+    """When on (and a verifier is wired in), implementation faithfulness is
+    checked selectively — on failed positive controls and on conclusive
+    negatives lacking control coverage — never on every run."""
+
+    positive_controls_enabled: bool = True
+    """When off, experiment-specific positive controls are not evaluated
+    even if a control source is wired in."""
+
     def __post_init__(self) -> None:
         if self.synthesis_every < 1:
             raise ValueError("synthesis_every must be at least 1")
@@ -60,3 +88,5 @@ class RuntimeConfig:
             raise ValueError("recent_results must be non-negative")
         if self.repeated_failure_threshold < 1:
             raise ValueError("repeated_failure_threshold must be at least 1")
+        if self.max_debug_attempts < 1:
+            raise ValueError("max_debug_attempts must be at least 1")

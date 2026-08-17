@@ -97,6 +97,30 @@ class StepMetrics:
     critic_invoked: bool = False
     critic_reasons: tuple[str, ...] = ()
     synthesis_invoked: bool = False
+
+    failure_category: str = ""
+    """Deterministic classification of this step's execution failure, when
+    one occurred (``execution.failure_classifier`` categories)."""
+
+    debug_attempts: int = 0
+    debug_resolved: bool = False
+    """Debug success means a *valid execution* was recovered. It is a
+    statement about engineering, never about the scientific outcome — a
+    repaired experiment yielding a valid negative is a debugging success."""
+
+    verification_status: str = ""
+    """``ExperimentValidityStatus`` of this step's committed completed
+    result, when verification ran."""
+
+    preflight_failed: bool = False
+    control_failures: int = 0
+    methodology_rejected: bool = False
+    implementation_rejected: bool = False
+    analysis_rejected: bool = False
+    negative_result_verdict: str = ""
+    """For a conclusive negative outcome this step: ``"accepted"`` when it
+    was promoted to verified scientific evidence, ``"deferred"`` when the
+    observation was preserved with validity unresolved. Empty otherwise."""
     branch_count: int = 1
     """Concurrent lines of investigation this step advanced. 1 until
     branching exists; recorded so the ablation can see it change."""

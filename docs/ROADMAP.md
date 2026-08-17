@@ -33,6 +33,15 @@ in the loop, producing results that survive scrutiny.
   as structured objects carrying their sources.
 - **Real experiment execution.** ML training runs under the existing executor
   contract — checkpoints, longer timeouts, GPU accounting.
+- **Scientific debugging and experiment verification.** Done in its Phase 1
+  form: the five-way failure taxonomy (engineering / implementation /
+  methodological / analytical / verified), a deterministic failure
+  classifier, the bounded debug loop, preflight, positive controls,
+  selective implementation verification, the methodology gate, analysis
+  coverage, and the negative-result gate — all flag-gated and removable
+  (see ARCHITECTURE). Still open: model-backed repair strategies and
+  reviewers behind the existing protocols, and richer experiment-specific
+  control libraries.
 - **Statistician and Verifier.** Real inference behind `EpistemicAssessment` —
   today's assessments are demo-grade prediction checks; these roles bring
   power, uncertainty, and multiple-comparison awareness — plus provenance
