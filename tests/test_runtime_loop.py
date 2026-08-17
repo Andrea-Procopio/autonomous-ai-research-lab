@@ -194,7 +194,12 @@ def test_consequential_iteration_adds_exactly_the_critic(tmp_path: Path) -> None
 def test_disabling_the_critic_removes_the_call_but_keeps_the_data(
     tmp_path: Path,
 ) -> None:
-    run = _escalated(tmp_path, config=RuntimeConfig(critic_enabled=False))
+    run = _escalated(
+        tmp_path,
+        config=RuntimeConfig(
+            critic_enabled=False, verification_governance_enabled=False
+        ),
+    )
     report = experiment_report(run, ResearchActionType.REPLICATE)
 
     assert not report.critic_invoked
@@ -203,7 +208,12 @@ def test_disabling_the_critic_removes_the_call_but_keeps_the_data(
 
 
 def test_disabling_synthesis_leaves_only_the_fast_loop(tmp_path: Path) -> None:
-    run = _escalated(tmp_path, config=RuntimeConfig(synthesis_enabled=False))
+    run = _escalated(
+        tmp_path,
+        config=RuntimeConfig(
+            synthesis_enabled=False, verification_governance_enabled=False
+        ),
+    )
     assert all(report.synthesis is None for report in run.outcome.reports)
 
 
@@ -220,7 +230,12 @@ def test_synthesis_wakes_on_contradiction_and_before_stopping(
 def test_playbook_is_optional_and_the_loop_still_terminates(
     tmp_path: Path,
 ) -> None:
-    run = _escalated(tmp_path, config=RuntimeConfig(playbook_enabled=False))
+    run = _escalated(
+        tmp_path,
+        config=RuntimeConfig(
+            playbook_enabled=False, verification_governance_enabled=False
+        ),
+    )
     assert run.outcome.halt_reason == (
         "no open scientific work remains on the frontier"
     )

@@ -42,10 +42,13 @@ in the loop, producing results that survive scrutiny.
   methodology gate, analysis coverage, the negative-result gate, durable
   per-result verification records, and the scientific-promotion gate that
   keeps unverified observation from becoming trusted support — all
-  flag-gated and removable (see ARCHITECTURE). Still open: model-backed
-  repair strategies and reviewers behind the existing protocols, richer
-  experiment-specific control libraries, and gating for results committed
-  before the verification layer was wired in.
+  flag-gated and removable (see ARCHITECTURE). Verification governance
+  fails closed by default — a missing record blocks trusted promotion, and
+  the ungoverned lab exists only as an explicit config ablation. Still
+  open: model-backed repair strategies and reviewers behind the existing
+  protocols, richer experiment-specific control libraries, and defaulting
+  the runtime to file-backed verification persistence (today the durable
+  `FileVerificationStore` is opt-in wiring beside the file state store).
 - **Statistician and Verifier.** Real inference behind `EpistemicAssessment` —
   today's assessments are demo-grade prediction checks; these roles bring
   power, uncertainty, and multiple-comparison awareness — plus provenance

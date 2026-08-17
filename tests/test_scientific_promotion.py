@@ -65,7 +65,7 @@ from autonomous_research_lab.runtime.verification import (
     VerificationReport,
 )
 from autonomous_research_lab.runtime.verification_store import (
-    verification_record,
+    VerificationRecord,
 )
 
 QUESTION = ResearchQuestion(text="Is the stream fair?")
@@ -351,10 +351,12 @@ def test_inconclusive_citation_of_unresolved_evidence_is_allowed(
 
 def _gate_fixture(
     validity_report: VerificationReport | None,
+    *,
+    governance: bool = True,
 ) -> tuple[ResearchRuntime, Evidence]:
     store = InMemoryEvidenceStore()
     runtime = ResearchRuntime(
-        config=RuntimeConfig(),
+        config=RuntimeConfig(verification_governance_enabled=governance),
         director=RuleBasedFrontierDirector(),
         roles={},
         store=store,
@@ -380,7 +382,11 @@ def _gate_fixture(
     )
     if validity_report is not None:
         runtime.verifications.record(
-            verification_record(result.id, result.spec_id, validity_report)
+            VerificationRecord(
+                result_id=result.id,
+                spec_id=result.spec_id,
+                report=validity_report,
+            )
         )
     return runtime, evidence
 
@@ -456,8 +462,109 @@ def test_undetermined_assessments_remain_open_to_any_observation() -> None:
     runtime._gate_promotions((undetermined,))  # no raise: it claims nothing
 
 
-def test_never_verified_results_keep_legacy_semantics() -> None:
-    """A result with no verification record predates or was excluded from
-    verification: the gate has no verdict to enforce and stays silent."""
+def test_missing_record_fails_closed_under_governance() -> None:
+    """Absence of a record is never read as ablation: a lost store, a
+    restart, or a mis-wired runtime must not silently restore trust."""
     runtime, evidence = _gate_fixture(None)
-    runtime._gate_promotions((_supporting_assessment(evidence),))  # no raise
+    with pytest.raises(PromotionError, match="no verification record"):
+        runtime._gate_promotions((_supporting_assessment(evidence),))
+
+
+def test_contradicts_links_also_fail_closed_on_missing_records() -> None:
+    runtime, evidence = _gate_fixture(None)
+    claim = Claim(statement="s", scope="sc", hypothesis_id=HYPOTHESIS.id)
+    contradicting = ClaimProposal(
+        claim=claim,
+        links=(
+            EvidenceLink(
+                claim_id=claim.id,
+                evidence_id=evidence.id,
+                relation=EvidenceRelation.CONTRADICTS,
+            ),
+        ),
+        proposer="test",
+    )
+    with pytest.raises(PromotionError, match="no verification record"):
+        runtime._gate_promotions((contradicting,))
+
+
+def test_explicit_ablation_restores_legacy_semantics() -> None:
+    """Governance off is the deliberate, visible ablation switch: the gate
+    is fully inert — missing and adverse records alike go unenforced."""
+    missing, evidence = _gate_fixture(None, governance=False)
+    missing._gate_promotions((_supporting_assessment(evidence),))  # no raise
+    adverse, evidence = _gate_fixture(
+        _single_dimension_report(
+            ValidityDimension.IMPLEMENTATION, CheckState.FAIL
+        ),
+        governance=False,
+    )
+    adverse._gate_promotions((_supporting_assessment(evidence),))  # no raise
+
+
+def test_restart_with_lost_verification_store_fails_closed(
+    tmp_path: Path,
+) -> None:
+    """The required restart scenario: state and evidence survive, the
+    verification record does not — trusted promotion stays blocked."""
+    runtime, _, sink = _runtime(
+        tmp_path, {"heads_rate": 0.45, "overfit_acc": 1.0}
+    )
+    spec, prediction = _spec_and_prediction()
+    first = runtime.step(_prepared_state(spec, prediction))
+    (result_ref,) = first.state.results
+    assert runtime.verifications.get(result_ref.result_id) is not None
+
+    # "Restart": a fresh runtime restores the state and evidence store but
+    # comes up with an empty (default in-memory) verification store.
+    restarted = ResearchRuntime(
+        config=RuntimeConfig(),
+        director=RuleBasedFrontierDirector(),
+        roles={RoleName.RESEARCH_DIRECTOR: StubScientist()},
+        store=runtime.store,
+        metrics=sink,
+    )
+    assert restarted.verifications.get(result_ref.result_id) is None
+
+    second = restarted.step(first.state)  # the synthesis attempt
+
+    assert second.state.claims == ()
+    assert second.state.evidence_links == ()
+    assert sink.records[-1].promotion_blocked
+    assert any("no verification record" in n for n in second.notes)
+    # The observation itself is still there, untouched.
+    (evidence_id,) = second.state.evidence_ids
+    assert restarted.store.get_evidence(evidence_id).result_id == (
+        result_ref.result_id
+    )
+
+
+def test_file_backed_records_survive_a_restart(tmp_path: Path) -> None:
+    """The consistent-persistence wiring: with a FileVerificationStore
+    rooted next to the state store, a restarted runtime reloads its
+    verdicts and verified promotion works again."""
+    from autonomous_research_lab.runtime.verification_store import (
+        FileVerificationStore,
+    )
+
+    root = tmp_path / "verifications"
+    runtime, _, sink = _runtime(
+        tmp_path, {"heads_rate": 0.45, "overfit_acc": 1.0}
+    )
+    runtime.verifications = FileVerificationStore(root)
+    spec, prediction = _spec_and_prediction()
+    first = runtime.step(_prepared_state(spec, prediction))
+
+    restarted = ResearchRuntime(
+        config=RuntimeConfig(),
+        director=RuleBasedFrontierDirector(),
+        roles={RoleName.RESEARCH_DIRECTOR: StubScientist()},
+        store=runtime.store,
+        metrics=sink,
+        verifications=FileVerificationStore(root),
+    )
+    second = restarted.step(first.state)
+
+    (claim,) = second.state.claims
+    assert claim.hypothesis_id == HYPOTHESIS.id
+    assert not sink.records[-1].promotion_blocked

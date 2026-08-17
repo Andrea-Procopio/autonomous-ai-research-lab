@@ -331,9 +331,9 @@ class DemoCritic(ResearchRole):
     def _assess(self, invocation: RoleInvocation) -> tuple[Proposal, ...]:
         (claim,) = invocation.context.claims
         verdict = self._verdict(invocation.context.prediction_tests)
-        evidence_ids = tuple(
-            link.evidence_id for link in invocation.context.evidence_links
-        )
+        # Cite everything considered: the verdict weighs the full test
+        # family, so the citation covers the full conclusive evidence too.
+        evidence_ids = tuple(e.id for e in invocation.context.evidence)
         rationale = (
             "verdict follows the full set of mechanical prediction tests "
             "under their pre-registered conditions"
@@ -406,7 +406,10 @@ def run_runtime_loop(
     max_steps: int = 24,
 ) -> DemoRun:
     root = Path(run_root) if run_root else Path(mkdtemp())
-    config = config or RuntimeConfig()
+    # This demo predates the verification layer and wires none of it, so it
+    # runs as the *explicitly* ablated lab: governance is switched off in
+    # config rather than inferred from the absence of verification records.
+    config = config or RuntimeConfig(verification_governance_enabled=False)
     store: EvidenceStore = InMemoryEvidenceStore()
     states = FileStateStore(root)
     trajectory = JsonlTrajectoryLogger(root / "trajectory.jsonl")

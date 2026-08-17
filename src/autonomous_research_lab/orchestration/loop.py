@@ -128,8 +128,8 @@ from ..runtime.verification import (
 )
 from ..runtime.verification_store import (
     InMemoryVerificationStore,
+    VerificationRecord,
     VerificationStore,
-    verification_record,
 )
 from .critic_trigger import CriticTrigger
 from .debug_loop import (
@@ -170,6 +170,12 @@ class PromotionError(Exception):
     """A proposal tried to promote unverified observation into trusted
     scientific support. The observation itself is untouched — what is
     rejected is the *use*, not the record."""
+
+
+class AnalysisValidityError(Exception):
+    """A proposed judgment failed a deterministic analysis-validity check
+    (e.g. post-hoc run selection). The response is *redo the analysis* —
+    the executions underneath it remain valid and untouched."""
 
 
 @dataclass
@@ -317,7 +323,6 @@ class ResearchRuntime:
         started = time.monotonic()
         step_notes: list[str] = []
         stats = _StepStats()
-        assessments_before = {a.id for a in state.assessments}
         frontier = build_frontier(
             state,
             recent_results=self.config.recent_results,
@@ -450,6 +455,7 @@ class ResearchRuntime:
                 # orchestration bug as a role failure would corrupt the
                 # record.
                 self._gate_promotions(proposals)
+                self._gate_analysis(state, proposals)
                 validation = _gate_results(
                     state, action, proposals, executed_results
                 )
@@ -471,6 +477,19 @@ class ResearchRuntime:
                     f"scientific promotion blocked: {exc} — the observation "
                     f"is preserved; resolve its validity (or cite it as "
                     f"inconclusive) before using it as support"
+                )
+                bundle = _failed_bundle(
+                    attempt.id,
+                    str(exc),
+                    _actual_cost(executed_results, estimated),
+                )
+            except AnalysisValidityError as exc:
+                failures = 1
+                stats.analysis_rejected = True
+                step_notes.append(
+                    f"analytical failure: {exc}; redo the analysis over the "
+                    f"full result family — the underlying executions remain "
+                    f"valid and untouched"
                 )
                 bundle = _failed_bundle(
                     attempt.id,
@@ -598,8 +617,6 @@ class ResearchRuntime:
                         notes=tuple(step_notes), stats=stats,
                         halt_reason="budget exhausted during debugging",
                     )
-
-        step_notes.extend(self._analysis_notes(assessments_before, state, stats))
 
         state = state.apply(action)
         state, overrun_note, exhausted = _reconcile_cost(
@@ -824,7 +841,9 @@ class ResearchRuntime:
         # The verdict becomes a durable record: this — not a step-local
         # note — is what the promotion gate and later steps consult.
         verdict = self.verifications.record(
-            verification_record(result.id, result.spec_id, report)
+            VerificationRecord(
+                result_id=result.id, spec_id=result.spec_id, report=report
+            )
         )
         stats.verification = (*stats.verification, report)
         stats.verification_status = verdict.validity.value
@@ -860,15 +879,20 @@ class ResearchRuntime:
     def _gate_promotions(self, proposals: tuple[Proposal, ...]) -> None:
         """Refuse to commit trusted scientific use of unverified observation.
 
-        The rule, applied per cited evidence: a result with **no**
-        verification record was run with the verification layer ablated and
-        keeps legacy semantics; a result **with** a record may serve as
+        Under enabled verification governance the gate **fails closed**:
         trusted support (a SUPPORTS/CONTRADICTS link, a conclusive
-        assessment) only when its standing is ``VERIFIED_EVIDENCE``.
-        Inconclusive links and ``UNDETERMINED`` assessments remain open to
-        any observation — inspection is never blocked, promotion is.
-        Raises :class:`PromotionError`; deterministic, no model consulted.
+        assessment) requires a durable ``VERIFIED_EVIDENCE`` record for the
+        cited result, and a *missing* record blocks exactly like an adverse
+        one — a lost store, a restart, or a mis-wired runtime must never
+        silently restore trust. Legacy semantics exist only as explicit
+        ablation (``verification_governance_enabled = False``), never as an
+        inference from missing data. Inconclusive links and ``UNDETERMINED``
+        assessments remain open to any observation — inspection is never
+        blocked, promotion is. Raises :class:`PromotionError`;
+        deterministic, no model consulted.
         """
+        if not self.config.verification_governance_enabled:
+            return  # explicit ablation: the deliberately ungoverned lab
         for proposal in proposals:
             match proposal:
                 case ClaimProposal():
@@ -909,7 +933,15 @@ class ResearchRuntime:
             return
         verdict = self.verifications.get(evidence.result_id)
         if verdict is None:
-            return  # never verified: legacy (ablated) semantics apply
+            # Fail closed: no record is indistinguishable from a lost or
+            # mis-wired store, so it is treated as UNVERIFIED, not trusted.
+            raise PromotionError(
+                f"evidence {evidence_id} rests on result "
+                f"{evidence.result_id}, which has no verification record; "
+                f"under enabled verification governance an unrecorded "
+                f"result is treated as unverified and cannot serve as "
+                f"{use} (disable governance explicitly to run ablated)"
+            )
         if verdict.standing is not OutcomeStanding.VERIFIED_EVIDENCE:
             raise PromotionError(
                 f"evidence {evidence_id} rests on result "
@@ -934,6 +966,50 @@ class ResearchRuntime:
         except UnknownRecordError:
             return None
 
+    # -- the analysis-validity gate ------------------------------------------
+
+    def _gate_analysis(
+        self, state: ResearchState, proposals: tuple[Proposal, ...]
+    ) -> None:
+        """Deterministic analytical checks, applied **before** commit.
+
+        A judgment that fails them — today, coverage: an assessment citing
+        only part of the conclusive evidence available to its hypothesis
+        (post-hoc run selection) — never enters authoritative scientific
+        state. Raises :class:`AnalysisValidityError`; the response it
+        surfaces is *redo the analysis*, never rerun the valid experiments
+        beneath it.
+        """
+        for proposal in proposals:
+            if not isinstance(proposal, AssessmentProposal):
+                continue
+            assessment = proposal.assessment
+            hypothesis_id = _assessed_hypothesis(state, assessment.subject_id)
+            if hypothesis_id is None:
+                # The subject may be a claim proposed in this same bundle.
+                hypothesis_id = next(
+                    (
+                        p.claim.hypothesis_id
+                        for p in proposals
+                        if isinstance(p, ClaimProposal)
+                        and p.claim.id == assessment.subject_id
+                    ),
+                    None,
+                )
+            if hypothesis_id is None:
+                continue
+            check = verify_analysis_coverage(
+                cited_evidence_ids=assessment.evidence_ids,
+                conclusive_evidence_ids=_conclusive_evidence_ids(
+                    state, self.store, hypothesis_id
+                ),
+            )
+            if check.state is CheckState.FAIL:
+                raise AnalysisValidityError(
+                    f"assessment {assessment.id} of {assessment.subject_id} "
+                    f"— {check.detail}"
+                )
+
     def _handle_implementation_invalidity(
         self,
         state: ResearchState,
@@ -946,11 +1022,21 @@ class ResearchRuntime:
 
         Entry demands typed implementation-invalidity evidence (the failed
         checks become the :class:`ImplementationRepairTrigger`), never the
-        scientific outcome. The original result and its adverse verification
-        record are preserved untouched; each rerun is a new billed DEBUG
-        attempt that must *earn* its own verification, and the repair counts
-        as resolved only when the fresh record's implementation dimension no
-        longer fails.
+        scientific outcome. Within the one configured attempt bound, each
+        iteration responds to the *latest* attempt's actual state:
+
+        * a completed rerun earns its own fresh verification; a fresh
+          implementation FAIL yields a **new trigger built from that run's
+          report**, never a stale re-read of the original;
+        * a rerun that crashes is an *execution* failure — it is diagnosed
+          by the classifier and repaired with execution-repair semantics,
+          not treated as another semantic implementation failure;
+        * resolution means the newest run's implementation dimension no
+          longer fails.
+
+        The original result and its adverse verification record are
+        preserved untouched, and every attempt on either path is a separate
+        billed, auditable DEBUG occurrence.
         """
         if (
             not self.config.debug_enabled
@@ -974,9 +1060,28 @@ class ResearchRuntime:
                     f"insufficient budget"
                 )
                 return state, invocations, tuple(reruns), False
-            session = self.debugger.repair_implementation(
-                spec, current, trigger, max_attempts=1
-            )
+            if current.succeeded:
+                session = self.debugger.repair_implementation(
+                    spec, current, trigger, max_attempts=1
+                )
+            else:
+                # The previous reimplementation crashed: that is an
+                # execution failure, diagnosed and repaired as one — while
+                # the episode's single attempt bound keeps counting.
+                diagnosis = diagnose_failure(current)
+                step_notes.append(
+                    f"reimplementation crashed — execution failure "
+                    f"diagnosed: {diagnosis.category} "
+                    f"({diagnosis.repairability}) — {diagnosis.rationale}"
+                )
+                if not is_debuggable(diagnosis):
+                    step_notes.append(
+                        "implementation repair stopped: the crashed rerun "
+                        "is not diagnosable as a repairable execution "
+                        "failure"
+                    )
+                    return state, invocations, tuple(reruns), False
+                session = self.debugger.debug(spec, current, max_attempts=1)
             if not session.attempts:
                 step_notes.append(
                     f"implementation repair stopped: {session.stop_reason}"
@@ -1001,9 +1106,15 @@ class ResearchRuntime:
                 )
                 step_notes.extend(notes)
                 invocations += verify_invocations
-                if retry_report is not None and not _implementation_failures(
-                    retry_report
-                ):
+                if retry_report is None:
+                    step_notes.append(
+                        "implementation repair stopped: no verification is "
+                        "available for the reimplementation, so its "
+                        "implementation cannot be pronounced recovered"
+                    )
+                    return state, invocations, tuple(reruns), False
+                fresh_failures = _implementation_failures(retry_report)
+                if not fresh_failures:
                     stats.implementation_debug_resolved = True
                     step_notes.append(
                         f"implementation repair succeeded on attempt "
@@ -1012,6 +1123,11 @@ class ResearchRuntime:
                         f"scientific outcome stands on its own"
                     )
                     return state, invocations, tuple(reruns), False
+                # Still indicted: the next attempt answers THIS run's
+                # evidence, not the original's.
+                trigger = ImplementationRepairTrigger(
+                    result_id=retry.id, checks=fresh_failures
+                )
             if retry.succeeded and not committed:
                 return state, invocations, tuple(reruns), False
             current = retry
@@ -1158,54 +1274,6 @@ class ResearchRuntime:
             step_notes.append(overrun_note)
         return state, committed, exhausted
 
-    def _analysis_notes(
-        self,
-        before: set[str],
-        state: ResearchState,
-        stats: _StepStats,
-    ) -> list[str]:
-        """Deterministic post-hoc-selection guard over every judgment this
-        step added: an assessment citing only part of the conclusive
-        evidence available to it is an analysis error. The response is
-        *redo the analysis* — never rerun the valid experiments beneath it."""
-        notes: list[str] = []
-        for assessment in state.assessments:
-            if assessment.id in before:
-                continue
-            hypothesis_id = _assessed_hypothesis(state, assessment.subject_id)
-            if hypothesis_id is None:
-                continue
-            check = verify_analysis_coverage(
-                cited_evidence_ids=assessment.evidence_ids,
-                conclusive_evidence_ids=self._conclusive_evidence_ids(
-                    state, hypothesis_id
-                ),
-            )
-            if check.state is CheckState.FAIL:
-                stats.analysis_rejected = True
-                notes.append(
-                    f"analytical failure: assessment {assessment.id} — "
-                    f"{check.detail}; redo the analysis over the full result "
-                    f"family (the underlying executions remain valid)"
-                )
-        return notes
-
-    def _conclusive_evidence_ids(
-        self, state: ResearchState, hypothesis_id: str
-    ) -> tuple[str, ...]:
-        conclusive_results = {
-            test.result_id
-            for prediction in state.predictions_for(hypothesis_id)
-            for test in state.tests_for(prediction.id)
-            if test.consistency is not Consistency.INCONCLUSIVE
-        }
-        return tuple(
-            evidence_id
-            for evidence_id in state.evidence_ids
-            if self.store.get_evidence(evidence_id).result_id
-            in conclusive_results
-        )
-
     def _critic_reasons(
         self, state: ResearchState, result: ExperimentResult
     ) -> tuple[str, ...]:
@@ -1255,6 +1323,7 @@ class ResearchRuntime:
             # rejects the whole bundle and the critic attempt fails.
             _check_contract(invocation, proposals, RoleName.RESULT_ANALYST)
             self._gate_promotions(proposals)
+            self._gate_analysis(state, proposals)
             bundle = CommitBundle(
                 attempt_id=attempt.id,
                 outcome=ActionOutcome(
@@ -1272,6 +1341,16 @@ class ResearchRuntime:
                 f"scientific promotion blocked: {exc} — the observation is "
                 f"preserved; resolve its validity (or cite it as "
                 f"inconclusive) before using it as support"
+            )
+            state = commit_bundle(
+                state, _failed_bundle(attempt.id, str(exc), NO_COST), self.store
+            )
+        except AnalysisValidityError as exc:
+            stats.analysis_rejected = True
+            step_notes.append(
+                f"analytical failure: {exc}; redo the analysis over the "
+                f"full result family — the underlying executions remain "
+                f"valid and untouched"
             )
             state = commit_bundle(
                 state, _failed_bundle(attempt.id, str(exc), NO_COST), self.store
@@ -1695,6 +1774,24 @@ def _assessed_hypothesis(state: ResearchState, subject_id: str) -> str | None:
     return claim.hypothesis_id if claim is not None else None
 
 
+def _conclusive_evidence_ids(
+    state: ResearchState, store: EvidenceStore, hypothesis_id: str
+) -> tuple[str, ...]:
+    """Every recorded evidence resting on a conclusive test of the
+    hypothesis's predictions — what a complete analysis must consider."""
+    conclusive_results = {
+        test.result_id
+        for prediction in state.predictions_for(hypothesis_id)
+        for test in state.tests_for(prediction.id)
+        if test.consistency is not Consistency.INCONCLUSIVE
+    }
+    return tuple(
+        evidence_id
+        for evidence_id in state.evidence_ids
+        if store.get_evidence(evidence_id).result_id in conclusive_results
+    )
+
+
 def _signals(frontier: ResearchFrontier) -> EscalationSignals:
     """Deterministic escalation signals read off the frontier."""
     return EscalationSignals(
@@ -1874,7 +1971,17 @@ def _assessment_context(
         for prediction in predictions
         for test in state.tests_for(prediction.id)
     )
-    evidence = tuple(store.get_evidence(link.evidence_id) for link in links)
+    # An assessor sees — and can therefore cite — every conclusive
+    # observation bearing on the hypothesis, not only the claim's own
+    # links: the analysis-validity gate holds it to exactly that coverage.
+    linked_ids = tuple(link.evidence_id for link in links)
+    family_ids = (
+        _conclusive_evidence_ids(state, store, hypothesis.id)
+        if hypothesis is not None
+        else ()
+    )
+    evidence_ids = tuple(dict.fromkeys((*linked_ids, *family_ids)))
+    evidence = tuple(store.get_evidence(eid) for eid in evidence_ids)
     return RoleContext(
         objective=state.objective,
         hypotheses=(hypothesis,) if hypothesis else (),

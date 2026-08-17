@@ -462,13 +462,18 @@ The pieces, all removable for ablation:
   invariant violation). A prediction test, a small effect, or an
   underperforming baseline cannot be expressed as such a trigger, so
   `while result_is_scientifically_bad: debug()` cannot be written against
-  either entry. Every retry, on either path, is a separate auditable
-  `DEBUG` attempt committed through the same validation gate and billed at
-  its actual cost; the original invalid result and its verification record
-  are never deleted or rewritten, and a reimplementation must *earn* its
-  own fresh verification — repair resolves only when the new run's
-  implementation dimension no longer fails, which still says nothing about
-  its scientific outcome.
+  either entry. Within one bounded episode, each iteration responds to the
+  *latest* attempt's actual state: a completed rerun earns fresh
+  verification, and a fresh implementation FAIL yields a **new trigger
+  built from that run's report**; a rerun that crashes is diagnosed by the
+  classifier and repaired with execution-repair semantics rather than
+  being treated as another semantic implementation failure. Every retry,
+  on either path, is a separate auditable `DEBUG` attempt committed
+  through the same validation gate and billed at its actual cost; the
+  original invalid result and its verification record are never deleted
+  or rewritten, and repair resolves only when the newest run's
+  implementation dimension no longer fails — which still says nothing
+  about its scientific outcome.
 * **Preflight** (`runtime/preflight.py`): cheap deterministic pre-execution
   checks (command resolves, declared input paths exist, seed propagated)
   behind a small extensible interface; a failed check prevents the launch
@@ -493,31 +498,42 @@ The pieces, all removable for ablation:
   question?* A rejected design never runs; the director sees `REDESIGN
   EXPERIMENT`, explicitly not "debug" and not a recorded negative.
 * **Analysis validity**: raw results are distinguished from downstream
-  inference. A deterministic coverage guard rejects judgments citing only
-  part of the conclusive evidence available to them (post-hoc run
-  selection); the response is *redo the analysis*, never rerun the valid
-  experiments beneath it.
+  inference. A deterministic coverage guard runs **before commit**: a
+  judgment citing only part of the conclusive evidence available to its
+  hypothesis (post-hoc run selection) is rejected at the gate and never
+  enters authoritative scientific state — the surfaced response is *redo
+  the analysis*, never rerun the valid experiments beneath it. Assessor
+  contexts carry the full conclusive family, so complete citation is
+  always possible.
 * **Negative-result gate**: a conclusive negative becomes strong scientific
   evidence only when execution, implementation, methodology and analysis
   are all positively resolved. Anything less preserves the observation in
   the explicit observed-but-unresolved state — and under no status is a
   result routed to debugging merely for being negative (pinned by test).
 * **Durable verification records** (`runtime/verification_store.py`): every
-  verified result's report, validity and standing become a record keyed by
-  result id — id never maps to different content, verdicts are never
-  rewritten, and repair produces a new result with a new record. In-memory
-  and one-JSON-file-per-record implementations; absence of a record marks
-  a result that was run with verification ablated.
+  verified result's report becomes a record keyed by result id — id never
+  maps to different content, verdicts are never rewritten, and repair
+  produces a new result with a new record. Records are internally
+  canonical: the report is the single source of truth, validity and
+  standing are derived at construction and cannot be supplied, and a
+  serialized record whose stored verdict disagrees with its own report
+  fails loudly on load rather than becoming trusted. In-memory and
+  one-JSON-file-per-record implementations.
 * **The scientific-promotion gate** (in the runtime loop, pre-commit):
-  raw observation ≠ verified scientific support. A SUPPORTS/CONTRADICTS
-  evidence link or a conclusive assessment may cite evidence only when the
-  durable record behind it stands at `VERIFIED_EVIDENCE`; anything less is
-  rejected before commit — deterministically, from the record, with no
-  model consulted. Inspection is never blocked: unresolved observations
-  stay in the evidence store, may be cited as INCONCLUSIVE, may ground
-  UNDETERMINED assessments, and reach reasoning seats annotated with their
-  standing through context notes. Results with no record (the ablated lab)
-  keep legacy semantics.
+  raw observation ≠ verified scientific support. Under enabled
+  verification governance (`verification_governance_enabled`, on by
+  default) the gate **fails closed**: a SUPPORTS/CONTRADICTS evidence link
+  or a conclusive assessment may cite evidence only when the durable
+  record behind it stands at `VERIFIED_EVIDENCE`, and a *missing* record
+  blocks exactly like an adverse one — absence can mean a lost store, a
+  restart, or a mis-wired runtime, and none of those may silently restore
+  trust. Legacy semantics exist only as *explicit* ablation (governance
+  off), never as an inference from missing data. Inspection is never
+  blocked: unresolved observations stay in the evidence store, may be
+  cited as INCONCLUSIVE, may ground UNDETERMINED assessments, and reach
+  reasoning seats annotated with their standing through context notes.
+  For restart/resume, wire a `FileVerificationStore` alongside the file
+  state store so verdicts reload with the state they govern.
 
 Deterministic checks always outrank semantic review: dimension aggregation
 treats any deterministic `FAIL` as final, so no model verdict can wash out

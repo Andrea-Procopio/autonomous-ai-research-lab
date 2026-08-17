@@ -10,13 +10,18 @@ The store observes the same invariant as the evidence store: **an id never
 maps to different content.** Re-recording an identical record is a no-op;
 re-recording a different one raises. A result's verification verdict is
 part of the permanent record — repair produces a *new* result with its own
-record, it never rewrites the old one.
+record, it never rewrites the old one. Records are internally canonical:
+the report is the single source of truth, the verdict is derived from it at
+construction, and a serialized record whose stored verdict disagrees with
+its own report fails loudly on load.
 
-Absence is meaningful and deliberate: a result with **no** record was run
-with the verification layer ablated (or predates it), and downstream gating
-treats it under legacy semantics. A result *with* a record is governed by
-it — there is no way to shed an adverse verdict short of running a new
-experiment that earns its own.
+How a **missing** record is read is not this module's decision. Under
+enabled verification governance (``RuntimeConfig.
+verification_governance_enabled``) the runtime fails closed — a missing
+record blocks trusted promotion exactly like an unresolved one, because
+absence can mean a lost store or a restart just as easily as ablation.
+Legacy/ablated semantics require governance to be disabled *explicitly*;
+they are never inferred from missing data.
 
 Two implementations, same philosophy as the rest of persistence: in-memory
 for tests and ablations, one small JSON file per record for durability. No
@@ -26,7 +31,7 @@ database.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
@@ -46,34 +51,34 @@ class VerificationConflictError(RuntimeError):
     """Raised when a result id is re-recorded with different content."""
 
 
+class VerificationIntegrityError(RuntimeError):
+    """Raised when a serialized record's stored verdict disagrees with the
+    verdict its own report derives. A corrupted or tampered record fails
+    loudly here — it never becomes trusted."""
+
+
 @dataclass(frozen=True, slots=True)
 class VerificationRecord:
     """The durable verification verdict of one result.
 
-    ``validity`` and ``standing`` are derivable from ``report`` but stored
-    explicitly: the record is the authority downstream code consults, and a
-    consumer should not need the derivation rules to read it.
+    ``report`` is the single source of truth; ``validity`` and ``standing``
+    are **derived** in ``__post_init__`` and cannot be supplied — a record
+    whose verdict disagrees with its own report is unconstructible. They are
+    still materialized (and serialized) so a consumer can read the verdict
+    without knowing the derivation rules; deserialization re-derives and
+    refuses any file where the stored verdict does not match.
     """
 
     result_id: str
     spec_id: str
     report: VerificationReport
-    validity: ExperimentValidityStatus
-    standing: OutcomeStanding
+    validity: ExperimentValidityStatus = field(init=False)
+    standing: OutcomeStanding = field(init=False)
 
-
-def verification_record(
-    result_id: str, spec_id: str, report: VerificationReport
-) -> VerificationRecord:
-    """Build the record for one report, deriving validity and standing."""
-    validity = derive_validity(report)
-    return VerificationRecord(
-        result_id=result_id,
-        spec_id=spec_id,
-        report=report,
-        validity=validity,
-        standing=outcome_standing(validity),
-    )
+    def __post_init__(self) -> None:
+        validity = derive_validity(self.report)
+        object.__setattr__(self, "validity", validity)
+        object.__setattr__(self, "standing", outcome_standing(validity))
 
 
 class VerificationStore(Protocol):
@@ -181,10 +186,18 @@ def _parse(payload: dict[str, object]) -> VerificationRecord:
                 detail=str(entry["detail"]),
             )
         )
-    return VerificationRecord(
+    record = VerificationRecord(
         result_id=str(payload["result_id"]),
         spec_id=str(payload["spec_id"]),
         report=VerificationReport(checks=tuple(checks)),
-        validity=ExperimentValidityStatus(str(payload["validity"])),
-        standing=OutcomeStanding(str(payload["standing"])),
     )
+    # The stored verdict must agree with what the report itself derives —
+    # a corrupted or hand-edited record fails loudly, never quietly trusted.
+    stored = (str(payload["validity"]), str(payload["standing"]))
+    derived = (record.validity.value, record.standing.value)
+    if stored != derived:
+        raise VerificationIntegrityError(
+            f"verification record for {record.result_id} stores verdict "
+            f"{stored} but its report derives {derived}; refusing to load"
+        )
+    return record

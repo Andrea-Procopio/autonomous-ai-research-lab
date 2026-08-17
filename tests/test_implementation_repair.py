@@ -417,6 +417,144 @@ def test_persistent_implementation_bug_stops_at_the_bound(
     assert len(report.state.results) == 3
 
 
+def test_fresh_failures_yield_fresh_triggers(tmp_path: Path) -> None:
+    """Each bounded attempt answers the *latest* run's evidence: a rerun
+    that still fails its controls produces a new trigger anchored to that
+    rerun, never a stale re-read of the original result."""
+    impl = ImplFix(metrics=BUGGY)  # first "fix" is still buggy
+    runtime, _, _ = _runtime(
+        tmp_path,
+        BUGGY,
+        impl_strategy=impl,
+        config=RuntimeConfig(max_debug_attempts=2),
+    )
+    spec, prediction = _spec_and_prediction()
+
+    report = runtime.step(_prepared_state(spec, prediction))
+    state = report.state
+
+    assert impl.proposals == 2
+    first_trigger, second_trigger = impl.triggers
+    original_id, first_retry_id, _ = (ref.result_id for ref in state.results)
+    assert first_trigger.result_id == original_id
+    # The second attempt's trigger indicts the first retry, not the
+    # original — the loop reasons from each fresh verification report.
+    assert second_trigger.result_id == first_retry_id
+    assert second_trigger.result_id != original_id
+    assert any(c.state is CheckState.FAIL for c in second_trigger.checks)
+
+
+@dataclass
+class CrashingThenFixedImplRepair(ImplFix):
+    """First reimplementation crashes outright — an execution failure."""
+
+    def propose(
+        self,
+        spec: ExperimentSpec,
+        invalid: ExperimentResult,
+        trigger: ImplementationRepairTrigger,
+        attempt_number: int,
+    ) -> RepairProposal | None:
+        self.triggers.append(trigger)
+        self.proposals += 1
+        return RepairProposal(
+            job=ExperimentJob(
+                spec_id=spec.id,
+                command=(sys.executable, "-c", "raise SystemExit(3)"),
+                seed=300 + self.proposals,
+                timeout_seconds=30.0,
+            ),
+            rationale="rewrite the counter (which crashes)",
+        )
+
+
+@dataclass
+class FixedExecutionRepair:
+    """Execution-repair strategy that reruns with the fixed metrics."""
+
+    metrics: dict[str, float]
+    proposals: int = 0
+
+    def propose(
+        self,
+        spec: ExperimentSpec,
+        failed: ExperimentResult,
+        diagnosis: object,
+        attempt_number: int,
+    ) -> RepairProposal | None:
+        self.proposals += 1
+        return RepairProposal(
+            job=_job(spec, self.metrics, seed=400 + self.proposals),
+            rationale="relaunch the rewritten counter",
+        )
+
+
+def test_crashed_reimplementation_transitions_to_execution_repair(
+    tmp_path: Path,
+) -> None:
+    """A reimplementation that crashes is an execution failure: it is
+    diagnosed by the classifier and repaired with execution-repair
+    semantics — inside the same bounded episode."""
+    impl = CrashingThenFixedImplRepair(metrics=None)
+    execution = FixedExecutionRepair(metrics=FIXED)
+    store = InMemoryEvidenceStore()
+    sink = ListSink()
+    executor = LocalExecutor(tmp_path / "runs")
+    runtime = ResearchRuntime(
+        config=RuntimeConfig(max_debug_attempts=3),
+        director=RuleBasedFrontierDirector(),
+        roles={
+            RoleName.RESEARCH_ENGINEER: StubEngineer(executor, BUGGY),
+        },
+        store=store,
+        metrics=sink,
+        debugger=ExperimentDebugger(
+            executor=executor,
+            strategy=execution,
+            implementation_strategy=impl,
+        ),
+        control_source=lambda spec: (OVERFIT_CONTROL,),
+    )
+    spec, prediction = _spec_and_prediction()
+    before = _prepared_state(spec, prediction)
+
+    report = runtime.step(before)
+    state = report.state
+
+    # Attempt 1: implementation strategy (crashes). Attempt 2: the crash is
+    # diagnosed and handed to the execution strategy, which recovers a
+    # completed run whose fresh verification passes its controls.
+    assert impl.proposals == 1
+    assert execution.proposals == 1
+    assert report.implementation_debug_attempts == 2
+    assert report.implementation_debug_resolved
+    assert any(
+        "reimplementation crashed — execution failure diagnosed" in n
+        for n in report.notes
+    )
+    assert any(
+        "implementation repair succeeded on attempt 2" in n
+        for n in report.notes
+    )
+    # Original + crashed rerun + recovered rerun, all preserved and billed.
+    assert len(state.results) == 3
+    executed = tuple(store.get_result(ref.result_id) for ref in state.results)
+    statuses = [r.succeeded for r in executed]
+    assert statuses == [True, False, True]
+    spent = (
+        before.budget.wall_clock_seconds - state.budget.wall_clock_seconds
+    )
+    assert spent == pytest.approx(
+        sum(r.cost.wall_clock_seconds for r in executed)
+    )
+    # The recovered run earned its own verification record.
+    final_verdict = runtime.verifications.get(executed[2].id)
+    assert final_verdict is not None
+    assert final_verdict.report.dimension_state(
+        ValidityDimension.IMPLEMENTATION
+    ) is CheckState.PASS
+
+
 def test_repair_is_off_without_debug_enabled(tmp_path: Path) -> None:
     impl = ImplFix(metrics=FIXED)
     runtime, _, _ = _runtime(

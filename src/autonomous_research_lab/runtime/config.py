@@ -79,6 +79,18 @@ class RuntimeConfig:
     """When off, experiment-specific positive controls are not evaluated
     even if a control source is wired in."""
 
+    verification_governance_enabled: bool = True
+    """Whether verification records govern downstream scientific use.
+
+    On (the default), the promotion gate **fails closed**: trusted use of
+    evidence (SUPPORTS/CONTRADICTS links, conclusive assessments) requires
+    a VERIFIED record for the underlying result, and a *missing* record
+    blocks exactly like an adverse one — absence can mean a lost store, a
+    restart, or a mis-wired runtime just as easily as ablation, and none of
+    those may silently restore trust. Off means *explicit* ablation: the
+    legacy, ungoverned lab, chosen deliberately and visible in the config —
+    never inferred from missing data."""
+
     def __post_init__(self) -> None:
         if self.synthesis_every < 1:
             raise ValueError("synthesis_every must be at least 1")

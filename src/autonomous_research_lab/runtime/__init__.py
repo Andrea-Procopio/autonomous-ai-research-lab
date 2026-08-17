@@ -94,9 +94,9 @@ from .verification_store import (
     FileVerificationStore,
     InMemoryVerificationStore,
     VerificationConflictError,
+    VerificationIntegrityError,
     VerificationRecord,
     VerificationStore,
-    verification_record,
 )
 
 __all__ = [
@@ -143,6 +143,7 @@ __all__ = [
     "ValidityDimension",
     "VerificationCheck",
     "VerificationConflictError",
+    "VerificationIntegrityError",
     "VerificationRecord",
     "VerificationReport",
     "VerificationStore",
@@ -158,7 +159,6 @@ __all__ = [
     "run_preflight",
     "sha256_of",
     "validate_result",
-    "verification_record",
     "verify_analysis_coverage",
     "verify_artifact_integrity",
 ]

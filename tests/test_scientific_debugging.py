@@ -595,7 +595,14 @@ def test_cherry_picking_analysis_is_rejected_without_blaming_execution(
     )
     critic = CherryPickingCritic()
     runtime, _, sink, _ = _runtime(
-        tmp_path, engineer, critic=critic, playbook=EmpiricalMLPlaybook()
+        tmp_path,
+        engineer,
+        critic=critic,
+        playbook=EmpiricalMLPlaybook(),
+        # This scenario isolates ANALYSIS validity, so the (unwired)
+        # verification governance is explicitly ablated — otherwise the
+        # promotion gate would fail closed before the analysis gate runs.
+        config=RuntimeConfig(verification_governance_enabled=False),
     )
 
     first = runtime.step(_prepared_state(spec, prediction))
@@ -606,6 +613,15 @@ def test_cherry_picking_analysis_is_rejected_without_blaming_execution(
     assert record.analysis_rejected
     assert any("analytical failure" in n for n in second.notes)
     assert any("redo the analysis" in n for n in second.notes)
+    # The invalid judgment never entered authoritative scientific state:
+    # the gate rejected it before commit, and the critic attempt failed.
+    assert second.state.assessments == ()
+    analyze_attempt = next(
+        a
+        for a in second.state.attempts
+        if a.action.action_type is ResearchActionType.ANALYZE
+    )
+    assert analyze_attempt.status is AttemptStatus.FAILED
     # Execution is not blamed: both runs stay valid committed results and
     # no engineering-failure machinery was touched.
     assert record.failure_category == ""
