@@ -164,6 +164,9 @@ ruff check .
 mypy
 ```
 
+Known flaky behavior is tracked in
+[docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md), not in anyone's memory.
+
 ## Troubleshooting
 
 ### `ModuleNotFoundError: autonomous_research_lab` from `.venv/bin/python` (hidden `.pth`)
