@@ -60,6 +60,7 @@ from .records import (
     ThemeEra,
     ThemeRelationship,
 )
+from .store import MappingConflictError, MappingIntegrityError, MappingStore
 
 __all__ = [
     "BANNED_COVERAGE_PHRASES",
@@ -74,8 +75,11 @@ __all__ = [
     "GroupEntry",
     "Limitation",
     "LimitationKind",
+    "MappingConflictError",
+    "MappingIntegrityError",
     "MappingRejection",
     "MappingRunRecord",
+    "MappingStore",
     "ProblemEntry",
     "ProblemInventoryRecord",
     "ProblemKind",
