@@ -716,6 +716,47 @@ behaviourally (transition tests reject orphaned references and unproduced
 claims). The payoff is provenance, auditability, safe search branching, and
 one place for conflict resolution when multiple agents propose concurrently.
 
+### The research engineer: the first model-backed role
+
+The model boundary is one narrow seam (`runtime/providers.py`):
+`ModelRequest -> ModelProvider.invoke() -> ModelResponse`, every field a
+primitive, no vendor type crossing, every failure a typed
+`ModelProviderError` that is an infrastructure event and can never become
+evidence. Structured output fails closed — the reply is validated locally
+against an `OutputSchema` whose unsupported constructs were rejected at
+construction — and closed-by-default is *normalized* at construction: an
+object schema that omits `additionalProperties` gains
+`additionalProperties: false` before anything fingerprints or transmits
+it, so one contract has one body, one request fingerprint, and one wire
+form. The one live adapter (`runtime/muse.py`, stdlib HTTP only) transmits
+the schema verbatim and is never trusted with validation.
+
+`ModelBackedEngineer` (`roles/engineer.py`) is the first role with a model
+behind it, deliberately the executor seat: its output is checkable by
+machines. Its authority is narrow by construction. The model proposes the
+*content* of exactly one allowlisted Python file plus a rationale — the
+schema has nowhere to put a metric, a result, or a claim — and trusted
+code does everything else: deterministic source validation before any
+execution (file-set allowlist, path safety, UTF-8/NUL/size bounds, the
+source must compile), job construction, preflight, submission. Metrics
+enter the lab only through the `metrics.json` the executed process wrote.
+A reply that fails validation is preserved as data (never materialized at
+model-chosen paths) and earns at most one bounded *generation repair* — a
+corrective call carrying the exact rejection reason, the smallest
+model-backed response to the failure class observed live (reply text
+corrupted before it ever became source). Provider usage flows through a
+`UsageLedger` into the step metrics, failed billed calls included.
+
+Every implementation event leaves a durable record
+(`runtime/implementation_store.py`), same invariant as every other store:
+an id never maps to different content. Source trees are content-addressed
+(identical bytes, one tree); records are per generation event (template id
+and hash, source manifest, request fingerprint, response occurrence id,
+provider and served model, rationale, and the exact binding). The job's
+config carries the implementation id, which the executor round-trips into
+`ExperimentResult.config` — so result → exact executed bytes is a two-hop
+lookup through existing infrastructure, and `core/` is untouched.
+
 ## Evidence model
 
 The `EvidenceStore` invariant is one sentence: **an id never maps to different
@@ -813,6 +854,26 @@ The contract with an experiment process:
 platform, command, config, seed, logs, runtime and exit code on every run,
 failures included.
 
+### Executing generated code
+
+`LocalExecutor`'s isolation is job-private *recovery* isolation, not a
+security sandbox — so live model-generated code never runs directly on the
+host. How validated source becomes a runnable job is a `JobBinding`
+(`execution/binding.py`): trusted code fixes the command, environment,
+timeout and required artifacts, and generated code chooses none of them.
+`HostPythonBinding` exists for trusted fixture source (tests);
+`ContainerBinding` is the live path — its job launches a small trusted
+shim (`execution/container_shim.py`) that drives `docker run` with the
+policy spelled out as data: network disabled, no pulls (the image is
+pinned by digest and must already be present), all capabilities dropped,
+read-only root filesystem, the source tree mounted read-only and only the
+run directory writable, memory/pids/cpu capped, and a shim-enforced
+deadline that kills the container by name. Inside, the process speaks the
+ordinary contract above — `ARL_*` in, `metrics.json` out — so the
+executor runs, records, hashes and collects unchanged. This is a
+job-binding seam, not a cloud executor: asynchronous remote backends
+remain a Horizon 2 concern behind the same `Executor` interface.
+
 ## Architectural invariants
 
 The list this pass was made against; each is enforced by at least one test.
@@ -837,14 +898,17 @@ Every important research decision is reconstructible later.
 core          scientific vocabulary                    (no internal dependencies)
 evidence      what happened, append-only + the chain validator
 execution     how to make things happen, anywhere; deterministic
-              failure classification
+              failure classification; job bindings and the
+              disposable-container launcher for generated code
 knowledge     what it all means, joined — factually; lesson scaffold
 persistence   snapshots of states, reconstructible offline
 runtime       frontier view, Tier-0 validation, experiment verification
               and preflight, tiers/escalation, metrics, playbooks,
-              evaluation seam                         (depends on core only)
+              evaluation seam, the model-provider seam + Muse adapter,
+              implementation provenance                (depends on core only)
 search        which move to take
-roles         who does the work, under what contract
+roles         who does the work, under what contract; the model-backed
+              engineer
 orchestration director, runtime loop, routing, triggers, bounded debug
               loop, role-backed review, atomic transitions, trajectory
 publication   reporting  (empty)
