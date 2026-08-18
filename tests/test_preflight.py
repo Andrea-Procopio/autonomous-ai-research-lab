@@ -137,19 +137,25 @@ def test_a_hidden_pth_file_fails_preflight_with_the_remediation(
 
     from autonomous_research_lab.runtime import preflight
 
-    pth = tmp_path / "_editable_fake.pth"
-    pth.write_text("/nowhere/src\n")
-    os.chflags(pth, stat_module.UF_HIDDEN)  # a tmp file, never the real venv
-    monkeypatch.setattr(
-        preflight, "_site_package_dirs", lambda: (str(tmp_path),)
-    )
+    # The skipif above handles runtime; the platform block is for the
+    # type checker, whose Linux stubs have no os.chflags — mypy prunes
+    # platform-guarded branches instead of checking or flagging them.
+    if sys.platform == "darwin":
+        pth = tmp_path / "_editable_fake.pth"
+        pth.write_text("/nowhere/src\n")
+        # A tmp file, never the real venv.
+        os.chflags(pth, stat_module.UF_HIDDEN)
+        monkeypatch.setattr(
+            preflight, "_site_package_dirs", lambda: (str(tmp_path),)
+        )
 
-    check = preflight.PthFilesVisible().check(_shim_job(seed=7), _spec())
+        check = preflight.PthFilesVisible().check(_shim_job(seed=7), _spec())
 
-    assert check.state is CheckState.FAIL
-    assert "_editable_fake.pth" in check.detail
-    assert "site.py" in check.detail
-    assert "chflags" in check.detail  # the remediation is named, not applied
+        assert check.state is CheckState.FAIL
+        assert "_editable_fake.pth" in check.detail
+        assert "site.py" in check.detail
+        # The remediation is named, not applied.
+        assert "chflags" in check.detail
 
 
 @pytest.mark.skipif(not _DARWIN, reason="UF_HIDDEN is a macOS/BSD file flag")
