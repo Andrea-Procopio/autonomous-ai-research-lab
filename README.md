@@ -19,11 +19,38 @@ quietly.
 
 ## Status
 
-Early and experimental. What exists is the data model and one working
-loop that runs experiments end to end. What does not exist yet: any
-connection to a language model, literature search, cloud execution, or
-paper writing. The current decision-making is a simple rule-based
-placeholder.
+Early and experimental, but past the placeholder stage. What exists and
+has been proven in live end-to-end runs:
+
+- **A model connection.** One provider-neutral seam with a single
+  concrete adapter (Muse Spark 1.2). Replies are validated locally as
+  structured JSON, token usage is billed exactly once per call, and a
+  failed call is a typed infrastructure event that can never be recorded
+  as a scientific result.
+- **A model-backed research engineer** that turns experiment specs into
+  code from trusted templates and runs it in a locked-down disposable
+  container (no network, pinned image, read-only root) — proven across a
+  four-task live campaign, 6/6 implementations verified.
+- **A model-backed research planner** that selects exactly one next
+  scientific action from the verified evidence on record, behind a
+  deterministic gate. The full loop — planning → engineering → contained
+  execution → verification → re-planning — has run live as a single
+  autonomous trajectory with complete provenance.
+- **Bounded literature retrieval** (OpenAlex, behind a provider-neutral
+  seam): normalized source records, conservative deduplication,
+  write-once search provenance, and a local corpus that replays
+  identical completed searches without touching the network.
+  Deliberately a leaf — nothing else in the package imports it yet.
+
+Nothing a model says becomes scientific state until deterministic code
+has gated, committed, executed, and verified it. Orchestration itself is
+deliberately not model-driven: a fixed-priority director dispatches
+work, and every model decision passes a deterministic gate before it
+takes effect.
+
+What does not exist yet: field mapping and idea generation over the
+literature corpus, cloud execution, statistician and skeptic roles with
+real inference, and paper writing.
 
 Expect interfaces to change.
 
@@ -35,10 +62,11 @@ Expect interfaces to change.
 | `evidence` | Storage for results and evidence. Records can be added but never changed. |
 | `execution` | Runs an experiment as a subprocess. Each job gets its own working directory, its own home directory, and a minimal environment. Output files are collected and hashed. |
 | `knowledge` | Read-only views over the data, such as the graph linking claims to evidence. |
+| `literature` | Bounded search against a real scholarly API (OpenAlex): normalized snapshot records, deterministic deduplication, write-once search provenance, and a replayable local corpus. Depends only on `core`; nothing else imports it yet. |
 | `persistence` | Saves every state to disk so a run can be inspected or replayed later. |
-| `runtime` | Bookkeeping around the loop: what work is open, validation of results, cost tracking, metrics. |
+| `runtime` | Bookkeeping around the loop: what work is open, validation and verification of results, cost tracking, metrics — plus the model-provider seam (with the Muse adapter) and the write-once stores for implementation and planning provenance. |
 | `search` | Policies for choosing the next action among candidates. |
-| `roles` | Interfaces for the agents (director, engineer, critic). A role receives a task and returns proposals. It never edits state directly. |
+| `roles` | Interfaces for the agents, including the model-backed engineer and planner. A role receives a task and returns proposals. It never edits state directly. |
 | `orchestration` | The main loop: pick an action, route it to a role, validate what comes back, commit it, log everything. |
 | `publication` | Paper writing. Empty for now. |
 
