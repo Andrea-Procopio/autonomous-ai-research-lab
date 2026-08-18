@@ -953,19 +953,30 @@ taxonomy callers already know from model calls (configuration,
 authentication, rate limit, timeout, transport, malformed reply).
 
 **One concrete adapter, no registry.** `OpenAlexProvider` speaks the
-documented `/works` search contract with stdlib HTTP only, under the same
-wall-clock-deadline watchdog as the Muse adapter: cursor paging, an
-explicit `sort=publication_date:desc` (relevance ranking is not stable
-across index updates), and at most one retry per page — only for 429/5xx,
-the two families the provider documents backoff for, honouring the
-server's `Retry-After` when it gives a usable one. OpenAlex was chosen
-because it is credential-free for basic use (CC0 metadata, a documented
-daily credit budget, observed live), carries stable `W…` ids plus
-provider-normalized DOIs, and reveals arXiv identity in observed shapes
-(the `10.48550/arxiv.…` DOI or an `arxiv.org` location URL). The optional
-`OPENALEX_API_KEY` is read from the environment at request time, sent only
-as an `Authorization` header, and can therefore never appear in a recorded
-request.
+documented `/works` contract with stdlib HTTP only, under the same
+wall-clock-deadline watchdog as the Muse adapter: cursor paging and at
+most one retry per page — only for 429/5xx, the two families the provider
+documents backoff for, honouring the server's `Retry-After` when it gives
+a usable one. Two wire choices are observation-driven (2026-08-18): query
+text matches in **titles and abstracts** (`title_and_abstract.search`),
+because the plain `search=` parameter proved to be fulltext matching —
+4.63M works matched "in-context learning" versus 6,339 on-topic ones —
+which was the root cause of Task 5B's poor screening yield; and ordering
+is always explicit (relevance ranking is not stable across index
+updates), mapped from the neutral `ResultOrdering`: `recency` →
+`publication_date:desc`, `influence` → `cited_by_count:desc` (verified
+descending with cursor paging). Citation counts order retrieval; they are
+discovery signals, never evidence about the papers. The recency default
+keeps the exact query fingerprints and record identities the pre-ordering
+corpus used — pinned by a golden test against a preserved live record —
+so existing Task 5A corpora keep replaying byte-for-byte. OpenAlex was
+chosen because it is credential-free for basic use (CC0 metadata, a
+documented daily credit budget, observed live), carries stable `W…` ids
+plus provider-normalized DOIs, and reveals arXiv identity in observed
+shapes (the `10.48550/arxiv.…` DOI or an `arxiv.org` location URL). The
+optional `OPENALEX_API_KEY` is read from the environment at request time,
+sent only as an `Authorization` header, and can therefore never appear in
+a recorded request.
 
 **Sources are snapshots.** A `LiteratureSource` records what the provider
 reported at one retrieval — title, authors, dates, venue and type,
@@ -1073,10 +1084,42 @@ consistency rule — one verdict and one extraction per source per run.
 The run record carries deterministic coverage accounting (per-query
 retrieved/new-unique counts, overlap, screening outcomes, access-level
 mix, truncations, and a modest saturation indicator) so the map stays
-honest about what was *not* covered. Task 5C — candidate research
-questions and idea generation reading these records — does not exist
-yet, and nothing here selects an idea, generates code, or executes
-anything.
+honest about what was *not* covered.
+
+**Retrieval strategy and bounded refinement (Task 5B.1).** Trusted code
+assigns each query family a deterministic retrieval strategy
+(`RETRIEVAL_STRATEGIES`): recency ordering for recent work, methods,
+evaluation, and the limitations discourse; citation-ranked influence
+ordering for foundational work, canonical benchmarks, and established
+baselines — recorded on every execution and replayable exactly. When the
+initial retrieval screens fewer relevant sources than the adequacy bar,
+trusted code triggers up to `refinement_rounds` bounded refinement
+passes: one gated model call proposing *new* queries (never a re-run,
+capped per round, same topic — narrowing the scientific question is not
+refinement), fed by per-family yield counts and sample exclusion
+reasons, retrieved and screened into the same budgets.
+
+**The adequacy verdict (Task 5B.1).** After the inventory, trusted code
+alone computes a durable `MapAdequacyAssessment`:
+`ADEQUATE_FOR_IDEA_GENERATION` or `INSUFFICIENT_COVERAGE`, with typed
+reasons. "Adequate" means adequate for bounded candidate generation
+under this brief — never exhaustive coverage, a systematic review, or
+novelty; absence from a bounded corpus is not novelty; and an honest
+insufficiency is a *successful* outcome. The rules consider relevant and
+grounded source counts, query-family coverage, recent/foundational
+balance, access-level limitations, uncertainty fraction, theme and
+problem support distribution, and cross-paper claims that must actually
+span multiple sources — no single metric (source count included) is
+sufficient. Every problem carries a computed support tier
+(single-source limitation / tentative / multi-source / contradicted), so
+one paper's reported limitation can stay in the inventory without ever
+being presented as field-wide consensus. Thresholds are explicit,
+configurable `AdequacyThresholds`, validated at construction and
+embedded verbatim in the assessment, which is content-addressed like
+every other record. Task 5C — candidate research questions and idea
+generation reading these records — does not exist yet; its one door is
+`require_adequate_for_idea_generation`, which reloads the durable
+verdict and refuses anything but an adequate map.
 
 ## Architectural invariants
 

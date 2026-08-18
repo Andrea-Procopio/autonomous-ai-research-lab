@@ -39,7 +39,14 @@ in the loop, producing results that survive scrutiny.
   corpus — model-proposed queries executed by trusted code, preserved
   relevance screening, verbatim-grounded extraction under deterministic
   gates, and a source-grounded `FieldMap` plus `ProblemInventory` with
-  honest bounded-coverage accounting. Still open (Task 5C): candidate
+  honest bounded-coverage accounting. Task 5B.1 (2026-08-18): the
+  corrective pass the 5B live evidence demanded — title/abstract query
+  matching (plain search proved to be fulltext matching, the root cause
+  of the 5/60 relevance yield), citation-ranked foundational retrieval
+  beside recency-ranked recent retrieval, bounded query refinement, and
+  a deterministic durable `MapAdequacyAssessment` with typed reasons and
+  per-problem support tiers, guarding Task 5C behind
+  `require_adequate_for_idea_generation`. Still open (Task 5C): candidate
   research questions and idea generation reading these records — and only
   then findings entering the state as structured objects carrying their
   sources, through the same governed commit as every other proposal.
