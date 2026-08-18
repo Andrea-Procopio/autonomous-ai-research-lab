@@ -18,6 +18,13 @@ nothing else in the package depends on this; both directions are pinned by
 the structural tests.
 """
 
+from .corpus import CorpusSearchResult, LiteratureCorpus
+from .dedup import (
+    DeduplicationReport,
+    DuplicateConflict,
+    DuplicateGroup,
+    deduplicate,
+)
 from .openalex import OpenAlexProvider
 from .retrieval import (
     PAGE_SIZE_CEILING,
@@ -38,24 +45,44 @@ from .retrieval import (
     normalize_arxiv_id,
     normalize_doi,
 )
+from .store import (
+    LiteratureConflictError,
+    LiteratureCorpusLimitError,
+    LiteratureIntegrityError,
+    LiteratureSearchRecord,
+    LiteratureStore,
+    search_record_from,
+)
 
 __all__ = [
     "PAGE_SIZE_CEILING",
     "RESULT_CEILING",
     "AccessLevel",
+    "CorpusSearchResult",
+    "DeduplicationReport",
+    "DuplicateConflict",
+    "DuplicateGroup",
     "LiteratureAuthenticationError",
     "LiteratureConfigurationError",
+    "LiteratureConflictError",
+    "LiteratureCorpus",
+    "LiteratureCorpusLimitError",
+    "LiteratureIntegrityError",
     "LiteratureProvider",
     "LiteratureProviderError",
     "LiteratureQuery",
     "LiteratureRateLimitError",
+    "LiteratureSearchRecord",
     "LiteratureSource",
+    "LiteratureStore",
     "LiteratureTimeoutError",
     "LiteratureTransportError",
     "MalformedLiteratureResponseError",
     "OpenAlexProvider",
     "RetrievedSearch",
     "ScriptedLiteratureProvider",
+    "deduplicate",
     "normalize_arxiv_id",
     "normalize_doi",
+    "search_record_from",
 ]
