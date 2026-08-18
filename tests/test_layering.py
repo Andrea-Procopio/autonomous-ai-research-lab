@@ -8,9 +8,14 @@
 3. the model-provider boundary stays provider-neutral and stays away from
    scientific state: no vendor SDK import, no ``ResearchState``.
 4. ``literature`` is a leaf boundary: it depends on ``core`` alone, cannot
-   reach scientific state, evidence, or execution, and nothing else in the
+   reach scientific state, evidence, or execution, and exactly one other
    package depends on it — literature describes what external papers
    report, and only a later, separate stage may decide what that means.
+5. ``mapping`` is that stage, and it is bounded the same way: it may read
+   ``core``, ``literature``, and the provider seam, and nothing else; it
+   cannot reach scientific state, evidence, or execution, and nothing in
+   the package depends on it. Literature analysis proposes maps, never
+   propositions.
 """
 
 from __future__ import annotations
@@ -23,6 +28,7 @@ SRC = Path(__file__).resolve().parents[1] / "src" / PACKAGE
 CORE = SRC / "core"
 ROLES = SRC / "roles"
 LITERATURE = SRC / "literature"
+MAPPING = SRC / "mapping"
 PROVIDERS = SRC / "runtime" / "providers.py"
 PROVIDER_MODULES = (PROVIDERS, SRC / "runtime" / "muse.py")
 
@@ -251,14 +257,14 @@ def test_literature_imports_no_vendor_sdk() -> None:
         assert roots & VENDOR_SDKS == set(), f"{path.name} imports a vendor SDK"
 
 
-def test_nothing_else_in_the_package_imports_literature() -> None:
-    """Literature is a leaf: until a later task deliberately wires field
-    mapping into the loop, no orchestration, role, runtime, or evidence
-    module may depend on it — retrieved papers must have no path into
-    scientific state."""
+def test_literature_has_exactly_one_consumer_in_the_package() -> None:
+    """Only ``mapping`` — the deliberate literature-analysis stage, itself
+    barred from scientific state — may import literature. No
+    orchestration, role, runtime, or evidence module may depend on it:
+    retrieved papers must have no path into scientific state."""
     violations: list[str] = []
     for path in sorted(SRC.rglob("*.py")):
-        if LITERATURE in path.parents:
+        if LITERATURE in path.parents or MAPPING in path.parents:
             continue
         tree = ast.parse(path.read_text(), filename=str(path))
         for node in ast.walk(tree):
@@ -273,6 +279,126 @@ def test_nothing_else_in_the_package_imports_literature() -> None:
                     f"{path.relative_to(SRC)}: imports {alias.name}"
                     for alias in node.names
                     if "literature" in alias.name
+                )
+    assert violations == []
+
+
+def test_mapping_depends_only_on_its_declared_inputs() -> None:
+    """The field mapper reads ``core``, ``literature``, and the provider
+    seam (``runtime.providers`` / ``runtime.metrics``) — nothing else in
+    the package. A mapping module that needed roles, orchestration,
+    evidence, or execution would be doing science, not analysis."""
+    allowed_absolute = (
+        f"{PACKAGE}.core",
+        f"{PACKAGE}.literature",
+        f"{PACKAGE}.mapping",
+        f"{PACKAGE}.runtime.providers",
+        f"{PACKAGE}.runtime.metrics",
+    )
+    allowed_relative = ("core", "literature", "runtime.providers", "runtime.metrics")
+    violations: list[str] = []
+    for path in sorted(MAPPING.rglob("*.py")):
+        tree = ast.parse(path.read_text(), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+                if node.level == 0 and module.startswith(f"{PACKAGE}."):
+                    if not module.startswith(allowed_absolute):
+                        violations.append(f"{path.name}: imports {module}")
+                elif node.level == 2 and not module.startswith(
+                    allowed_relative
+                ):
+                    violations.append(
+                        f"{path.name}: relative import of {module}"
+                    )
+                elif node.level > 2:
+                    violations.append(
+                        f"{path.name}: relative import above package"
+                    )
+            elif isinstance(node, ast.Import):
+                violations.extend(
+                    f"{path.name}: imports {alias.name}"
+                    for alias in node.names
+                    if alias.name.startswith(f"{PACKAGE}.")
+                    and not alias.name.startswith(allowed_absolute)
+                )
+    assert violations == []
+
+
+def test_mapping_cannot_touch_scientific_state() -> None:
+    """Literature analysis creates no scientific-state propositions: no
+    module in ``mapping`` may import the state, proposal, transition,
+    evidence, or execution machinery, reference ``ResearchState``,
+    ``Evidence``, or ``ExperimentResult`` by name, or call a state
+    mutator. A field map is a description of the literature, never a
+    fact of this lab's."""
+    forbidden_names = {"ResearchState", "Evidence", "ExperimentResult"}
+    violations: list[str] = []
+    for path in sorted(MAPPING.rglob("*.py")):
+        tree = ast.parse(path.read_text(), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+                if any(
+                    fragment in module
+                    for fragment in (
+                        ".state",
+                        "proposals",
+                        "transitions",
+                        "evidence",
+                        "execution",
+                    )
+                ):
+                    violations.append(f"{path.name}: imports {module}")
+            elif (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr in STATE_MUTATORS
+            ):
+                violations.append(
+                    f"{path.name}:{node.lineno}: calls .{node.func.attr}(...)"
+                )
+            elif isinstance(node, ast.Name) and node.id in forbidden_names:
+                violations.append(
+                    f"{path.name}:{node.lineno}: references {node.id}"
+                )
+    assert violations == []
+
+
+def test_mapping_imports_no_vendor_sdk() -> None:
+    """The mapper is provider-neutral: it speaks to the generic seam, and
+    no Muse-specific (or any vendor-specific) logic may appear here."""
+    for path in sorted(MAPPING.rglob("*.py")):
+        roots = {module.split(".")[0] for module in _imported_modules(path)}
+        assert roots & VENDOR_SDKS == set(), f"{path.name} imports a vendor SDK"
+        modules = set(_imported_modules(path))
+        assert not any("muse" in module for module in modules), (
+            f"{path.name} imports the Muse adapter; the mapper knows only "
+            f"the generic provider seam"
+        )
+
+
+def test_nothing_in_the_package_imports_mapping() -> None:
+    """Mapping is itself a leaf: its maps and inventories reach the rest
+    of the lab only when a later task (5C) deliberately builds that path
+    behind its own gates."""
+    violations: list[str] = []
+    for path in sorted(SRC.rglob("*.py")):
+        if MAPPING in path.parents:
+            continue
+        tree = ast.parse(path.read_text(), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+                if "mapping" in module.split("."):
+                    violations.append(
+                        f"{path.relative_to(SRC)}: imports {module}"
+                    )
+            elif isinstance(node, ast.Import):
+                violations.extend(
+                    f"{path.relative_to(SRC)}: imports {alias.name}"
+                    for alias in node.names
+                    if "mapping" in alias.name.split(".")
                 )
     assert violations == []
 
