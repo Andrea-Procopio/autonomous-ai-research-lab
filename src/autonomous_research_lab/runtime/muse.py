@@ -5,7 +5,8 @@ ModelProvider`. Standard library HTTP only — the package keeps its
 zero-dependency promise, and every vendor-shaped object (URLs, wire
 payloads, ``http.client`` types) stays inside this module.
 
-The whole exchange runs under one wall-clock deadline. A per-socket-
+The whole exchange after DNS resolution runs under one wall-clock
+deadline. A per-socket-
 operation timeout restarts at every blocking primitive — TCP connect, each
 TLS-handshake read, each header read, each body read — so it bounds no sum:
 a server that dribbles bytes can hold a call open for an unbounded multiple
@@ -84,6 +85,7 @@ from .providers import (
     ModelProviderError,
     ModelRequest,
     ModelResponse,
+    ProviderAuthenticationError,
     ProviderConfigurationError,
     ProviderRateLimitError,
     ProviderTimeoutError,
@@ -139,7 +141,9 @@ class MuseSparkProvider(ModelProvider):
     def _post(
         self, payload: bytes, api_key: str, timeout: float
     ) -> tuple[bytes, Mapping[str, str]]:
-        """One HTTP exchange under one wall-clock deadline.
+        """One HTTP exchange under one wall-clock deadline, entered
+        after DNS resolution (``getaddrinfo`` precedes the socket and is
+        not interruptible from userspace).
 
         ``http.client`` types enter and never leave. The deadline is
         computed before the connection is opened, so connect, TLS
@@ -520,14 +524,25 @@ def _error_for_status(
 ) -> ModelProviderError:
     """The documented error envelope, mapped onto the typed hierarchy.
 
-    429 becomes the rate-limit error with the server's own ``Retry-After``;
-    everything else the provider refused or failed — authentication,
-    billing, invalid request, server errors, the server-side 504 — is a
-    transport-level failure carrying the status and the provider's error
-    code, because no usable reply was produced and the caller's own
-    deadline was not the cause.
+    A 401 — or any status whose envelope declares the documented
+    ``authentication_error`` type — becomes the authentication error,
+    keeping the status, the provider's own code and the provider request
+    id; the error envelope carries no usage, so its accounting stays
+    absent (unknown spend, not zero). 429 becomes the rate-limit error
+    with the server's own ``Retry-After``; everything else the provider
+    refused or failed — billing, invalid request, server errors, the
+    server-side 504 — is a transport-level failure carrying the status
+    and the provider's error code, because no usable reply was produced
+    and the caller's own deadline was not the cause.
     """
-    message, code = _error_fields(raw, status)
+    message, code, kind = _error_fields(raw, status)
+    if status == 401 or kind == "authentication_error":
+        return ProviderAuthenticationError(
+            message,
+            status_code=status,
+            provider_error=code,
+            request_id=headers.get("x-request-id"),
+        )
     if status == 429:
         return ProviderRateLimitError(
             message, retry_after_seconds=_retry_after(headers)
@@ -537,26 +552,27 @@ def _error_for_status(
     )
 
 
-def _error_fields(raw: bytes, status: int) -> tuple[str, str | None]:
-    """``(message, code)`` from the ``{"error": {...}}`` envelope, with a
-    plain fallback for bodies that are not the documented shape."""
+def _error_fields(raw: bytes, status: int) -> tuple[str, str | None, str | None]:
+    """``(message, code, type)`` from the ``{"error": {...}}`` envelope,
+    with a plain fallback for bodies that are not the documented shape."""
     fallback = f"the Muse endpoint returned HTTP {status}"
     try:
         payload = json.loads(raw)
     except (json.JSONDecodeError, UnicodeDecodeError):
-        return fallback, None
+        return fallback, None, None
     if not isinstance(payload, Mapping):
-        return fallback, None
+        return fallback, None, None
     error = payload.get("error")
     if not isinstance(error, Mapping):
-        return fallback, None
+        return fallback, None, None
     message = error.get("message")
+    kind = error.get("type")
     # The first usable identifier wins: a non-string "code" (some gateways
     # send numbers) must not short-circuit away a perfectly good "type".
     code = next(
         (
             value
-            for value in (error.get("code"), error.get("type"))
+            for value in (error.get("code"), kind)
             if isinstance(value, str) and value
         ),
         None,
@@ -564,6 +580,7 @@ def _error_fields(raw: bytes, status: int) -> tuple[str, str | None]:
     return (
         f"{fallback}: {message}" if isinstance(message, str) else fallback,
         code,
+        kind if isinstance(kind, str) and kind else None,
     )
 
 

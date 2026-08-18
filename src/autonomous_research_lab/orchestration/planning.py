@@ -10,15 +10,21 @@ orchestration loop. Its policy is a fixed priority, no model calls:
 2. a **pending experiment** becomes ``RUN_EXPERIMENT`` (this is how an
    accepted new-experiment or ablation decision reaches the engineer);
 3. an open **replicate** decision whose target still has a replication gap
-   becomes ``REPLICATE``;
+   becomes ``REPLICATE``, and a dispatched one whose gap still stands
+   behind a standing failed replication is retried;
 4. otherwise the planner itself is invoked: ``PLAN_NEXT_ACTION``.
 
 The planner proposes; this seat decides what is put in front of the
 governed commit next. Each decision is marked *dispatched* — durably,
-write-once — when its follow-up action is emitted, so a decision is acted
-on exactly once even across restarts. A decision whose follow-up is no
-longer actionable (its chain never committed, or its gap closed) is marked
-dispatched as stale rather than silently forgotten.
+write-once — when its follow-up action is first emitted, and every
+emission serving a decision spends from that decision's durable
+dispatch-attempt budget (``max_dispatch_attempts``): a transient failure
+earns a bounded retry on the loop's own economics, never a fresh planner
+consultation, and an exhausted budget halts the run through the existing
+stop path. The counts live in the store as write-once files, so a resumed
+run continues the spend instead of resetting it. A decision whose
+follow-up is no longer actionable (its chain never committed, or its gap
+closed) is marked dispatched as stale rather than silently forgotten.
 
 Budget exhaustion needs no rule here: the runtime's own budget gate halts
 the program when the selected action's cost is unaffordable, which is the
@@ -35,7 +41,11 @@ from ..core.decision import ActionCandidate
 from ..core.experiment import ExperimentSpec
 from ..runtime.escalation import CompactValuation, Level, ReasoningTier
 from ..runtime.frontier import ResearchFrontier
-from ..runtime.planning_store import PlanningAction, PlanningStore
+from ..runtime.planning_store import (
+    PlanningAction,
+    PlanningRecord,
+    PlanningStore,
+)
 from ..runtime.playbook import PlaybookAdvice
 from .director import Deliberation, RuleBasedFrontierDirector, ValuedCandidate
 from .synthesis import SynthesisReview
@@ -54,6 +64,15 @@ class PlanningDirector:
 
     plans: PlanningStore
     plan_cost: ResourceCost = DEFAULT_PLAN_COST
+    max_dispatch_attempts: int = 2
+    """How many times the follow-up action of one planning decision may be
+    emitted in total: the first dispatch plus bounded retries of transient
+    failures (a truncated generation, a failed container launch). Counted
+    durably in the store, so a resume continues the spend; exhaustion
+    halts the run through the existing stop path rather than repeating
+    billed work that keeps failing (ten identical re-dispatches were
+    observed live before this bound existed)."""
+
     _fallback: RuleBasedFrontierDirector = field(
         default_factory=RuleBasedFrontierDirector
     )
@@ -114,16 +133,27 @@ class PlanningDirector:
         if frontier.pending_experiments:
             spec = frontier.pending_experiments[0]
             note = ""
-            for record in open_decisions:
-                if record.spec_id == spec.id and record.action in {
-                    PlanningAction.NEW_EXPERIMENT,
-                    PlanningAction.ABLATION,
-                }:
+            decision = next(
+                (
+                    record
+                    for record in self.plans.records()
+                    if record.spec_id == spec.id
+                    and record.action
+                    in {PlanningAction.NEW_EXPERIMENT, PlanningAction.ABLATION}
+                ),
+                None,
+            )
+            if decision is not None:
+                exhausted = self._exhausted(decision)
+                if exhausted is not None:
+                    return exhausted
+                first = not self.plans.is_dispatched(decision.id)
+                self.plans.record_dispatch_attempt(decision.id)
+                if first:
                     self.plans.mark_dispatched(
-                        record.id, f"run_experiment emitted for {spec.id}"
+                        decision.id, f"run_experiment emitted for {spec.id}"
                     )
-                    note = f" (planner decision {record.id})"
-                    break
+                    note = f" (planner decision {decision.id})"
             return self._candidate(
                 ResearchActionType.RUN_EXPERIMENT,
                 rationale=f"experiment {spec.id} is designed but has no "
@@ -142,6 +172,7 @@ class PlanningDirector:
                         "stale: the target no longer has a replication gap",
                     )
                     continue
+                self.plans.record_dispatch_attempt(record.id)
                 self.plans.mark_dispatched(
                     record.id, f"replicate emitted for {target.id}"
                 )
@@ -154,6 +185,41 @@ class PlanningDirector:
                     targets=(target.id,),
                     cost=_run_cost(target),
                 )
+
+        # A dispatched replicate decision whose gap still stands behind a
+        # standing failed replication is retried on the loop's own
+        # economics — never as a new planner consultation — spending from
+        # the decision's durable dispatch budget.
+        failed_replications = {
+            attempt.action.targets[0]
+            for attempt in frontier.failed_attempts
+            if attempt.action.action_type is ResearchActionType.REPLICATE
+            and attempt.action.targets
+        }
+        for record in self.plans.records():
+            if record.action is not PlanningAction.REPLICATE:
+                continue
+            if not self.plans.is_dispatched(record.id):
+                continue
+            target = gaps.get(record.spec_id)
+            if target is None or target.id not in failed_replications:
+                continue
+            exhausted = self._exhausted(record)
+            if exhausted is not None:
+                return exhausted
+            attempt_number = self.plans.record_dispatch_attempt(record.id)
+            return self._candidate(
+                ResearchActionType.REPLICATE,
+                rationale=(
+                    f"planner decision {record.id}: replicate {target.id} "
+                    f"at seed {record.replication_seed!r} — dispatch "
+                    f"attempt {attempt_number} of "
+                    f"{self.max_dispatch_attempts} after a failed "
+                    f"replication"
+                ),
+                targets=(target.id,),
+                cost=_run_cost(target),
+            )
 
         for record in open_decisions:
             if record.action in {
@@ -174,6 +240,27 @@ class PlanningDirector:
             ),
             targets=(),
             cost=self.plan_cost,
+        )
+
+    def _exhausted(self, record: PlanningRecord) -> ValuedCandidate | None:
+        """The deterministic halt when a decision's dispatch budget is
+        spent, or ``None`` while attempts remain. The halt goes through
+        the existing stop path, so no state is mutated: the durable
+        attempt count and the decision records are the whole story."""
+        attempts = self.plans.dispatch_attempts(record.id)
+        if attempts < self.max_dispatch_attempts:
+            return None
+        return self._candidate(
+            ResearchActionType.STOP_INVESTIGATION,
+            rationale=(
+                f"dispatch budget exhausted: planning decision {record.id} "
+                f"was dispatched {attempts} time(s) of "
+                f"{self.max_dispatch_attempts} allowed without a "
+                f"surviving result — repeating the same billed work "
+                f"cannot improve it"
+            ),
+            targets=(),
+            cost=NO_COST,
         )
 
     def _candidate(

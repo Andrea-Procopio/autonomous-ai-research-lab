@@ -127,3 +127,28 @@ def test_rejected_attempts_are_durable_with_every_rule(tmp_path: Path) -> None:
     }
     assert rejected["repair"] == 0
     assert rejected["request_fingerprint"] == "mreq_1"
+
+
+def test_dispatch_attempt_counts_persist_across_a_resume(tmp_path: Path) -> None:
+    store = PlanningStore(tmp_path)
+    record = store.record(_record())
+    assert store.dispatch_attempts(record.id) == 0
+
+    assert store.record_dispatch_attempt(record.id) == 1
+    assert store.record_dispatch_attempt(record.id) == 2
+
+    # A new process over the same directory continues the count: the
+    # budget cannot be reset by restarting.
+    resumed = PlanningStore(tmp_path)
+    assert resumed.dispatch_attempts(record.id) == 2
+    assert resumed.record_dispatch_attempt(record.id) == 3
+    assert store.dispatch_attempts(record.id) == 3
+
+
+def test_a_dispatch_attempt_for_an_unknown_decision_is_refused(
+    tmp_path: Path,
+) -> None:
+    store = PlanningStore(tmp_path)
+    assert store.dispatch_attempts("plan_missing") == 0
+    with pytest.raises(PlanningConflictError, match="unknown planning"):
+        store.record_dispatch_attempt("plan_missing")

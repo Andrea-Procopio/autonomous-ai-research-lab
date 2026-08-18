@@ -301,6 +301,17 @@ DEFAULT_PREFLIGHT_CHECKS: tuple[PreflightCheck, ...] = (
     PthFilesVisible(),
 )
 
+TERMINAL_ENVIRONMENT_CHECKS: frozenset[str] = frozenset(
+    {"preflight:pth_files_visible"}
+)
+"""Preflight failures that indict the host environment rather than the job
+under check: re-dispatching identical work re-diagnoses the same host, so
+the runtime treats them as terminal for the current run (observed live as
+ten billed generations preflight-rejected in a row, task4 partial-2).
+Deliberately not every check — a failure the generating role could fix on
+its next attempt (an unresolvable command, a missing config path) stays
+retryable."""
+
 
 def run_preflight(
     job: JobLike,

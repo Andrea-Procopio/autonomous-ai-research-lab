@@ -106,7 +106,11 @@ from ..runtime.metrics import (
     UsageSource,
 )
 from ..runtime.playbook import Playbook, PlaybookAdvice
-from ..runtime.preflight import PreflightError
+from ..runtime.preflight import TERMINAL_ENVIRONMENT_CHECKS, PreflightError
+from ..runtime.providers import (
+    ProviderAuthenticationError,
+    ProviderConfigurationError,
+)
 from ..runtime.validation import (
     ValidationCheck,
     ValidationReport,
@@ -428,8 +432,10 @@ class ResearchRuntime:
         except Exception as exc:  # a role failing is an outcome, not a crash
             role_error = exc
 
+        terminal_halt: str | None = None
         if role_error is not None:
             failures = 1
+            terminal_halt = _terminal_failure_reason(role_error)
             if isinstance(role_error, PreflightError):
                 stats.preflight_failed = True
                 stats.failure_category = "preflight"
@@ -661,7 +667,7 @@ class ResearchRuntime:
             critic_invoked=critic_invoked, failures=failures,
             executed_results=executed_results, synthesis=synthesis,
             notes=tuple(step_notes), stats=stats,
-            halt_reason=None,
+            halt_reason=terminal_halt,
         )
 
     # -- deterministic aftermath --------------------------------------------
@@ -1875,6 +1881,45 @@ def _failed_bundle(
             status=AttemptStatus.FAILED, error=error, actual_cost=cost
         ),
     )
+
+
+def _terminal_failure_reason(error: Exception) -> str | None:
+    """A reason to halt the run after this failure's durable record, or
+    ``None`` when a later dispatch could plausibly end differently.
+
+    A rejected credential fails identically on every retry until a human
+    rotates the key (observed live as ten consecutive billed 401s), and a
+    local configuration mistake repeats until a human fixes it — so both
+    end the run after exactly one provider call and one durable failed
+    attempt, with no repair call and no scientific-state mutation. A
+    preflight failure is terminal only when a check that indicts the host
+    environment failed; a defect in the job under check is the generating
+    role's to fix on a later attempt and stays retryable.
+    """
+    if isinstance(error, ProviderAuthenticationError):
+        return (
+            f"terminal provider failure: {error} — the credential is "
+            f"rejected, and no retry within this run can change that"
+        )
+    if isinstance(error, ProviderConfigurationError):
+        return (
+            f"terminal configuration failure: {error} — a human must fix "
+            f"the provider configuration before any retry can differ"
+        )
+    if isinstance(error, PreflightError):
+        stable = sorted(
+            check.name
+            for check in error.report.failures
+            if check.name in TERMINAL_ENVIRONMENT_CHECKS
+        )
+        if stable:
+            return (
+                f"terminal environment failure: {', '.join(stable)} — the "
+                f"host environment, not the job under check, is broken; "
+                f"re-dispatching identical work would re-diagnose the "
+                f"same host"
+            )
+    return None
 
 
 def _outcome_of(state: ResearchState, attempt_id: str) -> ActionOutcome:

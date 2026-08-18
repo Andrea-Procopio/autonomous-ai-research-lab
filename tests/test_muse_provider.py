@@ -42,6 +42,7 @@ from autonomous_research_lab.runtime.providers import (
     ModelProviderError,
     ModelRequest,
     OutputSchema,
+    ProviderAuthenticationError,
     ProviderConfigurationError,
     ProviderRateLimitError,
     ProviderTimeoutError,
@@ -351,13 +352,34 @@ def test_missing_usage_reads_as_zero_not_invented() -> None:
 # -- error translation --------------------------------------------------------
 
 
-def test_the_observed_auth_envelope_maps_to_a_transport_error() -> None:
-    error = _error_for_status(401, {}, _AUTH_ERROR)
+def test_the_observed_auth_envelope_maps_to_the_authentication_error() -> None:
+    error = _error_for_status(
+        401, {"x-request-id": "req-observed-401"}, _AUTH_ERROR
+    )
 
-    assert isinstance(error, ProviderTransportError)
+    assert isinstance(error, ProviderAuthenticationError)
     assert error.status_code == 401
     assert error.provider_error == "invalid_api_key"
+    assert error.request_id == "req-observed-401"
     assert "Unauthorized" in str(error)
+    # The error envelope carries no usage: spend stays unknown, not zero.
+    assert error.accounting is None
+
+
+def test_an_authentication_type_is_terminal_even_off_status_401() -> None:
+    # DOCUMENTATION-DERIVED: the error table allows the documented
+    # authentication_error type on other refusal statuses; the type, not
+    # only the status, names the rejected credential.
+    envelope = (
+        b'{"error":{"code":"invalid_api_key","message":"Unauthorized",'
+        b'"param":null,"type":"authentication_error"}}'
+    )
+    error = _error_for_status(403, {}, envelope)
+
+    assert isinstance(error, ProviderAuthenticationError)
+    assert error.status_code == 403
+    assert error.provider_error == "invalid_api_key"
+    assert error.request_id is None
 
 
 def test_a_rate_limit_carries_the_servers_retry_after() -> None:
@@ -587,10 +609,12 @@ def test_an_http_error_maps_through_the_observed_envelope(
     )
     _stub_connection(monkeypatch, reply)
 
-    with pytest.raises(ProviderTransportError) as caught:
+    with pytest.raises(ProviderAuthenticationError) as caught:
         MuseSparkProvider().invoke(_request())
     assert caught.value.status_code == 401
     assert caught.value.provider_error == "invalid_api_key"
+    # The refusal carried no usage: unknown spend, never invented zeros.
+    assert caught.value.accounting is None
 
 
 def test_a_non_json_success_body_is_an_invalid_response(

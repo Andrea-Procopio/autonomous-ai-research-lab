@@ -5,7 +5,15 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from autonomous_research_lab.core.actions import ResearchActionType
+from autonomous_research_lab.core.actions import (
+    ResearchAction,
+    ResearchActionType,
+)
+from autonomous_research_lab.core.attempt import (
+    ActionAttempt,
+    ActionOutcome,
+    AttemptStatus,
+)
 from autonomous_research_lab.core.budget import ResearchBudget, ResourceCost
 from autonomous_research_lab.core.experiment import ExperimentSpec
 from autonomous_research_lab.orchestration.planning import (
@@ -193,3 +201,112 @@ def test_with_nothing_open_the_planner_itself_is_selected(
         ResearchActionType.PLAN_NEXT_ACTION
     )
     assert selected.action.targets == ()
+
+
+def _failed_replication() -> ActionAttempt:
+    """A standing failed replicate attempt targeting SPEC — the frontier's
+    own signal that the last dispatch produced nothing."""
+    return ActionAttempt(
+        action=ResearchAction(
+            action_type=ResearchActionType.REPLICATE,
+            rationale="replicate the spec",
+            targets=(SPEC.id,),
+        ),
+        status=AttemptStatus.FAILED,
+        outcome=ActionOutcome(
+            status=AttemptStatus.FAILED,
+            error="the generation was truncated (finish_reason 'length')",
+        ),
+    )
+
+
+def test_one_transient_failure_earns_one_retry_not_a_new_plan(
+    tmp_path: Path,
+) -> None:
+    director, plans = _director(tmp_path)
+    decision = plans.record(
+        _record(action=PlanningAction.REPLICATE, replication_seed=11)
+    )
+
+    first = director.deliberate(_frontier(replication_gaps=(SPEC,)))
+    assert first.selected is not None
+    assert first.selected.action.action_type is ResearchActionType.REPLICATE
+    assert plans.dispatch_attempts(decision.id) == 1
+
+    # The dispatch failed: the gap still stands behind a failed attempt.
+    # The retry is re-emitted on the loop's own economics — no planner
+    # consultation, no second billed decision.
+    failed = _frontier(
+        replication_gaps=(SPEC,), failed_attempts=(_failed_replication(),)
+    )
+    retry = director.deliberate(failed)
+    selected = retry.selected
+    assert selected is not None
+    assert selected.action.action_type is ResearchActionType.REPLICATE
+    assert selected.action.targets == (SPEC.id,)
+    assert "dispatch attempt 2 of 2" in selected.action.rationale
+    assert plans.dispatch_attempts(decision.id) == 2
+
+
+def test_dispatch_budget_exhaustion_halts_instead_of_rebilling(
+    tmp_path: Path,
+) -> None:
+    director, plans = _director(tmp_path)
+    decision = plans.record(
+        _record(action=PlanningAction.REPLICATE, replication_seed=11)
+    )
+    failed = _frontier(
+        replication_gaps=(SPEC,), failed_attempts=(_failed_replication(),)
+    )
+
+    director.deliberate(_frontier(replication_gaps=(SPEC,)))  # attempt 1
+    director.deliberate(failed)  # attempt 2, the bounded retry
+
+    third = director.deliberate(failed)
+    selected = third.selected
+    assert selected is not None
+    assert selected.action.action_type is (
+        ResearchActionType.STOP_INVESTIGATION
+    )
+    assert "dispatch budget exhausted" in selected.action.rationale
+    assert decision.id in selected.action.rationale
+    # Halting spends nothing: the count stays where the failures left it.
+    assert plans.dispatch_attempts(decision.id) == 2
+
+
+def test_the_dispatch_budget_survives_a_resume(tmp_path: Path) -> None:
+    """A restarted process continues the durable count — it cannot win a
+    fresh allowance by resuming."""
+    director, plans = _director(tmp_path)
+    plans.record(_record(action=PlanningAction.REPLICATE, replication_seed=11))
+    director.deliberate(_frontier(replication_gaps=(SPEC,)))  # attempt 1
+
+    resumed = PlanningDirector(plans=PlanningStore(tmp_path / "planning"))
+    failed = _frontier(
+        replication_gaps=(SPEC,), failed_attempts=(_failed_replication(),)
+    )
+    retry = resumed.deliberate(failed)  # attempt 2
+    assert retry.selected is not None
+    assert retry.selected.action.action_type is ResearchActionType.REPLICATE
+
+    exhausted = resumed.deliberate(failed)
+    assert exhausted.selected is not None
+    assert exhausted.selected.action.action_type is (
+        ResearchActionType.STOP_INVESTIGATION
+    )
+
+
+def test_a_gap_without_a_failure_is_never_a_retry(tmp_path: Path) -> None:
+    """A dispatched replicate whose gap remains open but whose work never
+    failed (the seed landed; other seeds remain) is the planner's to
+    reconsider, not this seat's to re-dispatch."""
+    director, plans = _director(tmp_path)
+    plans.record(_record(action=PlanningAction.REPLICATE, replication_seed=11))
+    gap_only = _frontier(replication_gaps=(SPEC,))
+
+    director.deliberate(gap_only)  # dispatched
+    follow_up = director.deliberate(gap_only)
+    assert follow_up.selected is not None
+    assert follow_up.selected.action.action_type is (
+        ResearchActionType.PLAN_NEXT_ACTION
+    )

@@ -12,6 +12,11 @@ director marks a decision dispatched when it emits the follow-up action the
 decision calls for, so a decision is acted on exactly once across steps —
 and, because the marker is a file, across process restarts too.
 
+``attempts/`` counts dispatch attempts per decision, one write-once file
+each, so the director's bounded retry of a failed dispatch spends from a
+budget that survives a resume: a restarted run continues the count where
+the previous process left it instead of starting a fresh allowance.
+
 Nothing here may ever hold a credential: records store fingerprints, ids,
 token counts and text, not keys.
 """
@@ -30,6 +35,7 @@ from ..core.ids import content_id, occurrence_id
 _DECISIONS_DIRNAME: Final = "decisions"
 _REJECTED_DIRNAME: Final = "rejected"
 _DISPATCHED_DIRNAME: Final = "dispatched"
+_ATTEMPTS_DIRNAME: Final = "attempts"
 _RECORD_SUFFIX: Final = ".json"
 
 
@@ -223,6 +229,53 @@ class PlanningStore:
 
     def is_dispatched(self, decision_id: str) -> bool:
         return self._marker_path(decision_id).exists()
+
+    # -- dispatch attempts -------------------------------------------------------
+
+    def _attempts_dir(self, decision_id: str) -> Path:
+        return self._root / _ATTEMPTS_DIRNAME / decision_id
+
+    def dispatch_attempts(self, decision_id: str) -> int:
+        """How many dispatch attempts are durably recorded for the
+        decision. Zero for a decision never attempted — and for an unknown
+        one: absence of record is absence of attempts."""
+        directory = self._attempts_dir(decision_id)
+        if not directory.is_dir():
+            return 0
+        return sum(
+            1 for _ in directory.glob(f"attempt-*{_RECORD_SUFFIX}")
+        )
+
+    def record_dispatch_attempt(self, decision_id: str) -> int:
+        """Durably count one more dispatch attempt for the decision and
+        return the new total. One write-once file per attempt: a resumed
+        run continues the count where the previous process left it, so a
+        dispatch budget cannot be reset by restarting."""
+        if self.get(decision_id) is None:
+            raise PlanningConflictError(
+                f"cannot record a dispatch attempt for unknown planning "
+                f"decision {decision_id}"
+            )
+        number = self.dispatch_attempts(decision_id) + 1
+        path = (
+            self._attempts_dir(decision_id)
+            / f"attempt-{number:04d}{_RECORD_SUFFIX}"
+        )
+        if path.exists():
+            raise PlanningConflictError(
+                f"dispatch attempt {number} for planning decision "
+                f"{decision_id} is already recorded"
+            )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {"attempt": number, "decision_id": decision_id},
+                indent=2,
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+        return number
 
     def open_decisions(self) -> tuple[PlanningRecord, ...]:
         """Accepted decisions whose follow-up has not been emitted yet, in

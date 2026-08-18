@@ -31,10 +31,12 @@ kind. Nothing in this module can reach ``ResearchState`` — model output
 becomes a proposal only after a role builds one and the transition layer
 commits it.
 
-The six distinctions callers can act on: local misconfiguration
-(:class:`ProviderConfigurationError`), transport (:class:`ProviderTransportError`),
-timeout (:class:`ProviderTimeoutError`), rate limit (:class:`ProviderRateLimitError`),
-unusable reply (:class:`InvalidModelResponseError`), and schema violation
+The seven distinctions callers can act on: local misconfiguration
+(:class:`ProviderConfigurationError`), rejected credential
+(:class:`ProviderAuthenticationError`), transport
+(:class:`ProviderTransportError`), timeout (:class:`ProviderTimeoutError`),
+rate limit (:class:`ProviderRateLimitError`), unusable reply
+(:class:`InvalidModelResponseError`), and schema violation
 (:class:`StructuredOutputError`).
 
 A failure observed *after* the provider replied may still have been billed.
@@ -117,12 +119,42 @@ class ProviderConfigurationError(ModelProviderError):
     """
 
 
+class ProviderAuthenticationError(ModelProviderError):
+    """The provider rejected the caller's credential: the documented
+    HTTP 401 / ``authentication_error`` refusal.
+
+    Kept apart from both neighbours deliberately. It is not
+    :class:`ProviderConfigurationError`: the verdict came from the remote
+    side, after a real request that may have been billed. It is not
+    ordinary :class:`ProviderTransportError` territory either: every retry
+    with the same credential fails identically — observed live as ten
+    consecutive 401s on 2026-08-18 — so callers treat it as terminal for
+    the current run. Only a human rotating the key changes the outcome.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        provider_error: str | None = None,
+        request_id: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.provider_error = provider_error
+        """The provider's own error identifier, when it supplied one."""
+        self.request_id = request_id
+        """The provider-side request id of the refused call, when the reply
+        carried one — the handle for raising the refusal with the vendor."""
+
+
 class ProviderTransportError(ModelProviderError):
     """The provider could not be reached, or refused the request.
 
-    Covers connection failures, server errors, authentication and
-    permission refusals: cases where no usable reply was produced and the
-    fault is not specifically a timeout or a rate limit.
+    Covers connection failures, server errors and permission refusals:
+    cases where no usable reply was produced and the fault is not
+    specifically a timeout, a rate limit, or a rejected credential.
     """
 
     def __init__(
@@ -601,9 +633,10 @@ class ModelProvider(ABC):
         """Perform ``request`` and return a validated response.
 
         Raises :class:`ProviderConfigurationError`,
-        :class:`ProviderTimeoutError`, :class:`ProviderRateLimitError`,
-        :class:`ProviderTransportError`, :class:`InvalidModelResponseError`,
-        or :class:`StructuredOutputError`.
+        :class:`ProviderAuthenticationError`, :class:`ProviderTimeoutError`,
+        :class:`ProviderRateLimitError`, :class:`ProviderTransportError`,
+        :class:`InvalidModelResponseError`, or
+        :class:`StructuredOutputError`.
         """
 
 
