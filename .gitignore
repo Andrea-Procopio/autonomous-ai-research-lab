@@ -22,6 +22,7 @@ htmlcov/
 # provenance; a durable evidence store is a Horizon 1 item, not a git concern.
 runs/
 outputs/
+live_runs/
 
 # Secrets. Never commit credentials for model providers or compute backends.
 .env

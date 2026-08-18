@@ -35,6 +35,9 @@ addopts = "-q"
 line-length = 88
 target-version = "py311"
 src = ["src", "tests"]
+# Preserved live-run artifacts (model-generated source included) are
+# records, not project code; they are never linted.
+extend-exclude = ["live_runs"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF", "ARG", "PTH"]
