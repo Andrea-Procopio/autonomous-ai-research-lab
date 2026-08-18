@@ -32,13 +32,14 @@ their error codes, and the ``Retry-After`` header).
 
 Two behaviors worth naming:
 
-* **Closed schemas are made explicit on the wire.** The local validator
-  rejects undeclared properties unless a schema opts out, but the provider
-  treats an *absent* ``additionalProperties`` as open — observed directly:
-  the model added six undeclared fields until ``additionalProperties:
-  false`` was sent, and none after. The adapter therefore injects
-  ``additionalProperties: false`` into every object schema that does not
-  set it, so the model is constrained to exactly what validation accepts.
+* **Closed schemas arrive already explicit.** The provider treats an
+  *absent* ``additionalProperties`` as open — observed directly: the model
+  added six undeclared fields until ``additionalProperties: false`` was
+  sent, and none after. The local validator is closed by default, and
+  ``OutputSchema`` makes that explicit at construction, so no schema with
+  the keyword absent can reach this adapter. The wire schema is therefore
+  the request's schema verbatim (thawed for serialization, nothing
+  injected), and the request fingerprint covers exactly what is sent.
 * **The provider is never trusted with validation.** Whatever
   ``response_format`` promises, the returned text goes through
   ``OutputSchema.parse`` locally, and fails closed.
@@ -197,40 +198,13 @@ def build_payload(request: ModelRequest) -> dict[str, object]:
             "type": "json_schema",
             "json_schema": {
                 "name": request.schema.name,
-                "schema": _wire_schema(request.schema.json_schema),
+                # Verbatim, thawed for serialization only: closed-by-default
+                # was made explicit at OutputSchema construction, so what
+                # goes on the wire is exactly what the fingerprint covers.
+                "schema": _plain(request.schema.json_schema),
             },
         }
     return payload
-
-
-def _wire_schema(schema: Mapping[str, object]) -> dict[str, object]:
-    """Thaw the deep-frozen schema for serialization, making the local
-    closed-by-default semantics explicit wherever a schema does not opt
-    out — the provider reads an absent ``additionalProperties`` as open,
-    the validator reads it as closed, and the model should be constrained
-    to what validation will accept.
-
-    The walk is structural, not shape-guessing: recursion into child
-    *schemas* happens only where the subset grammar puts them (each value
-    under ``properties``, and ``items``). Everything else — ``enum``
-    literals above all — is data and is thawed without modification, so a
-    mapping-valued enum entry can never grow an injected key.
-    """
-    thawed: dict[str, object] = {}
-    for key, value in schema.items():
-        if key == "properties" and isinstance(value, Mapping):
-            thawed[key] = {
-                str(name): _wire_schema(child)
-                for name, child in value.items()
-                if isinstance(child, Mapping)
-            }
-        elif key == "items" and isinstance(value, Mapping):
-            thawed[key] = _wire_schema(value)
-        else:
-            thawed[key] = _plain(value)
-    if thawed.get("type") == "object" and "additionalProperties" not in thawed:
-        thawed["additionalProperties"] = False
-    return thawed
 
 
 def _plain(value: object) -> object:

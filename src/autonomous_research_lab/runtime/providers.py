@@ -232,6 +232,14 @@ class OutputSchema:
     ``additionalProperties``, ``items``, ``enum``, ``description``. It covers
     the flat, typed records roles actually need, and every one of its
     constructs is enforced locally by :meth:`validate`.
+
+    Closed is explicit, at construction. The validator treats an absent
+    ``additionalProperties`` as closed, so construction normalizes every
+    object schema to say so (:func:`_normalize_closed`): a schema that
+    omits the keyword and one that states ``False`` are the *same*
+    contract, and become the same ``json_schema`` — hence the same request
+    fingerprint, and the same bytes an adapter transmits. No adapter needs
+    to (or may) rewrite a schema on the wire.
     """
 
     name: str
@@ -240,7 +248,9 @@ class OutputSchema:
     def __post_init__(self) -> None:
         if not self.name.strip():
             raise SchemaDefinitionError("schema name must be non-empty")
-        object.__setattr__(self, "json_schema", _deep_freeze(self.json_schema))
+        object.__setattr__(
+            self, "json_schema", _deep_freeze(_normalize_closed(self.json_schema))
+        )
         _check_schema(self.json_schema, path="$")
         if self.json_schema.get("type") != "object":
             raise SchemaDefinitionError(
@@ -275,6 +285,38 @@ class OutputSchema:
                 detail=str(exc),
             ) from exc
         return self.validate(payload)
+
+
+def _normalize_closed(schema: Mapping[str, object]) -> dict[str, object]:
+    """Make the subset's closed-by-default semantics explicit: every object
+    schema that does not state ``additionalProperties`` gains
+    ``additionalProperties: False``. Runs before :func:`_check_schema`, so
+    the walk is structural rather than shape-guessing — recursion into
+    child *schemas* happens only where the subset grammar puts them (each
+    value under ``properties``, and ``items``); everything else — ``enum``
+    literals above all — is data, carried verbatim, and anything malformed
+    is carried verbatim too so the checker still sees and rejects it."""
+    normalized: dict[str, object] = {}
+    for key, value in schema.items():
+        if key == "properties" and isinstance(value, Mapping):
+            normalized[str(key)] = {
+                str(name): (
+                    _normalize_closed(child)
+                    if isinstance(child, Mapping)
+                    else child
+                )
+                for name, child in value.items()
+            }
+        elif key == "items" and isinstance(value, Mapping):
+            normalized[str(key)] = _normalize_closed(value)
+        else:
+            normalized[str(key)] = value
+    if (
+        normalized.get("type") == "object"
+        and "additionalProperties" not in normalized
+    ):
+        normalized["additionalProperties"] = False
+    return normalized
 
 
 def _check_schema(schema: Mapping[str, object], *, path: str) -> None:
@@ -472,10 +514,12 @@ class ModelRequest:
     def fingerprint(self) -> str:
         """A content id over everything that determines the reply — the full
         schema body and the timeout included, since two schemas may share a
-        name and a deadline shapes what can be generated. Ties a recorded
-        response back to the exact request that produced it without storing
-        the prompt twice. Caller ``metadata`` is provenance, not content, so
-        it deliberately does not participate."""
+        name and a deadline shapes what can be generated. The schema body is
+        normalized at construction, so what is fingerprinted here is exactly
+        the schema an adapter transmits. Ties a recorded response back to
+        the exact request that produced it without storing the prompt twice.
+        Caller ``metadata`` is provenance, not content, so it deliberately
+        does not participate."""
         return content_id(
             "mreq",
             self.model,

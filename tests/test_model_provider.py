@@ -577,6 +577,49 @@ def test_a_different_schema_body_changes_the_fingerprint() -> None:
     )
 
 
+def test_implicit_and_explicit_closedness_are_one_schema() -> None:
+    """Closed-by-default is normalized at construction: a schema that omits
+    ``additionalProperties`` and one that states ``False`` validate
+    identically, so they must BE identical — same body, same fingerprint,
+    and therefore the same bytes any adapter transmits. Without this, one
+    contract would carry two fingerprints depending on spelling."""
+    implicit = OutputSchema(
+        name="record_v1",
+        json_schema={
+            "type": "object",
+            "properties": {
+                "statement": {"type": "string"},
+                "detail": {
+                    "type": "object",
+                    "properties": {"note": {"type": "string"}},
+                },
+            },
+            "required": ["statement"],
+        },
+    )
+    explicit = OutputSchema(
+        name="record_v1",
+        json_schema={
+            "type": "object",
+            "properties": {
+                "statement": {"type": "string"},
+                "detail": {
+                    "type": "object",
+                    "properties": {"note": {"type": "string"}},
+                    "additionalProperties": False,
+                },
+            },
+            "required": ["statement"],
+            "additionalProperties": False,
+        },
+    )
+    assert implicit.json_schema == explicit.json_schema
+    assert (
+        _request(schema=implicit).fingerprint
+        == _request(schema=explicit).fingerprint
+    )
+
+
 def test_the_timeout_changes_the_fingerprint() -> None:
     """The deadline shapes what can be generated; it is invocation content."""
     assert (

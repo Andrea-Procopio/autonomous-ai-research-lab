@@ -227,7 +227,7 @@ def test_an_explicitly_open_schema_is_not_silently_closed() -> None:
     assert wire["additionalProperties"] is True
 
 
-def test_a_property_named_type_does_not_confuse_the_injection() -> None:
+def test_a_property_named_type_does_not_confuse_the_normalization() -> None:
     tricky = OutputSchema(
         name="tricky_v1",
         json_schema={
