@@ -21,7 +21,11 @@ protocol as-is.
 
 from __future__ import annotations
 
+import itertools
 import shutil
+import site
+import stat
+import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Protocol
@@ -182,11 +186,119 @@ class SeedPropagated:
         return _check("seed_propagated", CheckState.PASS)
 
 
+class PthFilesVisible:
+    """The launching interpreter's site-packages ``.pth`` files must not
+    carry the macOS hidden flag.
+
+    CPython >= 3.11.9 hardening makes ``site.py`` silently *skip* a hidden
+    ``.pth`` file, so an editable install's source path never reaches
+    ``sys.path`` and every child spawned as ``[sys.executable, "-m", ...]``
+    dies with ``ModuleNotFoundError`` — observed live on 2026-08-18, when
+    iCloud Drive Desktop sync re-flagged ``.venv`` between runs and the
+    seed-29 ridge replication failed at launch. The cause is external to
+    the repository, so this check only diagnoses: it never mutates flags,
+    files, or host configuration. Remediation belongs to the operator:
+    ``chflags -R nohidden <venv>`` clears the flags until the sync daemon
+    reapplies them; the durable fix is moving the repository out of an
+    iCloud-synced folder.
+    """
+
+    def check(
+        self,
+        job: JobLike,
+        spec: ExperimentSpec | None,  # noqa: ARG002 - job-only check
+    ) -> VerificationCheck:
+        if not _imports_the_lab_package(job.command):
+            return _check(
+                "pth_files_visible",
+                CheckState.NOT_APPLICABLE,
+                "job does not import the lab package through this "
+                "interpreter's site-packages",
+            )
+        hidden = _hidden_pth_files(_site_package_dirs())
+        if hidden is None:
+            return _check(
+                "pth_files_visible",
+                CheckState.NOT_APPLICABLE,
+                "no .pth stat result exposes a hidden flag (non-BSD "
+                "platform, or no .pth files under site-packages)",
+            )
+        if hidden:
+            return _check(
+                "pth_files_visible",
+                CheckState.FAIL,
+                f"hidden .pth file(s): {', '.join(hidden)}; CPython >= "
+                f"3.11.9 site.py skips hidden .pth files, so the paths "
+                f"they add never reach sys.path and child interpreters "
+                f"raise ModuleNotFoundError; the flag is set externally "
+                f"(iCloud Desktop sync observed) — remediate outside the "
+                f"lab: 'chflags -R nohidden <venv>' clears it until the "
+                f"sync daemon reapplies it; durably, move the repository "
+                f"out of an iCloud-synced folder. This check changes "
+                f"nothing itself.",
+            )
+        return _check("pth_files_visible", CheckState.PASS)
+
+
+def _imports_the_lab_package(command: tuple[str, ...]) -> bool:
+    """Whether the job runs a lab module through this interpreter — the
+    exact shape that depends on the editable install's ``.pth``. A trusted
+    experiment source run directly (``python experiment.py``) never
+    imports the package, so its jobs are exempt."""
+    if len(command) < 3:
+        return False
+    try:
+        same = Path(command[0]).resolve() == Path(sys.executable).resolve()
+    except OSError:
+        return False
+    if not same:
+        return False
+    for flag, module in itertools.pairwise(command[1:]):
+        if flag == "-m" and module.split(".")[0] == "autonomous_research_lab":
+            return True
+    return False
+
+
+def _site_package_dirs() -> tuple[str, ...]:
+    """The running interpreter's site-packages directories; empty when the
+    interpreter does not expose them (some embedded builds)."""
+    getter = getattr(site, "getsitepackages", None)
+    if not callable(getter):
+        return ()
+    try:
+        listed = getter()
+    except OSError:
+        return ()
+    return tuple(entry for entry in listed if Path(entry).is_dir())
+
+
+def _hidden_pth_files(directories: Sequence[str]) -> tuple[str, ...] | None:
+    """The hidden-flagged ``.pth`` files under ``directories``, or ``None``
+    when no stat result exposed ``st_flags`` at all — a platform that
+    cannot express the condition yields no verdict, not a manufactured
+    PASS."""
+    saw_flags = False
+    hidden: list[str] = []
+    for directory in directories:
+        for path in sorted(Path(directory).glob("*.pth")):
+            try:
+                flags = getattr(path.lstat(), "st_flags", None)
+            except OSError:
+                continue
+            if not isinstance(flags, int):
+                continue
+            saw_flags = True
+            if flags & stat.UF_HIDDEN:
+                hidden.append(str(path))
+    return tuple(hidden) if saw_flags else None
+
+
 DEFAULT_PREFLIGHT_CHECKS: tuple[PreflightCheck, ...] = (
     CommandResolvable(),
     WorkingDirectoryExists(),
     ConfigPathsExist(),
     SeedPropagated(),
+    PthFilesVisible(),
 )
 
 

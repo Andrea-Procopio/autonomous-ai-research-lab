@@ -136,6 +136,40 @@ ruff check .
 mypy
 ```
 
+## Troubleshooting
+
+### `ModuleNotFoundError: autonomous_research_lab` from `.venv/bin/python` (hidden `.pth`)
+
+**Symptom.** Every process using the venv fails to import the package —
+`pytest` cannot collect, and live jobs die at launch with
+`Error while finding module specification for
+'autonomous_research_lab.execution.container_shim'`. Preflight reports
+`preflight:pth_files_visible` FAIL.
+
+**Mechanism.** CPython ≥ 3.11.9 `site.py` silently skips `.pth` files whose
+BSD flags carry `UF_HIDDEN` (`python -v` prints `Skipping hidden .pth
+file: ...`). The editable install's
+`_editable_impl_autonomous_research_lab.pth` is what puts `src/` on
+`sys.path`, so when it is flagged the package vanishes from every venv
+interpreter — including executor children, which are spawned with a
+minimal environment that deliberately excludes `PYTHONPATH`.
+
+**Cause — external.** iCloud Drive "Desktop & Documents" sync re-flags
+dot-items under a synced repository (observed re-flagging `.venv`
+item-by-item after all repo processes had exited). No repository code sets
+file flags.
+
+**Remediation (operator action; the lab never runs this itself).**
+
+```bash
+chflags -R nohidden .venv
+.venv/bin/python -c "import autonomous_research_lab"   # verify
+```
+
+Expect recurrence while the repository stays inside a synced folder. The
+durable fix is moving the repository out of `~/Desktop` / `~/Documents`
+(or excluding it from iCloud sync).
+
 ## License
 
 MIT. See [LICENSE](LICENSE).

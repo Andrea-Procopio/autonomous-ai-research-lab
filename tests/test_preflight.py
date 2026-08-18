@@ -105,3 +105,96 @@ def test_require_preflight_raises_with_the_full_report() -> None:
 def test_require_preflight_returns_the_report_on_success() -> None:
     report = require_preflight(_job(seed=7), _spec())
     assert report.passed
+
+
+# -- the hidden-.pth diagnosis -------------------------------------------------
+
+_DARWIN = sys.platform == "darwin"
+
+
+def _shim_job(**kwargs: object) -> ExperimentJob:
+    """The exact command shape ContainerBinding produces: the lab's own
+    interpreter importing a lab module, which depends on the .pth."""
+    return ExperimentJob(
+        spec_id="exp_x",
+        command=(
+            sys.executable,
+            "-m",
+            "autonomous_research_lab.execution.container_shim",
+            "--image",
+            "img",
+        ),
+        **kwargs,  # type: ignore[arg-type]
+    )
+
+
+@pytest.mark.skipif(not _DARWIN, reason="UF_HIDDEN is a macOS/BSD file flag")
+def test_a_hidden_pth_file_fails_preflight_with_the_remediation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+    import stat as stat_module
+
+    from autonomous_research_lab.runtime import preflight
+
+    pth = tmp_path / "_editable_fake.pth"
+    pth.write_text("/nowhere/src\n")
+    os.chflags(pth, stat_module.UF_HIDDEN)  # a tmp file, never the real venv
+    monkeypatch.setattr(
+        preflight, "_site_package_dirs", lambda: (str(tmp_path),)
+    )
+
+    check = preflight.PthFilesVisible().check(_shim_job(seed=7), _spec())
+
+    assert check.state is CheckState.FAIL
+    assert "_editable_fake.pth" in check.detail
+    assert "site.py" in check.detail
+    assert "chflags" in check.detail  # the remediation is named, not applied
+
+
+@pytest.mark.skipif(not _DARWIN, reason="UF_HIDDEN is a macOS/BSD file flag")
+def test_visible_pth_files_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from autonomous_research_lab.runtime import preflight
+
+    (tmp_path / "_editable_fake.pth").write_text("/nowhere/src\n")
+    monkeypatch.setattr(
+        preflight, "_site_package_dirs", lambda: (str(tmp_path),)
+    )
+    check = preflight.PthFilesVisible().check(_shim_job(seed=7), _spec())
+    assert check.state is CheckState.PASS
+
+
+def test_platforms_without_file_flags_stay_not_applicable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When no stat result exposes st_flags the check yields no verdict —
+    inert, never a manufactured PASS."""
+    from autonomous_research_lab.runtime import preflight
+
+    monkeypatch.setattr(
+        preflight, "_hidden_pth_files", lambda directories: None
+    )
+    check = preflight.PthFilesVisible().check(_shim_job(seed=7), _spec())
+    assert check.state is CheckState.NOT_APPLICABLE
+
+
+def test_jobs_that_do_not_import_the_lab_are_not_applicable() -> None:
+    """HostPythonBinding jobs run a trusted source directly and never
+    import the package, so the .pth's health is not theirs."""
+    from autonomous_research_lab.runtime.preflight import PthFilesVisible
+
+    direct = _job(seed=7)  # (sys.executable, "-c", "pass")
+    check = PthFilesVisible().check(direct, _spec())
+    assert check.state is CheckState.NOT_APPLICABLE
+
+    foreign = ExperimentJob(
+        spec_id="exp_x",
+        command=("definitely-not-python", "-m", "autonomous_research_lab.x"),
+        seed=7,
+    )
+    assert (
+        PthFilesVisible().check(foreign, _spec()).state
+        is CheckState.NOT_APPLICABLE
+    )
