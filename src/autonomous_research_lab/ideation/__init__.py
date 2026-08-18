@@ -51,6 +51,11 @@ from .records import (
     problem_key,
     theme_key,
 )
+from .store import (
+    IdeationConflictError,
+    IdeationIntegrityError,
+    IdeationStore,
+)
 
 __all__ = [
     "CLAIM_KINDS",
@@ -64,8 +69,11 @@ __all__ = [
     "DataRequirement",
     "DataStatus",
     "DirectionRecord",
+    "IdeationConflictError",
     "IdeationDirective",
+    "IdeationIntegrityError",
     "IdeationRunRecord",
+    "IdeationStore",
     "MappingRejection",
     "NoveltyStatus",
     "PortfolioReport",
