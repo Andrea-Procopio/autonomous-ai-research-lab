@@ -151,6 +151,31 @@ def test_the_provider_seam_cannot_touch_scientific_state() -> None:
     assert violations == []
 
 
+def test_roles_never_construct_experiment_results() -> None:
+    """Results come from executors that ran processes. A role that could
+    construct an ``ExperimentResult`` could synthesise a fact from
+    reasoning, which is the one proposal payload roles must never build."""
+    violations: list[str] = []
+    for path in sorted(ROLES.rglob("*.py")):
+        tree = ast.parse(path.read_text(), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = (
+                func.id
+                if isinstance(func, ast.Name)
+                else func.attr
+                if isinstance(func, ast.Attribute)
+                else ""
+            )
+            if name == "ExperimentResult":
+                violations.append(
+                    f"{path.name}:{node.lineno}: constructs ExperimentResult"
+                )
+    assert violations == []
+
+
 def test_roles_do_not_import_the_transition_layer() -> None:
     """Roles do not commit their own proposals either — committing is the
     orchestrator's job, or the separation is theatre."""
