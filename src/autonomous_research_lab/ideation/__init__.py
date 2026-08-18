@@ -36,6 +36,17 @@ from .gates import (
     check_novelty_language,
     claim_text_of,
 )
+from .generator import (
+    CANDIDATES_INSTRUCTION,
+    CANDIDATES_SCHEMA,
+    DIRECTION_INSTRUCTION,
+    DIRECTION_SCHEMA,
+    IdeaGenerator,
+    IdeationBudgetError,
+    IdeationContractError,
+    IdeationRejectedError,
+    IdeationRunResult,
+)
 from .records import (
     CLAIM_KINDS,
     AddressedProblem,
@@ -58,7 +69,11 @@ from .store import (
 )
 
 __all__ = [
+    "CANDIDATES_INSTRUCTION",
+    "CANDIDATES_SCHEMA",
     "CLAIM_KINDS",
+    "DIRECTION_INSTRUCTION",
+    "DIRECTION_SCHEMA",
     "MAX_CANDIDATES_CEILING",
     "MAX_SNAPSHOT_CHARS",
     "MODEL_CALLS_CEILING",
@@ -69,10 +84,15 @@ __all__ = [
     "DataRequirement",
     "DataStatus",
     "DirectionRecord",
+    "IdeaGenerator",
+    "IdeationBudgetError",
     "IdeationConflictError",
+    "IdeationContractError",
     "IdeationDirective",
     "IdeationIntegrityError",
+    "IdeationRejectedError",
     "IdeationRunRecord",
+    "IdeationRunResult",
     "IdeationStore",
     "MappingRejection",
     "NoveltyStatus",

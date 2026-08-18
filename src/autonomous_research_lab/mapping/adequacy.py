@@ -526,8 +526,8 @@ def require_adequate_for_idea_generation(
     """The narrow Task 5C guard: load the durable assessment (tamper-
     checked by the store) and return it only when it says adequate.
     Anything else — unknown id, insufficient coverage — raises with the
-    typed reasons. Task 5C itself does not exist yet; this is the door
-    it will have to walk through."""
+    typed reasons. Task 5C's ``IdeaGenerator`` walks through this door
+    before its first model call."""
     assessment = store.get_adequacy(assessment_id)
     if assessment is None:
         raise InadequateFieldMapError(
