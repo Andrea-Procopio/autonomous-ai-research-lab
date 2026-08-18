@@ -13,9 +13,16 @@
    report, and only a later, separate stage may decide what that means.
 5. ``mapping`` is that stage, and it is bounded the same way: it may read
    ``core``, ``literature``, and the provider seam, and nothing else; it
-   cannot reach scientific state, evidence, or execution, and nothing in
-   the package depends on it. Literature analysis proposes maps, never
-   propositions.
+   cannot reach scientific state, evidence, or execution, and exactly one
+   other package depends on it — literature analysis proposes maps, and
+   only the deliberate idea-generation stage may decide what they
+   suggest.
+6. ``ideation`` is that stage, bounded the same way again: it may read
+   ``core``, ``mapping``, and the provider seam — never ``literature``
+   directly; sources reach candidates only as opaque ids on mapping
+   records — it cannot reach scientific state, evidence, or execution,
+   and nothing in the package depends on it. Candidate ideas are
+   conjectures carrying their sources, never propositions.
 """
 
 from __future__ import annotations
@@ -29,6 +36,7 @@ CORE = SRC / "core"
 ROLES = SRC / "roles"
 LITERATURE = SRC / "literature"
 MAPPING = SRC / "mapping"
+IDEATION = SRC / "ideation"
 PROVIDERS = SRC / "runtime" / "providers.py"
 PROVIDER_MODULES = (PROVIDERS, SRC / "runtime" / "muse.py")
 
@@ -378,13 +386,14 @@ def test_mapping_imports_no_vendor_sdk() -> None:
         )
 
 
-def test_nothing_in_the_package_imports_mapping() -> None:
-    """Mapping is itself a leaf: its maps and inventories reach the rest
-    of the lab only when a later task (5C) deliberately builds that path
-    behind its own gates."""
+def test_mapping_has_exactly_one_consumer_in_the_package() -> None:
+    """Only ``ideation`` — the deliberate idea-generation stage Task 5C
+    built, itself barred from scientific state — may import mapping. No
+    orchestration, role, runtime, or evidence module may depend on it:
+    a field map must have no path into scientific state."""
     violations: list[str] = []
     for path in sorted(SRC.rglob("*.py")):
-        if MAPPING in path.parents:
+        if MAPPING in path.parents or IDEATION in path.parents:
             continue
         tree = ast.parse(path.read_text(), filename=str(path))
         for node in ast.walk(tree):
@@ -399,6 +408,129 @@ def test_nothing_in_the_package_imports_mapping() -> None:
                     f"{path.relative_to(SRC)}: imports {alias.name}"
                     for alias in node.names
                     if "mapping" in alias.name.split(".")
+                )
+    assert violations == []
+
+
+def test_ideation_depends_only_on_its_declared_inputs() -> None:
+    """The idea generator reads ``core``, ``mapping``, and the provider
+    seam (``runtime.providers`` / ``runtime.metrics``) — nothing else in
+    the package, and pointedly not ``literature``: sources reach
+    candidates only as the opaque ids mapping records carry. An ideation
+    module that needed roles, orchestration, evidence, or execution
+    would be doing science, not conjecture."""
+    allowed_absolute = (
+        f"{PACKAGE}.core",
+        f"{PACKAGE}.mapping",
+        f"{PACKAGE}.ideation",
+        f"{PACKAGE}.runtime.providers",
+        f"{PACKAGE}.runtime.metrics",
+    )
+    allowed_relative = ("core", "mapping", "runtime.providers", "runtime.metrics")
+    violations: list[str] = []
+    for path in sorted(IDEATION.rglob("*.py")):
+        tree = ast.parse(path.read_text(), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+                if node.level == 0 and module.startswith(f"{PACKAGE}."):
+                    if not module.startswith(allowed_absolute):
+                        violations.append(f"{path.name}: imports {module}")
+                elif node.level == 2 and not module.startswith(
+                    allowed_relative
+                ):
+                    violations.append(
+                        f"{path.name}: relative import of {module}"
+                    )
+                elif node.level > 2:
+                    violations.append(
+                        f"{path.name}: relative import above package"
+                    )
+            elif isinstance(node, ast.Import):
+                violations.extend(
+                    f"{path.name}: imports {alias.name}"
+                    for alias in node.names
+                    if alias.name.startswith(f"{PACKAGE}.")
+                    and not alias.name.startswith(allowed_absolute)
+                )
+    assert violations == []
+
+
+def test_ideation_cannot_touch_scientific_state() -> None:
+    """A candidate idea is a conjecture, never a scientific-state
+    proposition: no module in ``ideation`` may import the state,
+    proposal, transition, evidence, or execution machinery, reference
+    ``ResearchState``, ``Evidence``, or ``ExperimentResult`` by name, or
+    call a state mutator. Admission through the governed commit belongs
+    to a later task."""
+    forbidden_names = {"ResearchState", "Evidence", "ExperimentResult"}
+    violations: list[str] = []
+    for path in sorted(IDEATION.rglob("*.py")):
+        tree = ast.parse(path.read_text(), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+                if any(
+                    fragment in module
+                    for fragment in (
+                        ".state",
+                        "proposals",
+                        "transitions",
+                        "evidence",
+                        "execution",
+                    )
+                ):
+                    violations.append(f"{path.name}: imports {module}")
+            elif (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr in STATE_MUTATORS
+            ):
+                violations.append(
+                    f"{path.name}:{node.lineno}: calls .{node.func.attr}(...)"
+                )
+            elif isinstance(node, ast.Name) and node.id in forbidden_names:
+                violations.append(
+                    f"{path.name}:{node.lineno}: references {node.id}"
+                )
+    assert violations == []
+
+
+def test_ideation_imports_no_vendor_sdk() -> None:
+    """The generator is provider-neutral: it speaks to the generic seam,
+    and no Muse-specific (or any vendor-specific) logic may appear
+    here."""
+    for path in sorted(IDEATION.rglob("*.py")):
+        roots = {module.split(".")[0] for module in _imported_modules(path)}
+        assert roots & VENDOR_SDKS == set(), f"{path.name} imports a vendor SDK"
+        modules = set(_imported_modules(path))
+        assert not any("muse" in module for module in modules), (
+            f"{path.name} imports the Muse adapter; the generator knows "
+            f"only the generic provider seam"
+        )
+
+
+def test_nothing_in_the_package_imports_ideation() -> None:
+    """Ideation is the new leaf: candidate ideas reach scientific state
+    only when a later task deliberately builds the proposal path through
+    the governed commit."""
+    violations: list[str] = []
+    for path in sorted(SRC.rglob("*.py")):
+        if IDEATION in path.parents:
+            continue
+        tree = ast.parse(path.read_text(), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+                if "ideation" in module.split("."):
+                    violations.append(
+                        f"{path.relative_to(SRC)}: imports {module}"
+                    )
+            elif isinstance(node, ast.Import):
+                violations.extend(
+                    f"{path.relative_to(SRC)}: imports {alias.name}"
+                    for alias in node.names
+                    if "ideation" in alias.name.split(".")
                 )
     assert violations == []
 
