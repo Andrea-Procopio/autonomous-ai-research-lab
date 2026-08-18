@@ -43,7 +43,13 @@ from typing import Final
 
 from ..core.ids import content_id
 from ..core.types import freeze_mapping
-from .retrieval import AccessLevel, LiteratureQuery, LiteratureSource, RetrievedSearch
+from .retrieval import (
+    AccessLevel,
+    LiteratureQuery,
+    LiteratureSource,
+    ResultOrdering,
+    RetrievedSearch,
+)
 
 _SEARCHES_DIRNAME: Final = "searches"
 _SOURCES_DIRNAME: Final = "sources"
@@ -101,6 +107,13 @@ class LiteratureSearchRecord:
     """The provider's own work ids, same order, so the record stays
     interpretable against the provider without loading every source."""
 
+    ordering: ResultOrdering = ResultOrdering.RECENCY
+    """How the provider was asked to order the slice. Recency is the
+    historical default; like the query fingerprint, it joins the record
+    id and the serialized payload only when it is not that default, so
+    every record written before orderings existed still re-derives its
+    own id on load."""
+
     id: str = field(default="")
 
     def __post_init__(self) -> None:
@@ -113,29 +126,27 @@ class LiteratureSearchRecord:
                 "provider_work_ids and source_ids must align one-to-one"
             )
         if not self.id:
-            object.__setattr__(
-                self,
-                "id",
-                content_id(
-                    "lits",
-                    self.provider,
-                    self.query_text,
-                    self.from_date,
-                    self.to_date,
-                    self.per_page,
-                    self.max_results,
-                    self.query_fingerprint,
-                    self.retrieved_at,
-                    self.request_params,
-                    self.total_count,
-                    self.pages_fetched,
-                    self.page_identifiers,
-                    self.rate_limit,
-                    self.truncated,
-                    self.source_ids,
-                    self.provider_work_ids,
-                ),
+            parts: tuple[object, ...] = (
+                self.provider,
+                self.query_text,
+                self.from_date,
+                self.to_date,
+                self.per_page,
+                self.max_results,
+                self.query_fingerprint,
+                self.retrieved_at,
+                self.request_params,
+                self.total_count,
+                self.pages_fetched,
+                self.page_identifiers,
+                self.rate_limit,
+                self.truncated,
+                self.source_ids,
+                self.provider_work_ids,
             )
+            if self.ordering is not ResultOrdering.RECENCY:
+                parts = (*parts, self.ordering)
+            object.__setattr__(self, "id", content_id("lits", *parts))
 
 
 def search_record_from(
@@ -161,6 +172,7 @@ def search_record_from(
         provider_work_ids=tuple(
             source.provider_id for source in retrieved.sources
         ),
+        ordering=query.ordering,
     )
 
 
@@ -455,7 +467,7 @@ def _source_from(payload: Mapping[str, object]) -> LiteratureSource:
 
 
 def _search_payload(record: LiteratureSearchRecord) -> dict[str, object]:
-    return {
+    payload: dict[str, object] = {
         "id": record.id,
         "provider": record.provider,
         "query_text": record.query_text,
@@ -474,6 +486,12 @@ def _search_payload(record: LiteratureSearchRecord) -> dict[str, object]:
         "source_ids": list(record.source_ids),
         "provider_work_ids": list(record.provider_work_ids),
     }
+    if record.ordering is not ResultOrdering.RECENCY:
+        # Mirrors the id rule: recency records keep the exact byte
+        # layout they had before orderings existed, so an identical
+        # re-record of a v1 file stays a no-op.
+        payload["ordering"] = record.ordering.value
+    return payload
 
 
 def _search_from(payload: Mapping[str, object]) -> LiteratureSearchRecord:
@@ -506,6 +524,9 @@ def _search_from(payload: Mapping[str, object]) -> LiteratureSearchRecord:
         truncated=bool(payload["truncated"]),
         source_ids=tuple(str(item) for item in source_ids),
         provider_work_ids=tuple(str(item) for item in provider_work_ids),
+        ordering=ResultOrdering(
+            str(payload.get("ordering", ResultOrdering.RECENCY.value))
+        ),
     )
 
 

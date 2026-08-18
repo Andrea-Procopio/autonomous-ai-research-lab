@@ -64,6 +64,21 @@ DEFAULT_TIMEOUT_SECONDS: Final = 30.0
 for the same reason every model call and every experiment job does."""
 
 
+class ResultOrdering(StrEnum):
+    """How a bounded search orders its slice — a *discovery* choice,
+    never a quality claim about the papers themselves.
+
+    ``RECENCY`` returns the newest matches first; ``INFLUENCE`` returns
+    the most-cited first, the defensible signal for surfacing
+    foundational work that a date sort buries. Citation count is
+    retrieval metadata: it decides which slice is seen, and nothing
+    downstream may treat it as evidence of correctness.
+    """
+
+    RECENCY = "recency"
+    INFLUENCE = "influence"
+
+
 # -- failures -----------------------------------------------------------------
 
 
@@ -238,6 +253,10 @@ class LiteratureQuery:
     """Per-page-request deadline, not a whole-search bound: the search's
     total time is bounded by this times the (budget-limited) page count."""
 
+    ordering: ResultOrdering = ResultOrdering.RECENCY
+    """Which slice of the matches to retrieve: newest first, or
+    most-cited first. Recency is the historical default."""
+
     def __post_init__(self) -> None:
         if not self.text.strip():
             raise ValueError("query text must be non-empty")
@@ -273,15 +292,25 @@ class LiteratureQuery:
         search's result set is decided server-side — two queries differing
         only in patience ask for the same results, and should replay from
         the same cached search.
+
+        ``ordering`` participates only when it is not the recency
+        default. This is the deliberate backward-compatibility seam:
+        every query expressible before orderings existed keeps exactly
+        the fingerprint it had (pinned by a golden test against a
+        preserved live record), so existing corpora keep replaying,
+        while an influence-ordered query — a genuinely different result
+        set — earns a distinct identity.
         """
-        return content_id(
-            "litq",
+        parts: tuple[object, ...] = (
             self.text,
             self.from_date,
             self.to_date,
             self.per_page,
             self.max_results,
         )
+        if self.ordering is not ResultOrdering.RECENCY:
+            parts = (*parts, self.ordering)
+        return content_id("litq", *parts)
 
 
 # -- the normalized source ----------------------------------------------------

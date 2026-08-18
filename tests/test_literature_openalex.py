@@ -23,7 +23,7 @@ import pytest
 
 from autonomous_research_lab.literature import openalex
 from autonomous_research_lab.literature.openalex import (
-    SORT,
+    SORTS,
     OpenAlexProvider,
     _normalize_work,
     _reconstruct_abstract,
@@ -359,19 +359,57 @@ def test_a_malformed_abstract_index_yields_no_abstract() -> None:
 def test_the_request_carries_dates_sort_and_bounds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """OBSERVED wire form (2026-08-18): the text matches in
+    title_and_abstract — plain ``search=`` is fulltext matching and
+    returned 4.6M works for a 6.3k-work phrase — with dates as sibling
+    filter clauses and an explicit sort."""
     seen = _stub_pages(
         monkeypatch, [_FakeReply(_page([_WORK_ARTICLE]), _PAGE_HEADERS)]
     )
     OpenAlexProvider().search(_query())
 
     params = _params_of(seen[0])
-    assert params["search"] == "machine learning"
+    assert "search" not in params
     assert params["filter"] == (
+        "title_and_abstract.search:machine learning,"
         "from_publication_date:2026-06-01,to_publication_date:2026-08-18"
     )
-    assert params["sort"] == SORT
+    assert params["sort"] == "publication_date:desc"
     assert params["per_page"] == "25"
     assert params["cursor"] == "*"
+
+
+def test_each_ordering_maps_to_its_documented_sort(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OBSERVED (2026-08-18): cited_by_count:desc works with search text
+    and cursor paging, returning descending counts."""
+    from autonomous_research_lab.literature.retrieval import ResultOrdering
+
+    for ordering, expected in SORTS.items():
+        seen = _stub_pages(
+            monkeypatch, [_FakeReply(_page([_WORK_ARTICLE]), _PAGE_HEADERS)]
+        )
+        OpenAlexProvider().search(_query(ordering=ordering))
+        assert _params_of(seen[0])["sort"] == expected
+    assert SORTS[ResultOrdering.INFLUENCE] == "cited_by_count:desc"
+
+
+def test_filter_syntax_characters_in_query_text_are_sanitized(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Commas separate filter clauses and colons separate keys from
+    values; either inside the text would corrupt the filter."""
+    seen = _stub_pages(
+        monkeypatch, [_FakeReply(_page([_WORK_ARTICLE]), _PAGE_HEADERS)]
+    )
+    OpenAlexProvider().search(
+        _query(text='TACTICL: compression, "in-context learning"')
+    )
+    params = _params_of(seen[0])
+    assert params["filter"].startswith(
+        'title_and_abstract.search:TACTICL compression "in-context learning",'
+    )
 
 
 def test_an_unbounded_date_side_is_omitted_not_defaulted(
@@ -381,7 +419,9 @@ def test_an_unbounded_date_side_is_omitted_not_defaulted(
         monkeypatch, [_FakeReply(_page([_WORK_ARTICLE]), _PAGE_HEADERS)]
     )
     OpenAlexProvider().search(_query(from_date="", to_date=""))
-    assert "filter" not in _params_of(seen[0])
+    assert _params_of(seen[0])["filter"] == (
+        "title_and_abstract.search:machine learning"
+    )
 
 
 def test_the_api_key_is_a_header_and_never_recorded(

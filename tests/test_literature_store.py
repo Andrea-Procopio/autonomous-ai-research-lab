@@ -20,6 +20,7 @@ from autonomous_research_lab.literature.retrieval import (
     AccessLevel,
     LiteratureQuery,
     LiteratureSource,
+    ResultOrdering,
     RetrievedSearch,
     ScriptedLiteratureProvider,
 )
@@ -250,6 +251,52 @@ def test_a_replay_index_for_the_wrong_query_fails_loudly(
 def test_an_unknown_query_is_a_miss_not_an_error(tmp_path: Path) -> None:
     store = LiteratureStore(tmp_path)
     assert store.completed_search("scripted", "litq_missing") is None
+
+
+def test_a_pre_ordering_search_record_still_loads_and_verifies(
+    tmp_path: Path,
+) -> None:
+    """Backward compatibility with Task 5A corpora: a v1 record — written
+    before result orderings existed, so with no 'ordering' key — must
+    reload, re-derive its own id, and re-record as a no-op. The fixture
+    is built by serializing today's default-ordering record and
+    stripping nothing: the conditional id/payload rule means the two
+    formats are byte-identical for recency records."""
+    store = LiteratureStore(tmp_path)
+    query = _query()
+    source = store.record_source(_source())
+    record = store.record_search(search_record_from(query, _retrieved(source)))
+
+    path = tmp_path / "searches" / f"{record.id}.json"
+    payload = json.loads(path.read_text())
+    assert "ordering" not in payload  # the v1 byte layout, verbatim
+    assert record.ordering is ResultOrdering.RECENCY
+
+    fresh = LiteratureStore(tmp_path)
+    reloaded = fresh.completed_search("scripted", query.fingerprint)
+    assert reloaded == record
+    assert fresh.record_search(record) == record  # identical no-op
+
+
+def test_an_influence_ordered_search_round_trips_distinctly(
+    tmp_path: Path,
+) -> None:
+    store = LiteratureStore(tmp_path)
+    source = store.record_source(_source())
+    query = _query(ordering=ResultOrdering.INFLUENCE)
+    record = store.record_search(search_record_from(query, _retrieved(source)))
+
+    path = tmp_path / "searches" / f"{record.id}.json"
+    assert json.loads(path.read_text())["ordering"] == "influence"
+
+    fresh = LiteratureStore(tmp_path)
+    reloaded = fresh.completed_search("scripted", query.fingerprint)
+    assert reloaded == record
+    assert reloaded is not None
+    assert reloaded.ordering is ResultOrdering.INFLUENCE
+    # The two orderings are distinct replay seats for the same text.
+    recency = _query()
+    assert store.completed_search("scripted", recency.fingerprint) is None
 
 
 # -- the corpus ---------------------------------------------------------------

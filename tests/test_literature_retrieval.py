@@ -19,6 +19,7 @@ from autonomous_research_lab.literature.retrieval import (
     LiteratureQuery,
     LiteratureSource,
     MalformedLiteratureResponseError,
+    ResultOrdering,
     RetrievedSearch,
     ScriptedLiteratureProvider,
     normalize_arxiv_id,
@@ -110,6 +111,31 @@ def test_patience_does_not_change_the_fingerprint() -> None:
     quick = LiteratureQuery(text="topic", timeout_seconds=5.0)
     patient = LiteratureQuery(text="topic", timeout_seconds=120.0)
     assert quick.fingerprint == patient.fingerprint
+
+
+def test_the_default_ordering_keeps_the_pre_ordering_fingerprint() -> None:
+    """The backward-compatibility guarantee, pinned against a preserved
+    live record: this exact query completed the Task 5A live proof on
+    2026-08-18 under fingerprint litq_41cbe09e73f99e67, before result
+    orderings existed. A recency query must still derive that
+    fingerprint, or every existing corpus stops replaying."""
+    query = LiteratureQuery(
+        text="in-context learning",
+        from_date="2026-05-01",
+        to_date="2026-08-18",
+        per_page=25,
+        max_results=75,
+    )
+    assert query.ordering is ResultOrdering.RECENCY
+    assert query.fingerprint == "litq_41cbe09e73f99e67"
+
+
+def test_an_influence_ordering_is_a_distinct_result_set() -> None:
+    recency = LiteratureQuery(text="topic")
+    influence = LiteratureQuery(
+        text="topic", ordering=ResultOrdering.INFLUENCE
+    )
+    assert recency.fingerprint != influence.fingerprint
 
 
 # -- canonical identifiers ----------------------------------------------------

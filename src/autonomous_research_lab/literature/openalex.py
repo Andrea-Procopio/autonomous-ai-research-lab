@@ -33,14 +33,30 @@ for both the per-second limit and the exhausted daily credit budget, and
 the retry guidance (exponential backoff for 429/5xx; ``Retry-After`` is in
 the exposed-header list).
 
-* ``GET {base_url}/works?search=…&filter=from_publication_date:…,
-  to_publication_date:…&per_page=…&sort=publication_date:desc&cursor=…``
+* ``GET {base_url}/works?filter=title_and_abstract.search:…,
+  from_publication_date:…,to_publication_date:…&per_page=…&sort=…&
+  cursor=…``
+* Matching: the query text goes into the ``title_and_abstract.search``
+  filter, not the ``search=`` parameter. Observed 2026-08-18: ``search=``
+  maps to **fulltext** matching (``meta.x_query`` shows
+  ``fulltext.search``), which matched 4,630,468 works for
+  "in-context learning" — R, PRISMA and U-Net among the top hits —
+  while ``title_and_abstract.search`` with the same phrase matched
+  6,339, on-topic. Both cost the same 10 search credits per page.
+  Quoted phrases and plain terms combine with AND semantics (observed:
+  ``"in-context learning" robustness`` → 599 in-window matches, all
+  on-topic). Commas and colons are filter syntax, so the adapter
+  replaces them with spaces in the transmitted text; the durable
+  ``request_params`` record what was actually sent.
 * Paging: start at ``cursor=*``; continue with ``meta.next_cursor``; done
   when the cursor is null or ``results`` is empty. ``per_page`` is 1-100.
-* Ordering: ``publication_date:desc`` is requested explicitly because the
-  default relevance ranking is not stable across index updates. The
-  provider's tiebreak among same-date works is unspecified, which is one
-  reason the durable search record preserves the returned order verbatim.
+* Ordering: explicit always, because the default relevance ranking is
+  not stable across index updates. ``recency`` maps to
+  ``publication_date:desc``; ``influence`` maps to
+  ``cited_by_count:desc`` (observed 2026-08-18: descending counts with
+  ``search`` and cursor paging — 353397, 101384, 91369). The provider's
+  tiebreak within equal sort keys is unspecified, which is one reason
+  the durable search record preserves the returned order verbatim.
 * Abstracts arrive as ``abstract_inverted_index`` (word -> positions) and
   are reconstructed locally; a work without one yields access level
   ``metadata``.
@@ -94,6 +110,7 @@ from .retrieval import (
     LiteratureTimeoutError,
     LiteratureTransportError,
     MalformedLiteratureResponseError,
+    ResultOrdering,
     RetrievedSearch,
     normalize_arxiv_id,
     normalize_doi,
@@ -103,9 +120,12 @@ DEFAULT_BASE_URL: Final = "https://api.openalex.org"
 KEY_ENV_VAR: Final = "OPENALEX_API_KEY"
 PROVIDER_NAME: Final = "openalex"
 
-SORT: Final = "publication_date:desc"
-"""The explicit deterministic-where-supported ordering; relevance ranking
-is not stable across index updates and is never requested."""
+SORTS: Final[Mapping[ResultOrdering, str]] = {
+    ResultOrdering.RECENCY: "publication_date:desc",
+    ResultOrdering.INFLUENCE: "cited_by_count:desc",
+}
+"""The explicit orderings; relevance ranking is not stable across index
+updates and is never requested."""
 
 MAX_RETRY_WAIT_SECONDS: Final = 30.0
 _BACKOFF_SECONDS: Final = 2.0
@@ -300,17 +320,23 @@ class OpenAlexProvider(LiteratureProvider):
 def _base_params(query: LiteratureQuery) -> dict[str, str]:
     """The credential-free provider parameters that define the search —
     exactly what a durable search record may store."""
-    params = {"search": query.text}
-    filters = []
+    filters = [f"title_and_abstract.search:{_filter_text(query.text)}"]
     if query.from_date:
         filters.append(f"from_publication_date:{query.from_date}")
     if query.to_date:
         filters.append(f"to_publication_date:{query.to_date}")
-    if filters:
-        params["filter"] = ",".join(filters)
-    params["sort"] = SORT
-    params["per_page"] = str(query.per_page)
-    return params
+    return {
+        "filter": ",".join(filters),
+        "sort": SORTS[query.ordering],
+        "per_page": str(query.per_page),
+    }
+
+
+def _filter_text(text: str) -> str:
+    """The query text as a filter value: commas separate filter clauses
+    and colons separate keys from values, so both become spaces. Quoted
+    phrases and boolean-free terms pass through verbatim."""
+    return " ".join(text.replace(",", " ").replace(":", " ").split())
 
 
 def _retry_wait(exc: LiteratureProviderError) -> float | None:
