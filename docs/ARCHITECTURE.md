@@ -929,6 +929,83 @@ executor runs, records, hashes and collects unchanged. This is a
 job-binding seam, not a cloud executor: asynchronous remote backends
 remain a Horizon 2 concern behind the same `Executor` interface.
 
+## Literature retrieval
+
+The `literature` package (Task 5A) is the reproducible foundation for later
+field mapping and idea generation, and deliberately nothing more:
+
+```
+bounded literature query
+  -> real scholarly API (one adapter: OpenAlex)
+  -> normalized source records
+  -> deterministic deduplication
+  -> durable search provenance
+  -> reproducible local corpus
+```
+
+The seam mirrors the model-provider boundary. `LiteratureQuery` (text, an
+inclusive publication-date range, page size, result budget) is validated
+against hard ceilings at construction, so an unbounded crawl cannot be
+expressed; `LiteratureProvider.search()` returns a `RetrievedSearch` whose
+every field is a primitive, a tuple, or a mapping of strings — no vendor
+payload crosses the boundary — and failures are the same seven-way typed
+taxonomy callers already know from model calls (configuration,
+authentication, rate limit, timeout, transport, malformed reply).
+
+**One concrete adapter, no registry.** `OpenAlexProvider` speaks the
+documented `/works` search contract with stdlib HTTP only, under the same
+wall-clock-deadline watchdog as the Muse adapter: cursor paging, an
+explicit `sort=publication_date:desc` (relevance ranking is not stable
+across index updates), and at most one retry per page — only for 429/5xx,
+the two families the provider documents backoff for, honouring the
+server's `Retry-After` when it gives a usable one. OpenAlex was chosen
+because it is credential-free for basic use (CC0 metadata, a documented
+daily credit budget, observed live), carries stable `W…` ids plus
+provider-normalized DOIs, and reveals arXiv identity in observed shapes
+(the `10.48550/arxiv.…` DOI or an `arxiv.org` location URL). The optional
+`OPENALEX_API_KEY` is read from the environment at request time, sent only
+as an `Authorization` header, and can therefore never appear in a recorded
+request.
+
+**Sources are snapshots.** A `LiteratureSource` records what the provider
+reported at one retrieval — title, authors, dates, venue and type,
+abstract when available (reconstructed locally from the inverted index),
+canonical identifiers, URLs, citation and reference metadata — under a
+content id over *every* field. Metadata the provider did not report stays
+`None`, never a fabricated default, and the `access_level` field
+(`metadata` / `abstract` / `full_text`) preserves how much was actually
+retrieved so no later stage can claim to have read text that was never
+fetched. Task 5A never sets `full_text`.
+
+**Deduplication reports; it never rewrites.** `deduplicate()` groups
+snapshots into works by exact canonical identifiers first (normalized DOI,
+normalized arXiv id, the provider's own work id), uses a title fallback
+only for snapshots with *no* canonical identifier at all — and only when
+title, year, and first author's family name all agree — and refuses any
+merge that would put contradictory identifiers in one group, surfacing it
+as a conflict instead. Deterministic in input order, no similarity scores.
+
+**Provenance is write-once and bounded.** `LiteratureStore` keeps sources,
+search records (exact query, provider parameters actually sent, retrieval
+timestamp, pagination and rate-limit observations, returned source ids in
+provider order), and a replay index from query fingerprint to completed
+search — all write-once, ids recomputed on load exactly like the planning
+and implementation stores, and capped in count so a corpus cannot grow
+without bound. `LiteratureCorpus` is the cache-or-live rule: an identical
+completed search replays from disk with zero network calls; only a miss
+reaches the provider, and the retrieval is recorded sources-first so a
+search can never cite a snapshot the store does not hold.
+
+**The scientific boundary.** Literature records describe what external
+papers report; they are not `ExperimentResult`, not `Evidence`, and not
+proof that a claim is true. The package depends on `core` alone and
+nothing else in the package imports it — both directions pinned by
+structural tests — so retrieved papers have *no path* into scientific
+state until a later task deliberately builds one, behind its own gates.
+What remains for Task 5B: reading the corpus into field maps and candidate
+questions, with model calls, under the same governed-commit discipline as
+every other proposal.
+
 ## Architectural invariants
 
 The list this pass was made against; each is enforced by at least one test.
@@ -944,6 +1021,7 @@ Execution events have occurrence identity.
 Semantic scientific specifications have content identity.
 Independent replications remain independent evidence.
 Successful outcomes cannot claim nonexistent outputs.
+Retrieved literature describes; it never becomes evidence.
 Every important research decision is reconstructible later.
 ```
 
@@ -961,6 +1039,10 @@ runtime       frontier view, Tier-0 validation, experiment verification
               and preflight, tiers/escalation, metrics, playbooks,
               evaluation seam, the model-provider seam + Muse adapter,
               implementation provenance                (depends on core only)
+literature    what external papers report: bounded retrieval, one
+              scholarly adapter, snapshot records, deduplication,
+              write-once search provenance   (depends on core only; a
+              leaf — nothing else imports it)
 search        which move to take
 roles         who does the work, under what contract; the model-backed
               engineer

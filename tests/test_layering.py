@@ -7,6 +7,10 @@
    bypass validation, provenance, and any future conflict resolution.
 3. the model-provider boundary stays provider-neutral and stays away from
    scientific state: no vendor SDK import, no ``ResearchState``.
+4. ``literature`` is a leaf boundary: it depends on ``core`` alone, cannot
+   reach scientific state, evidence, or execution, and nothing else in the
+   package depends on it — literature describes what external papers
+   report, and only a later, separate stage may decide what that means.
 """
 
 from __future__ import annotations
@@ -18,6 +22,7 @@ PACKAGE = "autonomous_research_lab"
 SRC = Path(__file__).resolve().parents[1] / "src" / PACKAGE
 CORE = SRC / "core"
 ROLES = SRC / "roles"
+LITERATURE = SRC / "literature"
 PROVIDERS = SRC / "runtime" / "providers.py"
 PROVIDER_MODULES = (PROVIDERS, SRC / "runtime" / "muse.py")
 
@@ -172,6 +177,102 @@ def test_roles_never_construct_experiment_results() -> None:
             if name == "ExperimentResult":
                 violations.append(
                     f"{path.name}:{node.lineno}: constructs ExperimentResult"
+                )
+    assert violations == []
+
+
+def test_literature_depends_on_core_alone() -> None:
+    """The literature boundary sees the identity and type helpers in
+    ``core`` and nothing else in the package: no runtime, no roles, no
+    orchestration, no evidence, no execution. A literature module that
+    needed any of those would be doing science, not retrieval."""
+    allowed = (f"{PACKAGE}.core", f"{PACKAGE}.literature")
+    violations: list[str] = []
+    for path in sorted(LITERATURE.rglob("*.py")):
+        tree = ast.parse(path.read_text(), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+                if node.level == 0 and module.startswith(f"{PACKAGE}."):
+                    if not module.startswith(allowed):
+                        violations.append(f"{path.name}: imports {module}")
+                elif node.level == 2 and not module.startswith("core"):
+                    violations.append(
+                        f"{path.name}: relative import of {module}"
+                    )
+                elif node.level > 2:
+                    violations.append(f"{path.name}: relative import above package")
+            elif isinstance(node, ast.Import):
+                violations.extend(
+                    f"{path.name}: imports {alias.name}"
+                    for alias in node.names
+                    if alias.name.startswith(f"{PACKAGE}.")
+                    and not alias.name.startswith(allowed)
+                )
+    assert violations == []
+
+
+def test_literature_cannot_touch_scientific_state() -> None:
+    """A retrieved paper is a description of external work, never a
+    scientific fact of this lab's: no module in ``literature`` may name
+    ``ResearchState``, call a state mutator, or import the state,
+    proposal, or transition machinery."""
+    violations: list[str] = []
+    for path in sorted(LITERATURE.rglob("*.py")):
+        tree = ast.parse(path.read_text(), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+                if any(
+                    fragment in module
+                    for fragment in ("state", "proposals", "transitions")
+                ):
+                    violations.append(f"{path.name}: imports {module}")
+            elif (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr in STATE_MUTATORS
+            ):
+                violations.append(
+                    f"{path.name}:{node.lineno}: calls .{node.func.attr}(...)"
+                )
+            elif isinstance(node, ast.Name) and node.id == "ResearchState":
+                violations.append(
+                    f"{path.name}:{node.lineno}: references ResearchState"
+                )
+    assert violations == []
+
+
+def test_literature_imports_no_vendor_sdk() -> None:
+    """The retrieval seam keeps the zero-dependency promise the model seam
+    keeps: stdlib HTTP only, no requests/httpx/urllib3 and kin."""
+    for path in sorted(LITERATURE.rglob("*.py")):
+        roots = {module.split(".")[0] for module in _imported_modules(path)}
+        assert roots & VENDOR_SDKS == set(), f"{path.name} imports a vendor SDK"
+
+
+def test_nothing_else_in_the_package_imports_literature() -> None:
+    """Literature is a leaf: until a later task deliberately wires field
+    mapping into the loop, no orchestration, role, runtime, or evidence
+    module may depend on it — retrieved papers must have no path into
+    scientific state."""
+    violations: list[str] = []
+    for path in sorted(SRC.rglob("*.py")):
+        if LITERATURE in path.parents:
+            continue
+        tree = ast.parse(path.read_text(), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+                if "literature" in module:
+                    violations.append(
+                        f"{path.relative_to(SRC)}: imports {module}"
+                    )
+            elif isinstance(node, ast.Import):
+                violations.extend(
+                    f"{path.relative_to(SRC)}: imports {alias.name}"
+                    for alias in node.names
+                    if "literature" in alias.name
                 )
     assert violations == []
 
