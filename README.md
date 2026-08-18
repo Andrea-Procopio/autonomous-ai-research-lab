@@ -39,18 +39,41 @@ has been proven in live end-to-end runs:
 - **Bounded literature retrieval** (OpenAlex, behind a provider-neutral
   seam): normalized source records, conservative deduplication,
   write-once search provenance, and a local corpus that replays
-  identical completed searches without touching the network.
-  Deliberately a leaf — nothing else in the package imports it yet.
+  identical completed searches without touching the network. Its one
+  consumer is the field mapper below.
+- **Evidence-grounded field mapping with a deterministic adequacy
+  verdict.** Model-proposed queries executed by trusted code
+  (title/abstract matching; recency-ordered recent work beside
+  citation-ranked foundational work), preserved relevance screening,
+  verbatim-grounded extraction under deterministic gates, a
+  source-grounded field map and problem inventory with computed
+  per-problem support tiers, and a durable trusted-code
+  `MapAdequacyAssessment` — where an honest `INSUFFICIENT_COVERAGE` is
+  a successful outcome.
+- **CFP-directed candidate idea generation** behind that verdict's
+  guard: an immutable hashed snapshot of a real workshop call, a gated
+  verbatim direction extraction, and one gated portfolio call producing
+  bounded, fully structured research candidates — falsifiable
+  hypothesis, predictions with explicit falsifiers, dataset
+  requirements, baselines, ablations, risks, prior-art search terms —
+  with problem statements, support tiers, and source-era mixes stamped
+  by trusted code, novelty structurally `UNASSESSED`, honest refusal as
+  a first-class recorded outcome, and portfolio accounting that names
+  every problem the candidates did not address.
 
 Nothing a model says becomes scientific state until deterministic code
-has gated, committed, executed, and verified it. Orchestration itself is
-deliberately not model-driven: a fixed-priority director dispatches
-work, and every model decision passes a deterministic gate before it
-takes effect.
+has gated, committed, executed, and verified it — and literature-derived
+records never become scientific state at all: maps, inventories, and
+candidate ideas describe and conjecture, carrying their sources, until
+a later task admits findings through the same governed commit as every
+other proposal. Orchestration itself is deliberately not model-driven:
+a fixed-priority director dispatches work, and every model decision
+passes a deterministic gate before it takes effect.
 
-What does not exist yet: field mapping and idea generation over the
-literature corpus, cloud execution, statistician and skeptic roles with
-real inference, and paper writing.
+What does not exist yet: the prior-art challenge that would give a
+candidate's novelty its first assessed value, literature-grounded
+findings entering research state, cloud execution, statistician and
+skeptic roles with real inference, and paper writing.
 
 Expect interfaces to change.
 
@@ -62,7 +85,9 @@ Expect interfaces to change.
 | `evidence` | Storage for results and evidence. Records can be added but never changed. |
 | `execution` | Runs an experiment as a subprocess. Each job gets its own working directory, its own home directory, and a minimal environment. Output files are collected and hashed. |
 | `knowledge` | Read-only views over the data, such as the graph linking claims to evidence. |
-| `literature` | Bounded search against a real scholarly API (OpenAlex): normalized snapshot records, deterministic deduplication, write-once search provenance, and a replayable local corpus. Depends only on `core`; nothing else imports it yet. |
+| `literature` | Bounded search against a real scholarly API (OpenAlex): normalized snapshot records, deterministic deduplication, write-once search provenance, and a replayable local corpus. Depends only on `core`; its one consumer is `mapping`. |
+| `mapping` | What the literature adds up to: model-backed field mapping and problem inventories over the retrieved corpus, deterministically gated and write-once, judged by a trusted-code adequacy verdict. Depends on `core`, `literature`, and the provider seam; its one consumer is `ideation`. |
+| `ideation` | What might be worth investigating: CFP-directed candidate generation over the assessed map, entering through the adequacy guard, tier-stamped and source-carrying, novelty structurally unassessed. Depends on `core`, `mapping`, and the provider seam; nothing imports it. |
 | `persistence` | Saves every state to disk so a run can be inspected or replayed later. |
 | `runtime` | Bookkeeping around the loop: what work is open, validation and verification of results, cost tracking, metrics — plus the model-provider seam (with the Muse adapter) and the write-once stores for implementation and planning provenance. |
 | `search` | Policies for choosing the next action among candidates. |

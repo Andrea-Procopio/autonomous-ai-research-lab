@@ -46,10 +46,21 @@ in the loop, producing results that survive scrutiny.
   beside recency-ranked recent retrieval, bounded query refinement, and
   a deterministic durable `MapAdequacyAssessment` with typed reasons and
   per-problem support tiers, guarding Task 5C behind
-  `require_adequate_for_idea_generation`. Still open (Task 5C): candidate
-  research questions and idea generation reading these records — and only
-  then findings entering the state as structured objects carrying their
-  sources, through the same governed commit as every other proposal.
+  `require_adequate_for_idea_generation`. Task 5C (proven live
+  2026-08-19): CFP-directed candidate generation walking through that
+  guard — an immutable hashed call snapshot beside its gated verbatim
+  direction extraction, one gated portfolio call proposing bounded,
+  fully structured candidates (falsifiable hypothesis, predictions with
+  explicit falsifiers, dataset requirements, baselines, ablations,
+  risks, prior-art search terms), trusted-code stamping of problem
+  statements, kinds, support tiers, theme eras, and cited-source era
+  mixes, structurally `UNASSESSED` novelty, honest refusal as a
+  first-class recorded outcome, and portfolio accounting that names
+  every unaddressed problem. Still open (Task 5D): the prior-art
+  challenge that falsifies novelty against fresh retrieval — and only
+  after it, findings entering the state as structured objects carrying
+  their sources, through the same governed commit as every other
+  proposal.
 - **Real experiment execution.** ML training runs under the existing executor
   contract — checkpoints, longer timeouts, GPU accounting.
 - **Scientific debugging and experiment verification.** Done in its Phase 1

@@ -1116,10 +1116,117 @@ one paper's reported limitation can stay in the inventory without ever
 being presented as field-wide consensus. Thresholds are explicit,
 configurable `AdequacyThresholds`, validated at construction and
 embedded verbatim in the assessment, which is content-addressed like
-every other record. Task 5C — candidate research questions and idea
-generation reading these records — does not exist yet; its one door is
+every other record. Task 5C — candidate idea generation reading these
+records — enters through exactly one door,
 `require_adequate_for_idea_generation`, which reloads the durable
-verdict and refuses anything but an adequate map.
+verdict and refuses anything but an adequate map; the next section is
+what walks through it.
+
+## Candidate idea generation (Task 5C)
+
+The `ideation` package turns the assessed map into a bounded portfolio
+of testable research candidates — conjectures carrying their sources,
+deliberately not proposals and never scientific state. It is mapping's
+first and only consumer, admitted through the structural tests the way
+mapping was admitted to literature, and bounded the same way: it may
+read `core`, `mapping`, and the provider seam, and pointedly not
+`literature` — sources reach candidates only as the opaque ids mapping
+records carry, so what this stage cannot read, it cannot pretend to
+have read. One run performs a fixed sequence:
+
+```
+IdeationDirective + CfpSnapshot
+  -> require_adequate_for_idea_generation      (before any model call)
+  -> load and cross-verify the mapping records (deterministic)
+  -> one gated direction-extraction call
+  -> one gated candidate-portfolio call        (each: at most one
+                                                corrective call)
+  -> trusted stamping: statements, kinds, support tiers, theme eras,
+     cited-source era mix, and the UNASSESSED novelty status
+  -> deterministic portfolio accounting and one run record
+```
+
+**The CFP ingress.** A run is directed by a real workshop call, and the
+ingress keeps source text and interpretation structurally apart. The
+`CfpSnapshot` is the supplied public text verbatim — URL, supply
+timestamp, and content hash sealed into an immutable record a model
+never touches (there is deliberately no crawler: a supplied snapshot
+with provenance is the whole ingress). The gated `DirectionRecord` is
+the model's structured reading of it — a synthesized scope held to the
+full claim-language discipline, plus topics, constraints, and dates
+that must appear verbatim in the snapshot: extraction, not invention.
+The call constrains relevance downstream; it is not evidence and grants
+no authority.
+
+**Canonical handles, stamped resolution.** Candidates reference
+inventory problems and field-map themes by keys trusted code derives
+from their content (`prob_…`, `thm_…`), rendered beside the full text.
+The model cites keys; trusted code resolves and stamps the statement,
+kind, and computed support tier (problems) and name and era (themes)
+onto the record, where `AddressedProblem` makes a mismatched pair
+unconstructible. This is the source-id precedent applied twice more —
+the live Muse shorthand-label hazard is exactly why the model gets
+canonical handles rather than sentences to echo.
+
+**What a candidate must carry.** A working title, one research
+question, the proposed contribution, a hypothesized mechanism, a
+falsifiable hypothesis, and predictions whose explicit falsifiers are
+structural (a prediction without one cannot be expressed); datasets
+that distinguish existing data (gate-checked against the cited records)
+from honest new requirements; metrics, an evaluation protocol,
+baselines, ablations, resource estimates, risks with plausible negative
+outcomes; CFP alignment naming topics copied exactly from the extracted
+direction; the model's own uncertainty statement; and search terms for
+the Task 5D prior-art challenge. Epistemic labels are structural
+(`CLAIM_KINDS`): the grounding narrative is literature-describing and
+must trace every number to the cited records' gated claim texts or the
+addressed problems' own words, while predictions, falsifiers, and
+resource estimates are design targets whose new numbers are the point.
+Every candidate's novelty status is `UNASSESSED` — the enum holds no
+other value, so a generation-time record cannot even express an
+assessed one, and novelty-claiming language (`novel`, `unexplored`,
+`state of the art`, "the first to", …) is a gate violation wherever it
+appears.
+
+**The candidate gate** returns every rule that fired: canonical-handle
+checks (`unknown_problem`/`unknown_theme`/`unknown_source`/
+`unknown_topic`, each naming the fix), per-problem grounding citations
+(addressing a problem while citing none of its sources is
+`missing_support`), scoped number grounding, dataset-existence
+semantics, banned coverage and novelty language, duplicate and
+superficial-variant rejection (`insufficient_diversity`: identical
+problem sets with identical mechanisms), the mechanical slice of
+falsifiability (`circular_finding`), and control-character rejection
+that preserves legitimate Unicode — names and technical terms keep
+their spelling; nothing is transliterated. An honest refusal is a
+first-class gated outcome: zero candidates with a grounded
+justification is recorded as a completed run, never retried; zero
+candidates without one is `empty_finding`. A valid but disappointing
+portfolio has no route to a second call.
+
+**Honest accounting.** Trusted code computes the `PortfolioReport`:
+which inventory problems the candidates address and — named, not just
+counted — which they do not, the support-tier profile of what was
+addressed, and mechanical diversity (distinct problem/theme/dataset/
+metric sets across candidates; semantic diversity is not pretended to
+be checkable — the model's own diversity rationale is preserved
+verbatim beside it). The `IdeationStore` mirrors the mapping store:
+write-once, ids recomputed on load, tamper-loud, `rejected/` preserving
+every refused payload, one direction and one run record per run.
+Provider calls reach the `UsageLedger` exactly once, failures included,
+and the directive's call budget fails closed before the exceeding call.
+
+Proven live 2026-08-18/19 against the preserved Task 5B.1 map and the
+real NeurIPS 2026 "Foundations of LLM Post-Training in Changing
+Environments" call: three fully structured candidates addressing five
+multi-source problems and the contradicted theory-accounts problem,
+five unaddressed problems named, ten distinct sources cited, one gate
+rejection (source ids pasted into grounding prose read as ungrounded
+numbers) repaired by the one corrective call, three model calls in
+total. What remains for Task 5D and beyond: the prior-art challenge
+that gives novelty its first assessed value, and only after it,
+findings entering the state as structured objects carrying their
+sources, through the same governed commit as every other proposal.
 
 ## Architectural invariants
 
@@ -1137,6 +1244,8 @@ Semantic scientific specifications have content identity.
 Independent replications remain independent evidence.
 Successful outcomes cannot claim nonexistent outputs.
 Retrieved literature describes; it never becomes evidence.
+Candidate ideas carry their sources; generation alone never makes them
+scientific state, and their novelty stays unassessed.
 Every important research decision is reconstructible later.
 ```
 
@@ -1161,7 +1270,12 @@ literature    what external papers report: bounded retrieval, one
 mapping       what the literature adds up to: model-backed field
               mapping and problem inventories over the Task 5A corpus,
               deterministically gated, write-once  (depends on core,
-              literature, and the provider seam; nothing imports it)
+              literature, and the provider seam; exactly one
+              consumer — ideation)
+ideation      what might be worth investigating: CFP-directed, gated
+              candidate generation over the assessed map, tier-stamped
+              and source-carrying, write-once  (depends on core,
+              mapping, and the provider seam; nothing imports it)
 search        which move to take
 roles         who does the work, under what contract; the model-backed
               engineer
