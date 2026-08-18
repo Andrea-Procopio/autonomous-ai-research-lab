@@ -29,14 +29,18 @@ in the loop, producing results that survive scrutiny.
   so a run is auditable and reconstructible offline. Still open: a durable
   evidence store behind the existing `EvidenceStore` protocol, and
   resume-from-snapshot orchestration.
-- **Literature access.** Partly done (Task 5A): bounded search against a real
-  scholarly API (OpenAlex, credential-free, behind a provider-neutral seam),
-  normalized snapshot records with preserved access levels, conservative
-  deterministic deduplication, write-once search provenance, and a local
-  corpus that replays identical completed searches with zero network calls —
-  proven live 2026-08-18. Deliberately a leaf: nothing in the package imports
-  it yet. Still open (Task 5B): reading the corpus into field maps and
-  candidate research questions — the model-backed synthesis stage — and only
+- **Literature access.** Substantially done. Task 5A (proven live
+  2026-08-18): bounded search against a real scholarly API (OpenAlex,
+  credential-free, behind a provider-neutral seam), normalized snapshot
+  records with preserved access levels, conservative deterministic
+  deduplication, write-once search provenance, and a local corpus that
+  replays identical completed searches with zero network calls. Task 5B
+  (proven live 2026-08-18): evidence-grounded field mapping over that
+  corpus — model-proposed queries executed by trusted code, preserved
+  relevance screening, verbatim-grounded extraction under deterministic
+  gates, and a source-grounded `FieldMap` plus `ProblemInventory` with
+  honest bounded-coverage accounting. Still open (Task 5C): candidate
+  research questions and idea generation reading these records — and only
   then findings entering the state as structured objects carrying their
   sources, through the same governed commit as every other proposal.
 - **Real experiment execution.** ML training runs under the existing executor

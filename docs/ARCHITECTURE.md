@@ -998,13 +998,85 @@ search can never cite a snapshot the store does not hold.
 
 **The scientific boundary.** Literature records describe what external
 papers report; they are not `ExperimentResult`, not `Evidence`, and not
-proof that a claim is true. The package depends on `core` alone and
-nothing else in the package imports it — both directions pinned by
-structural tests — so retrieved papers have *no path* into scientific
-state until a later task deliberately builds one, behind its own gates.
-What remains for Task 5B: reading the corpus into field maps and candidate
-questions, with model calls, under the same governed-commit discipline as
-every other proposal.
+proof that a claim is true. The package depends on `core` alone, and its
+one deliberate consumer is the `mapping` package below — both directions
+pinned by structural tests — so retrieved papers still have no path into
+scientific state.
+
+## Field mapping (Task 5B)
+
+The `mapping` package converts a broad research direction into a
+reproducible, source-grounded map of a field — and deliberately nothing
+more:
+
+```
+research brief / broad topic
+  -> focused literature queries        (model-proposed, code-executed)
+  -> Task 5A retrieval and replay
+  -> relevance screening               (every verdict preserved)
+  -> structured source-grounded extraction
+  -> FieldMap
+  -> ProblemInventory
+```
+
+**A provider-neutral service, not a role.** Its input is a
+`ResearchBrief` (topic, hard cutoff date, recent-work window, optional
+workshop/CFP hints, and explicit budgets for queries, results, screened
+and extracted sources, and model calls — all validated against ceilings
+at construction), not `ResearchState`; its output is literature
+analysis, not proposals. It speaks only to the generic `ModelProvider`
+seam — no Muse-specific logic exists outside the Muse adapter — and its
+dependency surface is pinned structurally: `core`, `literature`, and the
+provider seam, nothing else, with nothing else in the package importing
+it back.
+
+**Authority is split the standard way.** The model proposes query text
+per fixed family (recent, foundational, methods, datasets/benchmarks,
+metrics/evaluation, baselines, limitations/open-problems), screens
+sources as relevant/excluded/uncertain with reasons, extracts what each
+source's accessible text reports, clusters findings, and proposes open
+problems. Trusted code derives every date range from the brief, executes
+every search through the Task 5A corpus (cache-or-live, so identical
+runs replay without the network), stamps every era (recent/foundational/
+undated, from the brief's window — never a model opinion) and access
+level, and holds every payload to the deterministic gates: unknown or
+excluded source ids, missing support, access-level mismatches (abstract-
+only access cannot support full-text claims), un-grounded numbers and
+dataset details (every number token and every dataset name/version/
+size/URL/license must appear verbatim in the cited sources' accessible
+text), duplicates, internal contradictions, era mismatches, budget
+violations, and coverage language (no "exhaustive", no "systematic
+review", no proven-novelty claims) all fail closed. A schema violation
+or gate rejection earns at most one corrective call carrying the exact
+rules that fired; every rejected payload is preserved under
+`rejected/`; a valid but disappointing analysis has no route to a
+second call.
+
+**Epistemic labels are structural.** Each record category carries a
+fixed claim kind (`CLAIM_KINDS`): bibliographic facts live on Task 5A
+sources; extraction lists are author-reported claims or author-reported
+limitations (typed compute/data/generalization/reproducibility); themes
+and clusters are mapper synthesis; problem entries are inferred open
+problems with supporting *and conflicting* source ids preserved. A
+source whose accessible text supports nothing yields an honest
+insufficient-support record — deterministically, with no model call,
+for metadata-only sources. Dataset extraction records how papers
+*report* using datasets; nothing is downloaded or executed.
+
+**Provenance and coverage.** Every accepted record embeds the full call
+provenance (request fingerprint, response occurrence id, provider,
+requested and served model, provider request id, latency, exact token
+counts, repair count); usage reaches the `UsageLedger` exactly once per
+call, failures included; and the `MappingStore` mirrors the planning
+store's write-once, recomputed-id, tamper-loud semantics, with one extra
+consistency rule — one verdict and one extraction per source per run.
+The run record carries deterministic coverage accounting (per-query
+retrieved/new-unique counts, overlap, screening outcomes, access-level
+mix, truncations, and a modest saturation indicator) so the map stays
+honest about what was *not* covered. Task 5C — candidate research
+questions and idea generation reading these records — does not exist
+yet, and nothing here selects an idea, generates code, or executes
+anything.
 
 ## Architectural invariants
 
@@ -1041,8 +1113,12 @@ runtime       frontier view, Tier-0 validation, experiment verification
               implementation provenance                (depends on core only)
 literature    what external papers report: bounded retrieval, one
               scholarly adapter, snapshot records, deduplication,
-              write-once search provenance   (depends on core only; a
-              leaf — nothing else imports it)
+              write-once search provenance   (depends on core only;
+              exactly one consumer — mapping)
+mapping       what the literature adds up to: model-backed field
+              mapping and problem inventories over the Task 5A corpus,
+              deterministically gated, write-once  (depends on core,
+              literature, and the provider seam; nothing imports it)
 search        which move to take
 roles         who does the work, under what contract; the model-backed
               engineer
