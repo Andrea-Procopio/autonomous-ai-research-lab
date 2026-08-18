@@ -266,10 +266,12 @@ CANDIDATES_INSTRUCTION: Final = (
     "that would refute it. Cite prob_ keys, thm_ keys, and lit_ ids "
     "exactly as listed - never an index, a shorthand such as 'P1', or a "
     "restated sentence - and for every addressed problem cite at least "
-    "one of the sources shown grounding it. The grounding field says how "
-    "the cited records support the idea, and every number in it must "
-    "appear in their listed claims; numbers in predictions, falsifiers, "
-    "and resources are your proposed targets. Mark a dataset 'existing' "
+    "one of the sources shown grounding it. Keys and ids go only in "
+    "their own fields, never inside prose (an id pasted into a sentence "
+    "reads as ungrounded numbers to the gate). The grounding field says "
+    "how the cited records support the idea, and every number in it "
+    "must appear in their listed claims; numbers in predictions, "
+    "falsifiers, and resources are your proposed targets. Mark a dataset 'existing' "
     "only when a cited record reports it; otherwise it is a "
     "new_requirement. Name concrete baselines and ablations, metrics and "
     "an evaluation protocol, approximate compute, data, and "
@@ -290,7 +292,10 @@ CANDIDATES_INSTRUCTION: Final = (
     "candidate, return an empty candidates list and a grounded "
     "refusal_justification, with diversity_rationale empty - an honest "
     "refusal is a valid outcome; padding is not. Fewer well-grounded "
-    "candidates beat a padded list."
+    "candidates beat a padded list. Be brief everywhere: one or two "
+    "short sentences per text field and short list entries - the "
+    "structure carries the content, prose length adds nothing, and a "
+    "reply that overruns the output budget is lost entirely."
     + _TEXT_NOTE
 )
 

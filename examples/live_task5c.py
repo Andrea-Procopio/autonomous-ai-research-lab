@@ -103,8 +103,15 @@ SNAPSHOT = CfpSnapshot(
     text=CFP_TEXT,
 )
 
+# Three candidates, not the default five: the first live attempt
+# (preserved as task5c-2026-08-19.partial-1) truncated at the proven
+# 8192-token output envelope while writing its fourth fully structured
+# candidate. The portfolio bound is the honest knob -- fewer, complete,
+# well-grounded candidates -- not a larger reply we cannot verify fits.
 DIRECTIVE = IdeationDirective(
-    assessment_id=ASSESSMENT_ID, snapshot_id=SNAPSHOT.id
+    assessment_id=ASSESSMENT_ID,
+    snapshot_id=SNAPSHOT.id,
+    max_candidates=3,
 )
 
 #: The Task 5B.1 mapping run's spend — what building this candidate
@@ -155,7 +162,11 @@ def main() -> int:
         ledger=ledger,
         map_store=map_store,
         store=IdeationStore(run_root / "ideation"),
-        max_output_tokens=8192,
+        # 16384, not the 8192 of every prior live stage: three fully
+        # structured candidates truncated at 8192 twice (partials 1-3)
+        # even under an explicit brevity instruction. The reply is one
+        # large JSON object; the budget has to fit it.
+        max_output_tokens=16384,
         temperature=0.0,
         request_timeout_seconds=240.0,
     )
