@@ -594,3 +594,32 @@ def test_an_empty_inventory_is_rejected() -> None:
             {"problems": []}, eras=_ERAS, accessible=_ACCESSIBLE
         )
     )
+
+
+# -- transport-corrupted text (Task 5B.1, observed live) ----------------------
+
+
+def test_control_characters_are_rejected_with_an_actionable_message() -> None:
+    """OBSERVED live (2026-08-18): a non-ASCII dash in a year range
+    arrived as U+0002, splitting '2026' into an ungroundable '026'. The
+    gate must name the corruption and the fix, not just the symptom."""
+    payload = _extraction_payload(
+        methods=["prompt adaptation", "work from 20252026 on GLUE"]
+    )
+    rejections = check_extraction(payload, source=SOURCE)
+    rules = {r.rule for r in rejections}
+    assert "corrupted_text" in rules
+    detail = next(
+        r.detail for r in rejections if r.rule == "corrupted_text"
+    )
+    assert "U+0002" in detail
+    assert "ASCII" in detail
+
+
+def test_corrupted_query_text_is_rejected_before_retrieval() -> None:
+    payload = _queries_payload(
+        ("recent", "in-contextlearning"),
+        ("foundational", "meta-learning"),
+        ("limitations_open_problems", "limits of adaptation"),
+    )
+    assert "corrupted_text" in _rules(check_queries(payload, brief=BRIEF))

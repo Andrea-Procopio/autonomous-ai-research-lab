@@ -35,6 +35,8 @@ SCREENED_SOURCES_CEILING: Final = 500
 EXTRACTED_SOURCES_CEILING: Final = 100
 MODEL_CALLS_CEILING: Final = 200
 HINTS_CEILING: Final = 20
+REFINEMENT_ROUNDS_CEILING: Final = 2
+REFINEMENT_QUERIES_CEILING: Final = 5
 
 
 class QueryFamily(StrEnum):
@@ -77,6 +79,15 @@ class ResearchBrief:
     max_screened_sources: int = 120
     max_extracted_sources: int = 40
     max_model_calls: int = 60
+    refinement_rounds: int = 1
+    """How many bounded query-refinement rounds the mapper may run when
+    the initial retrieval screens too few relevant sources. Zero
+    disables refinement; the trigger threshold lives with the adequacy
+    thresholds, not here."""
+
+    max_refinement_queries: int = 3
+    """How many additional queries one refinement round may propose."""
+
     id: str = field(default="")
 
     def __post_init__(self) -> None:
@@ -122,23 +133,39 @@ class ResearchBrief:
             EXTRACTED_SOURCES_CEILING,
         )
         _bounded("max_model_calls", self.max_model_calls, MODEL_CALLS_CEILING)
-        if not self.id:
-            object.__setattr__(
-                self,
-                "id",
-                content_id(
-                    "brief",
-                    self.topic,
-                    self.cutoff_date,
-                    self.recent_window_start,
-                    self.workshop_hints,
-                    self.max_queries_per_family,
-                    self.results_per_query,
-                    self.max_screened_sources,
-                    self.max_extracted_sources,
-                    self.max_model_calls,
-                ),
+        if not 0 <= self.refinement_rounds <= REFINEMENT_ROUNDS_CEILING:
+            raise ValueError(
+                f"refinement_rounds must be in "
+                f"0..{REFINEMENT_ROUNDS_CEILING}, got "
+                f"{self.refinement_rounds}"
             )
+        _bounded(
+            "max_refinement_queries",
+            self.max_refinement_queries,
+            REFINEMENT_QUERIES_CEILING,
+        )
+        if not self.id:
+            parts: tuple[object, ...] = (
+                self.topic,
+                self.cutoff_date,
+                self.recent_window_start,
+                self.workshop_hints,
+                self.max_queries_per_family,
+                self.results_per_query,
+                self.max_screened_sources,
+                self.max_extracted_sources,
+                self.max_model_calls,
+            )
+            # The refinement budgets join the identity only away from
+            # their defaults, so every brief expressible before they
+            # existed keeps its recorded id.
+            if (self.refinement_rounds, self.max_refinement_queries) != (1, 3):
+                parts = (
+                    *parts,
+                    self.refinement_rounds,
+                    self.max_refinement_queries,
+                )
+            object.__setattr__(self, "id", content_id("brief", *parts))
 
     def date_range(self, family: QueryFamily) -> tuple[str, str]:
         """The trusted date range for one family's retrieval: recent work

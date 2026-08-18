@@ -37,7 +37,12 @@ from typing import Final
 
 from ..core.ids import occurrence_id
 from ..literature.corpus import LiteratureCorpus
-from ..literature.retrieval import AccessLevel, LiteratureQuery, LiteratureSource
+from ..literature.retrieval import (
+    AccessLevel,
+    LiteratureQuery,
+    LiteratureSource,
+    ResultOrdering,
+)
 from ..runtime.providers import (
     Message,
     MessageRole,
@@ -49,6 +54,11 @@ from ..runtime.providers import (
     StructuredOutputError,
     UsageLedger,
 )
+from .adequacy import (
+    AdequacyThresholds,
+    MapAdequacyAssessment,
+    assess_adequacy,
+)
 from .brief import QueryFamily, ResearchBrief, SourceEra, classify_era
 from .gates import (
     MappingRejection,
@@ -57,6 +67,7 @@ from .gates import (
     check_field_map,
     check_inventory,
     check_queries,
+    check_refined_queries,
     check_screening,
 )
 from .records import (
@@ -87,6 +98,24 @@ from .store import MappingStore
 _ABSTRACT_RENDER_CHARS: Final = 1500
 """Screening shows at most this much of each abstract — enough to judge
 relevance, bounded so a batch prompt stays finite."""
+
+RETRIEVAL_STRATEGIES: Final[Mapping[QueryFamily, ResultOrdering]] = {
+    QueryFamily.RECENT: ResultOrdering.RECENCY,
+    QueryFamily.FOUNDATIONAL: ResultOrdering.INFLUENCE,
+    QueryFamily.METHODS: ResultOrdering.RECENCY,
+    QueryFamily.DATASETS_BENCHMARKS: ResultOrdering.INFLUENCE,
+    QueryFamily.METRICS_EVALUATION: ResultOrdering.RECENCY,
+    QueryFamily.BASELINES: ResultOrdering.INFLUENCE,
+    QueryFamily.LIMITATIONS_OPEN_PROBLEMS: ResultOrdering.RECENCY,
+}
+"""The deterministic retrieval strategy per family, chosen by trusted
+code and recorded on every execution. Foundational work, canonical
+benchmarks, and established baselines are influence-shaped (a date sort
+buries them under whatever was published yesterday — the Task 5B live
+run surfaced 1 recent and 4 foundational sources almost by accident);
+recent work, current methods, evaluation discourse, and the limitations
+conversation are time-shaped. Ordering decides which slice is *seen*;
+it is never evidence about the papers."""
 
 
 class MappingContractError(RuntimeError):
@@ -377,17 +406,43 @@ INVENTORY_SCHEMA: Final = OutputSchema(
 )
 
 
+_ASCII_NOTE: Final = (
+    " Write plain ASCII text only: simple hyphens and straight quotes, "
+    "date ranges as '2025 to 2026' — non-ASCII punctuation is corrupted "
+    "in transit and the gate rejects it."
+)
+
 QUERY_INSTRUCTION: Final = (
     "You design focused scholarly search queries for a bounded literature "
-    "mapping run. From the research brief you are shown, propose plain "
-    "keyword queries (3-300 characters, no boolean operators, no dates — "
-    "trusted code sets each family's date range) across these families: "
+    "mapping run. Queries match words in titles and abstracts only, so "
+    "precision matters: put every multi-word technical phrase in double "
+    "quotes (e.g. \"in-context learning\") and add at most one or two "
+    "extra terms per query — a long unquoted keyword bag matches almost "
+    "everything and buries the topic. No dates (trusted code sets each "
+    "family's date range and its ordering: recency for recent work, "
+    "citation-ranked for foundational work), no boolean operators, no "
+    "commas or colons, 3-300 characters. Propose across these families: "
     "recent, foundational, methods, datasets_benchmarks, "
     "metrics_evaluation, baselines, limitations_open_problems. You MUST "
     "cover at least recent, foundational, and limitations_open_problems; "
     "cover other families where they serve the topic. Respect the "
     "per-family query budget stated in the brief. Never repeat a query "
     "within a family."
+    + _ASCII_NOTE
+)
+
+REFINEMENT_INSTRUCTION: Final = (
+    "You refine the search queries of a bounded literature mapping run "
+    "whose initial retrieval screened too few relevant sources. You are "
+    "shown each executed query with how many of its sources screened as "
+    "relevant, plus sample screening reasons. Propose a small set of NEW "
+    "queries — never one already executed — that keep the brief's topic "
+    "exactly as stated (narrowing the scientific question is not "
+    "refinement) while matching it more precisely: quote every "
+    "multi-word technical phrase, prefer the field's own terminology, "
+    "and target the families that produced nothing relevant. The same "
+    "family/date/ordering rules apply; respect the round's query cap."
+    + _ASCII_NOTE
 )
 
 SCREENING_INSTRUCTION: Final = (
@@ -399,6 +454,7 @@ SCREENING_INSTRUCTION: Final = (
     "one-sentence reason per decision. Judge only what is shown; never "
     "assume content beyond the accessible text, and never claim "
     "exhaustive knowledge of the field."
+    + _ASCII_NOTE
 )
 
 EXTRACTION_INSTRUCTION: Final = (
@@ -419,6 +475,7 @@ EXTRACTION_INSTRUCTION: Final = (
     "every list empty — that is a valid, honest outcome. Claims that "
     "would need methods sections, tables, or appendices are not "
     "supportable here."
+    + _ASCII_NOTE
 )
 
 FIELD_MAP_INSTRUCTION: Final = (
@@ -429,8 +486,12 @@ FIELD_MAP_INSTRUCTION: Final = (
     "extractions. Each theme's era must follow its cited sources' era "
     "labels: 'recent' when all are recent, 'foundational' when all are "
     "foundational, 'both' otherwise. Relationships connect declared "
-    "themes only. This run saw a bounded slice of the literature: never "
-    "claim exhaustive coverage, a systematic review, or novelty."
+    "themes only, and from_theme/to_theme MUST repeat the exact 'name' "
+    "string of a theme declared in this same reply — never a shorthand, "
+    "number, or label such as 'T1'. This run saw a bounded slice of the "
+    "literature: never claim exhaustive coverage, a systematic review, "
+    "or novelty."
+    + _ASCII_NOTE
 )
 
 INVENTORY_INSTRUCTION: Final = (
@@ -446,6 +507,7 @@ INVENTORY_INSTRUCTION: Final = (
     "the extractions actually report; every number must appear in the "
     "cited sources' accessible text. A bounded run cannot establish "
     "novelty or completeness: never claim either."
+    + _ASCII_NOTE
 )
 
 
@@ -464,6 +526,7 @@ class MappingRunResult:
     extractions: tuple[ExtractionRecord, ...]
     field_map: FieldMapRecord
     inventory: ProblemInventoryRecord
+    assessment: MapAdequacyAssessment
 
 
 class _Spend:
@@ -490,6 +553,7 @@ class FieldMapper:
         ledger: UsageLedger,
         corpus: LiteratureCorpus,
         store: MappingStore,
+        thresholds: AdequacyThresholds | None = None,
         screening_batch_size: int = 10,
         max_output_tokens: int = 8192,
         temperature: float = 0.0,
@@ -503,6 +567,9 @@ class FieldMapper:
         self._ledger = ledger
         self._corpus = corpus
         self._store = store
+        self._thresholds = (
+            thresholds if thresholds is not None else AdequacyThresholds()
+        )
         self._screening_batch_size = screening_batch_size
         self._max_output_tokens = max_output_tokens
         self._temperature = temperature
@@ -528,17 +595,89 @@ class FieldMapper:
             spend=spend,
         )
 
-        executions, ordered_sources = self._retrieve(
-            run_id, brief, queries_payload
+        seen: set[str] = set()
+        ordered_sources: list[LiteratureSource] = []
+        family_sources: dict[str, list[str]] = {}
+        executed_keys: set[tuple[str, str]] = set()
+        executions = self._retrieve(
+            run_id,
+            brief,
+            _query_entries(queries_payload),
+            refinement_round=0,
+            seen=seen,
+            ordered=ordered_sources,
+            family_sources=family_sources,
+            executed_keys=executed_keys,
         )
-        to_screen = ordered_sources[: brief.max_screened_sources]
-        screenings = self._screen(run_id, brief, to_screen, spend)
-        decisions = {record.source_id: record for record in screenings}
-        relevant = [
-            source
-            for source in to_screen
-            if decisions[source.id].decision is ScreeningDecision.RELEVANT
-        ]
+        screened_sources = list(ordered_sources[: brief.max_screened_sources])
+        screenings = self._screen(run_id, brief, screened_sources, spend)
+
+        def _relevant() -> list[LiteratureSource]:
+            decisions = {record.source_id: record for record in screenings}
+            return [
+                source
+                for source in screened_sources
+                if decisions[source.id].decision
+                is ScreeningDecision.RELEVANT
+            ]
+
+        # Bounded refinement: when the initial retrieval screens fewer
+        # relevant sources than the adequacy bar, trusted code triggers
+        # up to ``refinement_rounds`` extra proposal rounds — new
+        # queries only, same topic, screened into the same budgets. The
+        # trigger is deterministic; the verdict at the end reports
+        # whatever the corpus honestly supports.
+        rounds = 0
+        while (
+            len(_relevant()) < self._thresholds.min_relevant_sources
+            and rounds < brief.refinement_rounds
+            and len(screened_sources) < brief.max_screened_sources
+        ):
+            rounds += 1
+            refined_payload, _ = self._gated_call(
+                self._request(
+                    REFINEMENT_INSTRUCTION,
+                    render_refinement_feedback(
+                        brief, executions, family_sources, screenings
+                    ),
+                    QUERY_SCHEMA,
+                    run_id,
+                    "refinement",
+                ),
+                gate=partial(
+                    check_refined_queries,
+                    already_executed=frozenset(executed_keys),
+                    max_queries=brief.max_refinement_queries,
+                ),
+                stage="refinement",
+                run_id=run_id,
+                spend=spend,
+            )
+            executions.extend(
+                self._retrieve(
+                    run_id,
+                    brief,
+                    _query_entries(refined_payload),
+                    refinement_round=rounds,
+                    seen=seen,
+                    ordered=ordered_sources,
+                    family_sources=family_sources,
+                    executed_keys=executed_keys,
+                )
+            )
+            capacity = brief.max_screened_sources - len(screened_sources)
+            already = {source.id for source in screened_sources}
+            fresh = [
+                source
+                for source in ordered_sources
+                if source.id not in already
+            ][:capacity]
+            if not fresh:
+                break
+            screenings.extend(self._screen(run_id, brief, fresh, spend))
+            screened_sources.extend(fresh)
+
+        relevant = _relevant()
         extractions = self._extract(
             run_id, brief, relevant[: brief.max_extracted_sources], spend
         )
@@ -600,8 +739,24 @@ class FieldMapper:
         )
 
         coverage = _coverage(
-            executions, ordered_sources, to_screen, screenings, relevant,
-            extractions,
+            executions, ordered_sources, screened_sources, screenings,
+            relevant, extractions,
+        )
+        assessment = self._store.record_adequacy(
+            assess_adequacy(
+                run_id=run_id,
+                brief_id=brief.id,
+                screenings=screenings,
+                extractions=extractions,
+                field_map=field_map,
+                inventory=inventory,
+                family_sources={
+                    family: tuple(ids)
+                    for family, ids in family_sources.items()
+                },
+                coverage=coverage,
+                thresholds=self._thresholds,
+            )
         )
         run_record = self._store.record_run(
             MappingRunRecord(
@@ -626,6 +781,7 @@ class FieldMapper:
             extractions=tuple(extractions),
             field_map=field_map,
             inventory=inventory,
+            assessment=assessment,
         )
 
     # -- stages ----------------------------------------------------------------
@@ -634,27 +790,31 @@ class FieldMapper:
         self,
         run_id: str,
         brief: ResearchBrief,
-        payload: Mapping[str, object],
-    ) -> tuple[list[QueryExecution], list[LiteratureSource]]:
-        """Trusted execution of the accepted queries, in payload order:
-        dates from the brief, retrieval through the Task 5A corpus
-        (cache-or-live), one durable execution record each."""
+        entries: Sequence[tuple[QueryFamily, str]],
+        *,
+        refinement_round: int,
+        seen: set[str],
+        ordered: list[LiteratureSource],
+        family_sources: dict[str, list[str]],
+        executed_keys: set[tuple[str, str]],
+    ) -> list[QueryExecution]:
+        """Trusted execution of accepted queries, in payload order: dates
+        and retrieval strategy from the brief and the family — never from
+        the model — retrieval through the Task 5A corpus (cache-or-live),
+        one durable execution record each. The accumulators (`seen`,
+        `ordered`, `family_sources`, `executed_keys`) are shared across
+        the initial round and every refinement round."""
         executions: list[QueryExecution] = []
-        ordered: list[LiteratureSource] = []
-        seen: set[str] = set()
-        entries = payload["queries"]
-        assert isinstance(entries, Sequence)
-        for entry in entries:
-            assert isinstance(entry, Mapping)
-            family = QueryFamily(str(entry["family"]))
-            text = str(entry["text"]).strip()
+        for family, text in entries:
             from_date, to_date = brief.date_range(family)
+            ordering = RETRIEVAL_STRATEGIES[family]
             query = LiteratureQuery(
                 text=text,
                 from_date=from_date,
                 to_date=to_date,
                 per_page=min(brief.results_per_query, 25),
                 max_results=brief.results_per_query,
+                ordering=ordering,
             )
             result = self._corpus.search(query)
             fresh = [s for s in result.sources if s.id not in seen]
@@ -670,13 +830,18 @@ class FieldMapper:
                     retrieved=len(result.sources),
                     new_unique=len(fresh),
                     from_cache=result.from_cache,
+                    ordering=ordering,
+                    refinement_round=refinement_round,
                 )
             )
             executions.append(execution)
+            executed_keys.add((family.value, text.casefold()))
+            returned = family_sources.setdefault(family.value, [])
+            returned.extend(source.id for source in result.sources)
             for source in fresh:
                 seen.add(source.id)
                 ordered.append(source)
-        return executions, ordered
+        return executions
 
     def _screen(
         self,
@@ -1174,6 +1339,64 @@ def _coverage(
 
 
 # -- deterministic projections ------------------------------------------------
+
+
+def _query_entries(
+    payload: Mapping[str, object],
+) -> tuple[tuple[QueryFamily, str], ...]:
+    """The gate-accepted (family, text) pairs, in payload order."""
+    entries = payload["queries"]
+    assert isinstance(entries, Sequence)
+    parsed = []
+    for entry in entries:
+        assert isinstance(entry, Mapping)
+        parsed.append(
+            (QueryFamily(str(entry["family"])), str(entry["text"]).strip())
+        )
+    return tuple(parsed)
+
+
+def render_refinement_feedback(
+    brief: ResearchBrief,
+    executions: Sequence[QueryExecution],
+    family_sources: Mapping[str, Sequence[str]],
+    screenings: Sequence[ScreeningRecord],
+) -> str:
+    """What the refinement round sees: every executed query with its
+    yield, and a bounded sample of exclusion reasons — evidence about
+    why retrieval missed, never an invitation to change the topic."""
+    decisions = {record.source_id: record for record in screenings}
+    lines = [
+        f"## Topic (unchanged — refine retrieval, not the question)\n"
+        f"{brief.topic}",
+        "\n## Executed queries and their screened yield",
+    ]
+    for execution in executions:
+        relevant = sum(
+            1
+            for source_id in family_sources.get(execution.family.value, ())
+            if source_id in decisions
+            and decisions[source_id].decision is ScreeningDecision.RELEVANT
+        )
+        lines.append(
+            f"- [{execution.family.value}] {execution.text!r} "
+            f"({execution.ordering.value}-ordered): retrieved "
+            f"{execution.retrieved}, new {execution.new_unique}; family "
+            f"has {relevant} relevant source(s) so far"
+        )
+    excluded_reasons = [
+        record.reason
+        for record in screenings
+        if record.decision is ScreeningDecision.EXCLUDED
+    ][:5]
+    if excluded_reasons:
+        lines.append("\n## Sample exclusion reasons (why retrieval missed)")
+        lines.extend(f"- {reason}" for reason in excluded_reasons)
+    lines.append(
+        f"\nPropose at most {brief.max_refinement_queries} NEW queries "
+        f"now as schema JSON."
+    )
+    return "\n".join(lines)
 
 
 def render_brief(brief: ResearchBrief) -> str:

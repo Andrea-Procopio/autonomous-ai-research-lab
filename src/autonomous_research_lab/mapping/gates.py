@@ -92,9 +92,35 @@ def _number_tokens(text: str) -> frozenset[str]:
     return frozenset(_NUMBER.findall(text))
 
 
+def check_text_integrity(
+    text: str, where: str, rejections: list[MappingRejection]
+) -> None:
+    """Reject transport-corrupted text. Observed live (Task 5B.1,
+    2026-08-18): an en dash between '2025' and '2026' arrived as control
+    character U+0002 inside a structured reply, splitting the year into
+    an ungroundable '026' token — the same provider-side corruption the
+    engineer's source gate caught in Task 3. The message names the fix,
+    because 'ungrounded number' alone sent the corrective call in
+    circles."""
+    for character in text:
+        code = ord(character)
+        if code < 32 and character not in "\n\t\r":
+            rejections.append(
+                MappingRejection(
+                    "corrupted_text",
+                    f"{where} contains control character U+{code:04X} — "
+                    f"typically a non-ASCII dash or quote corrupted in "
+                    f"transit; rewrite the entry using plain ASCII "
+                    f"punctuation (write date ranges as '2025 to 2026')",
+                )
+            )
+            return
+
+
 def check_coverage_language(
     text: str, where: str, rejections: list[MappingRejection]
 ) -> None:
+    check_text_integrity(text, where, rejections)
     lowered = text.casefold()
     for phrase in BANNED_COVERAGE_PHRASES:
         if phrase in lowered:
@@ -186,6 +212,7 @@ def check_queries(
                     f"{label} exceeds {MAX_QUERY_TEXT_CHARS} characters",
                 )
             )
+        check_text_integrity(text, label, rejections)
         key = (family, text.casefold())
         if key in seen:
             rejections.append(
@@ -217,6 +244,76 @@ def check_queries(
                 f"required famil(ies) not covered: {', '.join(missing)}",
             )
         )
+    return tuple(rejections)
+
+
+def check_refined_queries(
+    payload: Mapping[str, object],
+    *,
+    already_executed: frozenset[tuple[str, str]],
+    max_queries: int,
+) -> tuple[MappingRejection, ...]:
+    """The refinement round's gate: the same text and family discipline
+    as the initial proposal, minus the required-families rule (refining
+    where retrieval was weak is the point), plus two bounds of its own —
+    the round's query cap, and no re-running of a (family, text) pair
+    this run has already executed."""
+    rejections: list[MappingRejection] = []
+    queries = payload["queries"]
+    assert isinstance(queries, Sequence)  # schema-validated
+    if not queries:
+        return (
+            MappingRejection(
+                "empty_finding",
+                "a refinement round must propose at least one query",
+            ),
+        )
+    if len(queries) > max_queries:
+        rejections.append(
+            MappingRejection(
+                "budget_violation",
+                f"the round proposes {len(queries)} queries; the brief "
+                f"allows {max_queries} per refinement round",
+            )
+        )
+    seen: set[tuple[str, str]] = set()
+    for index, entry in enumerate(queries):
+        assert isinstance(entry, Mapping)
+        family = str(entry["family"])
+        text = str(entry["text"]).strip()
+        label = f"queries[{index}]"
+        if not text or len(text) < 3:
+            rejections.append(
+                MappingRejection(
+                    "empty_finding", f"{label} carries no usable query text"
+                )
+            )
+            continue
+        if len(text) > MAX_QUERY_TEXT_CHARS:
+            rejections.append(
+                MappingRejection(
+                    "budget_violation",
+                    f"{label} exceeds {MAX_QUERY_TEXT_CHARS} characters",
+                )
+            )
+        check_text_integrity(text, label, rejections)
+        key = (family, text.casefold())
+        if key in already_executed:
+            rejections.append(
+                MappingRejection(
+                    "duplicate_finding",
+                    f"{label} re-proposes a query this run already "
+                    f"executed",
+                )
+            )
+        if key in seen:
+            rejections.append(
+                MappingRejection(
+                    "duplicate_finding",
+                    f"{label} repeats an earlier query in this round",
+                )
+            )
+        seen.add(key)
     return tuple(rejections)
 
 
@@ -515,7 +612,9 @@ def check_field_map(
                     MappingRejection(
                         "unknown_theme",
                         f"{label} references theme {endpoint!r}, which the "
-                        f"map does not declare",
+                        f"map does not declare; from_theme and to_theme "
+                        f"must repeat the exact 'name' string of a declared "
+                        f"theme, never a shorthand label",
                     )
                 )
         if from_theme == to_theme:

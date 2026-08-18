@@ -25,6 +25,17 @@ from pathlib import Path
 from typing import Final
 
 from ..core.ids import occurrence_id
+from ..literature.retrieval import ResultOrdering
+from .adequacy import (
+    AdequacyMetrics,
+    AdequacyReason,
+    AdequacyReasonCode,
+    AdequacyStatus,
+    AdequacyThresholds,
+    MapAdequacyAssessment,
+    ProblemSupport,
+    SupportTier,
+)
 from .brief import QueryFamily, ResearchBrief, SourceEra
 from .records import (
     CallProvenance,
@@ -58,6 +69,7 @@ _SCREENINGS: Final = "screenings"
 _EXTRACTIONS: Final = "extractions"
 _FIELD_MAPS: Final = "fieldmaps"
 _INVENTORIES: Final = "inventories"
+_ASSESSMENTS: Final = "assessments"
 _RUNS: Final = "runs"
 _REJECTED: Final = "rejected"
 
@@ -262,6 +274,33 @@ class MappingStore:
         self._verify(_INVENTORIES, record_id, record.id)
         return record
 
+    # -- adequacy assessments --------------------------------------------------
+
+    def record_adequacy(
+        self, record: MapAdequacyAssessment
+    ) -> MapAdequacyAssessment:
+        self._write_once(_ASSESSMENTS, record.id, _assessment_payload(record))
+        return record
+
+    def get_adequacy(
+        self, record_id: str
+    ) -> MapAdequacyAssessment | None:
+        payload = self._load(_ASSESSMENTS, record_id)
+        if payload is None:
+            return None
+        record = _assessment_from(payload)
+        self._verify(_ASSESSMENTS, record_id, record.id)
+        return record
+
+    def adequacy_for_run(self, run_id: str) -> MapAdequacyAssessment | None:
+        """The (single) assessment of one mapping run, or ``None``."""
+        for record_id in self._ids(_ASSESSMENTS):
+            record = self.get_adequacy(record_id)
+            assert record is not None
+            if record.run_id == run_id:
+                return record
+        return None
+
     # -- completed runs --------------------------------------------------------
 
     def record_run(self, record: MappingRunRecord) -> MappingRunRecord:
@@ -382,7 +421,7 @@ def _provenance_from(payload: object) -> CallProvenance:
 
 
 def _brief_payload(brief: ResearchBrief) -> dict[str, object]:
-    return {
+    payload: dict[str, object] = {
         "id": brief.id,
         "topic": brief.topic,
         "cutoff_date": brief.cutoff_date,
@@ -394,6 +433,12 @@ def _brief_payload(brief: ResearchBrief) -> dict[str, object]:
         "max_extracted_sources": brief.max_extracted_sources,
         "max_model_calls": brief.max_model_calls,
     }
+    if (brief.refinement_rounds, brief.max_refinement_queries) != (1, 3):
+        # Mirrors the id rule: default-refinement briefs keep the byte
+        # layout they had before the budgets existed.
+        payload["refinement_rounds"] = brief.refinement_rounds
+        payload["max_refinement_queries"] = brief.max_refinement_queries
+    return payload
 
 
 def _brief_from(payload: Mapping[str, object]) -> ResearchBrief:
@@ -409,11 +454,15 @@ def _brief_from(payload: Mapping[str, object]) -> ResearchBrief:
         max_screened_sources=int(str(payload["max_screened_sources"])),
         max_extracted_sources=int(str(payload["max_extracted_sources"])),
         max_model_calls=int(str(payload["max_model_calls"])),
+        refinement_rounds=int(str(payload.get("refinement_rounds", 1))),
+        max_refinement_queries=int(
+            str(payload.get("max_refinement_queries", 3))
+        ),
     )
 
 
 def _query_payload(execution: QueryExecution) -> dict[str, object]:
-    return {
+    payload: dict[str, object] = {
         "id": execution.id,
         "run_id": execution.run_id,
         "family": execution.family.value,
@@ -426,6 +475,13 @@ def _query_payload(execution: QueryExecution) -> dict[str, object]:
         "new_unique": execution.new_unique,
         "from_cache": execution.from_cache,
     }
+    if (
+        execution.ordering is not ResultOrdering.RECENCY
+        or execution.refinement_round
+    ):
+        payload["ordering"] = execution.ordering.value
+        payload["refinement_round"] = execution.refinement_round
+    return payload
 
 
 def _query_from(payload: Mapping[str, object]) -> QueryExecution:
@@ -440,6 +496,166 @@ def _query_from(payload: Mapping[str, object]) -> QueryExecution:
         retrieved=int(str(payload["retrieved"])),
         new_unique=int(str(payload["new_unique"])),
         from_cache=bool(payload["from_cache"]),
+        ordering=ResultOrdering(
+            str(payload.get("ordering", ResultOrdering.RECENCY.value))
+        ),
+        refinement_round=int(str(payload.get("refinement_round", 0))),
+    )
+
+
+def _assessment_payload(record: MapAdequacyAssessment) -> dict[str, object]:
+    thresholds = record.thresholds
+    metrics = record.metrics
+    return {
+        "id": record.id,
+        "run_id": record.run_id,
+        "brief_id": record.brief_id,
+        "field_map_id": record.field_map_id,
+        "inventory_id": record.inventory_id,
+        "status": record.status.value,
+        "reasons": [
+            {"code": reason.code.value, "detail": reason.detail}
+            for reason in record.reasons
+        ],
+        "thresholds": {
+            "min_relevant_sources": thresholds.min_relevant_sources,
+            "min_grounded_sources": thresholds.min_grounded_sources,
+            "min_families_with_relevant": (
+                thresholds.min_families_with_relevant
+            ),
+            "min_recent_grounded": thresholds.min_recent_grounded,
+            "min_foundational_grounded": thresholds.min_foundational_grounded,
+            "max_uncertain_fraction": thresholds.max_uncertain_fraction,
+            "min_multi_source_themes": thresholds.min_multi_source_themes,
+            "min_multi_source_problems": thresholds.min_multi_source_problems,
+        },
+        "metrics": {
+            "screened": metrics.screened,
+            "relevant_sources": metrics.relevant_sources,
+            "excluded_sources": metrics.excluded_sources,
+            "uncertain_sources": metrics.uncertain_sources,
+            "uncertain_fraction": metrics.uncertain_fraction,
+            "grounded_sources": metrics.grounded_sources,
+            "insufficient_extractions": metrics.insufficient_extractions,
+            "metadata_only_relevant": metrics.metadata_only_relevant,
+            "recent_grounded": metrics.recent_grounded,
+            "foundational_grounded": metrics.foundational_grounded,
+            "undated_grounded": metrics.undated_grounded,
+            "families_with_relevant": list(metrics.families_with_relevant),
+            "total_retrieved": metrics.total_retrieved,
+            "unique_sources": metrics.unique_sources,
+            "overlap": metrics.overlap,
+            "saturation": metrics.saturation,
+            "screening_truncated": metrics.screening_truncated,
+            "extraction_truncated": metrics.extraction_truncated,
+            "multi_source_themes": metrics.multi_source_themes,
+            "single_source_themes": metrics.single_source_themes,
+            "multi_source_problems": metrics.multi_source_problems,
+            "tentative_problems": metrics.tentative_problems,
+            "single_source_limitation_problems": (
+                metrics.single_source_limitation_problems
+            ),
+            "contradicted_problems": metrics.contradicted_problems,
+        },
+        "problem_support": [
+            {
+                "statement": support.statement,
+                "kind": support.kind.value,
+                "tier": support.tier.value,
+                "distinct_supporting": support.distinct_supporting,
+                "conflicting": support.conflicting,
+            }
+            for support in record.problem_support
+        ],
+    }
+
+
+def _assessment_from(payload: Mapping[str, object]) -> MapAdequacyAssessment:
+    reasons = payload["reasons"]
+    thresholds = payload["thresholds"]
+    metrics = payload["metrics"]
+    supports = payload["problem_support"]
+    assert isinstance(reasons, list)
+    assert isinstance(thresholds, Mapping)
+    assert isinstance(metrics, Mapping)
+    assert isinstance(supports, list)
+    families = metrics["families_with_relevant"]
+    assert isinstance(families, list)
+    return MapAdequacyAssessment(
+        run_id=str(payload["run_id"]),
+        brief_id=str(payload["brief_id"]),
+        field_map_id=str(payload["field_map_id"]),
+        inventory_id=str(payload["inventory_id"]),
+        status=AdequacyStatus(str(payload["status"])),
+        reasons=tuple(
+            AdequacyReason(
+                code=AdequacyReasonCode(str(entry["code"])),
+                detail=str(entry["detail"]),
+            )
+            for entry in reasons
+        ),
+        thresholds=AdequacyThresholds(
+            min_relevant_sources=int(str(thresholds["min_relevant_sources"])),
+            min_grounded_sources=int(str(thresholds["min_grounded_sources"])),
+            min_families_with_relevant=int(
+                str(thresholds["min_families_with_relevant"])
+            ),
+            min_recent_grounded=int(str(thresholds["min_recent_grounded"])),
+            min_foundational_grounded=int(
+                str(thresholds["min_foundational_grounded"])
+            ),
+            max_uncertain_fraction=float(
+                str(thresholds["max_uncertain_fraction"])
+            ),
+            min_multi_source_themes=int(
+                str(thresholds["min_multi_source_themes"])
+            ),
+            min_multi_source_problems=int(
+                str(thresholds["min_multi_source_problems"])
+            ),
+        ),
+        metrics=AdequacyMetrics(
+            screened=int(str(metrics["screened"])),
+            relevant_sources=int(str(metrics["relevant_sources"])),
+            excluded_sources=int(str(metrics["excluded_sources"])),
+            uncertain_sources=int(str(metrics["uncertain_sources"])),
+            uncertain_fraction=float(str(metrics["uncertain_fraction"])),
+            grounded_sources=int(str(metrics["grounded_sources"])),
+            insufficient_extractions=int(
+                str(metrics["insufficient_extractions"])
+            ),
+            metadata_only_relevant=int(
+                str(metrics["metadata_only_relevant"])
+            ),
+            recent_grounded=int(str(metrics["recent_grounded"])),
+            foundational_grounded=int(str(metrics["foundational_grounded"])),
+            undated_grounded=int(str(metrics["undated_grounded"])),
+            families_with_relevant=tuple(str(item) for item in families),
+            total_retrieved=int(str(metrics["total_retrieved"])),
+            unique_sources=int(str(metrics["unique_sources"])),
+            overlap=int(str(metrics["overlap"])),
+            saturation=float(str(metrics["saturation"])),
+            screening_truncated=int(str(metrics["screening_truncated"])),
+            extraction_truncated=int(str(metrics["extraction_truncated"])),
+            multi_source_themes=int(str(metrics["multi_source_themes"])),
+            single_source_themes=int(str(metrics["single_source_themes"])),
+            multi_source_problems=int(str(metrics["multi_source_problems"])),
+            tentative_problems=int(str(metrics["tentative_problems"])),
+            single_source_limitation_problems=int(
+                str(metrics["single_source_limitation_problems"])
+            ),
+            contradicted_problems=int(str(metrics["contradicted_problems"])),
+        ),
+        problem_support=tuple(
+            ProblemSupport(
+                statement=str(entry["statement"]),
+                kind=ProblemKind(str(entry["kind"])),
+                tier=SupportTier(str(entry["tier"])),
+                distinct_supporting=int(str(entry["distinct_supporting"])),
+                conflicting=int(str(entry["conflicting"])),
+            )
+            for entry in supports
+        ),
     )
 
 

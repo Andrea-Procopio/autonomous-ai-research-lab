@@ -28,6 +28,7 @@ from enum import StrEnum
 from typing import Final
 
 from ..core.ids import content_id
+from ..literature.retrieval import ResultOrdering
 from .brief import QueryFamily, SourceEra
 
 #: The structural epistemic label of each model-authored record category.
@@ -450,7 +451,8 @@ class ProblemInventoryRecord:
 class QueryExecution:
     """One validated model-proposed query, executed by trusted code
     through the Task 5A corpus: family, exact text, the trusted date
-    range, the literature-layer fingerprints, and what it returned."""
+    range and retrieval strategy, the literature-layer fingerprints, and
+    what it returned."""
 
     run_id: str
     family: QueryFamily
@@ -462,27 +464,37 @@ class QueryExecution:
     retrieved: int
     new_unique: int
     from_cache: bool
+    ordering: ResultOrdering = ResultOrdering.RECENCY
+    """The retrieval strategy trusted code selected for this family —
+    a discovery signal, never a quality claim. Joins the identity and
+    the payload only away from the recency default, so records written
+    before strategies existed still verify."""
+
+    refinement_round: int = 0
+    """0 for the initial proposal; N for the Nth bounded refinement."""
+
     id: str = field(default="")
 
     def __post_init__(self) -> None:
         if not self.id:
-            object.__setattr__(
-                self,
-                "id",
-                content_id(
-                    "qrun",
-                    self.run_id,
-                    self.family,
-                    self.text,
-                    self.from_date,
-                    self.to_date,
-                    self.query_fingerprint,
-                    self.search_record_id,
-                    self.retrieved,
-                    self.new_unique,
-                    self.from_cache,
-                ),
+            parts: tuple[object, ...] = (
+                self.run_id,
+                self.family,
+                self.text,
+                self.from_date,
+                self.to_date,
+                self.query_fingerprint,
+                self.search_record_id,
+                self.retrieved,
+                self.new_unique,
+                self.from_cache,
             )
+            if (
+                self.ordering is not ResultOrdering.RECENCY
+                or self.refinement_round
+            ):
+                parts = (*parts, self.ordering, self.refinement_round)
+            object.__setattr__(self, "id", content_id("qrun", *parts))
 
 
 @dataclass(frozen=True, slots=True)

@@ -52,6 +52,7 @@ BRIEF = ResearchBrief(
     max_screened_sources=10,
     max_extracted_sources=10,
     max_model_calls=20,
+    refinement_rounds=0,
 )
 
 
@@ -570,6 +571,7 @@ def test_the_model_call_budget_fails_closed(tmp_path: Path) -> None:
         max_screened_sources=10,
         max_extracted_sources=10,
         max_model_calls=1,
+        refinement_rounds=0,
     )
     mapper, _, ledger, store, _ = _mapper(tmp_path, HAPPY_REPLIES)
     with pytest.raises(MappingBudgetError, match="budget"):
@@ -617,3 +619,250 @@ def test_a_literature_failure_propagates_before_any_screening(
         mapper.run(BRIEF)
     assert store.screenings() == ()
     assert ledger.drain().calls == 1  # only the query proposal was billed
+
+
+# -- Task 5B.1: retrieval strategies, refinement, adequacy --------------------
+
+
+def test_retrieval_strategies_are_deterministic_and_persisted(
+    tmp_path: Path,
+) -> None:
+    """Trusted code picks each family's ordering — recency for recent
+    work, influence for foundational — records it on the execution, and
+    sends it to the literature layer."""
+    from autonomous_research_lab.literature.retrieval import ResultOrdering
+    from autonomous_research_lab.mapping.brief import QueryFamily
+    from autonomous_research_lab.mapping.mapper import RETRIEVAL_STRATEGIES
+
+    assert RETRIEVAL_STRATEGIES[QueryFamily.RECENT] is ResultOrdering.RECENCY
+    assert (
+        RETRIEVAL_STRATEGIES[QueryFamily.FOUNDATIONAL]
+        is ResultOrdering.INFLUENCE
+    )
+
+    mapper, _, _, store, literature = _mapper(tmp_path, HAPPY_REPLIES)
+    result = mapper.run(BRIEF)
+
+    by_family = {e.family: e for e in result.query_executions}
+    assert (
+        by_family[QueryFamily.RECENT].ordering is ResultOrdering.RECENCY
+    )
+    assert (
+        by_family[QueryFamily.FOUNDATIONAL].ordering
+        is ResultOrdering.INFLUENCE
+    )
+    # The strategy actually reached the Task 5A layer...
+    sent = {q.text: q.ordering for q in literature.queries}
+    assert sent["meta-learning"] is ResultOrdering.INFLUENCE
+    assert sent["in-context learning"] is ResultOrdering.RECENCY
+    # ...and survives durable reload of the execution record.
+    fresh = MappingStore(tmp_path / "mapping")
+    reloaded = fresh.get_query_execution(
+        by_family[QueryFamily.FOUNDATIONAL].id
+    )
+    assert reloaded is not None
+    assert reloaded.ordering is ResultOrdering.INFLUENCE
+    assert reloaded.refinement_round == 0
+    del store
+
+
+def test_citation_counts_are_retrieval_metadata_only(
+    tmp_path: Path,
+) -> None:
+    """Citation counts order retrieval; they must never reach a prompt,
+    where they could bias screening or extraction toward famous work."""
+    from autonomous_research_lab.mapping.mapper import (
+        render_screening_batch,
+        render_source_for_extraction,
+    )
+
+    celebrated = LiteratureSource(
+        provider="scripted",
+        provider_id="W-famous",
+        title="A Celebrated Paper",
+        authors=("Ada Lovelace",),
+        publication_date="2020-01-01",
+        publication_year=2020,
+        venue="Journal of Things",
+        work_type="article",
+        abstract="We report a celebrated result.",
+        doi=None,
+        arxiv_id=None,
+        provider_url="https://example.org/W-famous",
+        landing_page_url=None,
+        pdf_url=None,
+        cited_by_count=987654,
+        referenced_work_ids=(),
+        access_level=AccessLevel.ABSTRACT,
+    )
+    assert "987654" not in render_screening_batch(BRIEF, (celebrated,))
+    assert "987654" not in render_source_for_extraction(BRIEF, celebrated)
+    del tmp_path
+
+
+def test_refinement_triggers_deterministically_and_stays_bounded(
+    tmp_path: Path,
+) -> None:
+    """Three relevant sources sit under the adequacy bar, so trusted code
+    triggers exactly one refinement round: one new gated proposal, new
+    retrieval under the same family strategies, screening of the new
+    uniques — and durable records that name their round."""
+    s_extra_1 = _source(
+        "W-extra-1",
+        date="2026-03-03",
+        title="Demonstration Selection for In-Context Learning",
+        abstract="We select demonstrations with graph propagation.",
+    )
+    s_extra_2 = _source(
+        "W-extra-2",
+        date="2018-02-02",
+        title="Foundations of Demonstration Selection",
+        abstract="Early work on selecting demonstrations for adaptation.",
+    )
+    refinement_reply = json.dumps(
+        {
+            "queries": [
+                {
+                    "family": "methods",
+                    "text": '"demonstration selection"',
+                }
+            ]
+        }
+    )
+    screening_extras = _screening_reply(
+        a=(s_extra_1.id, "relevant"),
+        b=(s_extra_2.id, "relevant"),
+    )
+    extract_extra_1 = json.dumps(
+        {
+            "source_id": s_extra_1.id,
+            "support_location": "abstract",
+            "sufficient_support": True,
+            "insufficiency_reason": "",
+            "methods": ["graph propagation"],
+            **_EMPTY_EXTRACTION_FIELDS,
+        }
+    )
+    extract_extra_2 = json.dumps(
+        {
+            "source_id": s_extra_2.id,
+            "support_location": "abstract",
+            "sufficient_support": True,
+            "insufficiency_reason": "",
+            "methods": ["selecting demonstrations"],
+            **_EMPTY_EXTRACTION_FIELDS,
+        }
+    )
+    replies = (
+        QUERIES_REPLY,
+        SCREENING_REPLY,
+        refinement_reply,
+        screening_extras,
+        EXTRACT_RECENT_REPLY,
+        EXTRACT_FOUNDATIONAL_REPLY,
+        extract_extra_1,
+        extract_extra_2,
+        FIELD_MAP_REPLY,
+        INVENTORY_REPLY,
+    )
+    refining_brief = ResearchBrief(
+        topic=BRIEF.topic,
+        cutoff_date=BRIEF.cutoff_date,
+        recent_window_start=BRIEF.recent_window_start,
+        workshop_hints=BRIEF.workshop_hints,
+        max_queries_per_family=1,
+        results_per_query=10,
+        max_screened_sources=10,
+        max_extracted_sources=10,
+        max_model_calls=20,
+        refinement_rounds=1,
+    )
+    mapper, provider, _, store, literature = _mapper(
+        tmp_path,
+        replies,
+        literature_outcomes=(*RETRIEVALS, _retrieved(s_extra_1, s_extra_2)),
+    )
+    result = mapper.run(refining_brief)
+
+    rounds = {e.refinement_round for e in result.query_executions}
+    assert rounds == {0, 1}
+    refined = next(
+        e for e in result.query_executions if e.refinement_round == 1
+    )
+    assert refined.text == '"demonstration selection"'
+    assert len(result.screenings) == 7  # 5 initial + 2 refined
+    assert len(result.extractions) == 5
+    assert len(provider.calls) == 10
+    assert result.assessment.metrics.relevant_sources == 5
+    # Still under the default bar of 8: the honest verdict stands.
+    assert result.assessment.status.value == "insufficient_coverage"
+    assert store.adequacy_for_run(result.run_record.run_id) == (
+        result.assessment
+    )
+    assert len(literature.queries) == 4
+
+
+def test_refinement_does_not_trigger_when_the_bar_is_met(
+    tmp_path: Path,
+) -> None:
+    from autonomous_research_lab.mapping.adequacy import AdequacyThresholds
+
+    provider = FakeModelProvider(HAPPY_REPLIES)
+    literature_provider = ScriptedLiteratureProvider(RETRIEVALS)
+    corpus = LiteratureCorpus(
+        LiteratureStore(tmp_path / "literature"), literature_provider
+    )
+    mapper = FieldMapper(
+        provider=provider,
+        model="fake-model",
+        ledger=UsageLedger(),
+        corpus=corpus,
+        store=MappingStore(tmp_path / "mapping"),
+        thresholds=AdequacyThresholds(
+            min_relevant_sources=2, min_grounded_sources=2
+        ),
+        max_output_tokens=4096,
+    )
+    refining_brief = ResearchBrief(
+        topic=BRIEF.topic,
+        cutoff_date=BRIEF.cutoff_date,
+        recent_window_start=BRIEF.recent_window_start,
+        max_queries_per_family=1,
+        results_per_query=10,
+        max_screened_sources=10,
+        max_extracted_sources=10,
+        max_model_calls=20,
+        refinement_rounds=1,
+    )
+    result = mapper.run(refining_brief)
+    assert {e.refinement_round for e in result.query_executions} == {0}
+    assert len(provider.calls) == 6  # no refinement call happened
+
+
+def test_the_run_records_an_adequacy_verdict_durably(
+    tmp_path: Path,
+) -> None:
+    from autonomous_research_lab.mapping.adequacy import (
+        AdequacyReasonCode,
+        AdequacyStatus,
+        InadequateFieldMapError,
+        require_adequate_for_idea_generation,
+    )
+
+    mapper, _, _, store, _ = _mapper(tmp_path, HAPPY_REPLIES)
+    result = mapper.run(BRIEF)
+
+    assessment = result.assessment
+    assert assessment.status is AdequacyStatus.INSUFFICIENT_COVERAGE
+    codes = {reason.code for reason in assessment.reasons}
+    assert AdequacyReasonCode.TOO_FEW_RELEVANT in codes
+
+    fresh = MappingStore(tmp_path / "mapping")
+    reloaded = fresh.adequacy_for_run(result.run_record.run_id)
+    assert reloaded == assessment
+    assert reloaded is not None
+    assert reloaded.reasons == assessment.reasons
+
+    with pytest.raises(InadequateFieldMapError):
+        require_adequate_for_idea_generation(fresh, assessment.id)
+    del store
