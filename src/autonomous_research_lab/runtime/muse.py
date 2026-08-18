@@ -3,7 +3,19 @@
 The one concrete :class:`~autonomous_research_lab.runtime.providers.
 ModelProvider`. Standard library HTTP only — the package keeps its
 zero-dependency promise, and every vendor-shaped object (URLs, wire
-payloads, urllib types) stays inside this module.
+payloads, ``http.client`` types) stays inside this module.
+
+The whole exchange runs under one wall-clock deadline. A per-socket-
+operation timeout restarts at every blocking primitive — TCP connect, each
+TLS-handshake read, each header read, each body read — so it bounds no sum:
+a server that dribbles bytes can hold a call open for an unbounded multiple
+of the configured timeout, which is exactly the >570-second stall observed
+live on 2026-08-18. The adapter therefore owns its connection and arms a
+watchdog that closes it at the absolute deadline; the per-operation socket
+timeout remains as a first fence. One residual is named rather than hidden:
+DNS resolution (``getaddrinfo``) runs before any socket exists, so no
+stdlib mechanism can interrupt it; everything after name resolution is
+under the deadline.
 
 Wire contract
 -------------
@@ -56,9 +68,11 @@ import http.client
 import json
 import math
 import os
+import socket
+import ssl
+import threading
 import time
-import urllib.error
-import urllib.request
+import urllib.parse
 from collections.abc import Iterable, Mapping
 from typing import Final, Protocol
 
@@ -125,55 +139,158 @@ class MuseSparkProvider(ModelProvider):
     def _post(
         self, payload: bytes, api_key: str, timeout: float
     ) -> tuple[bytes, Mapping[str, str]]:
-        """One HTTP exchange. urllib types enter and never leave."""
-        http_request = urllib.request.Request(
-            f"{self._base_url}/chat/completions",
-            data=payload,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            method="POST",
-        )
+        """One HTTP exchange under one wall-clock deadline.
+
+        ``http.client`` types enter and never leave. The deadline is
+        computed before the connection is opened, so connect, TLS
+        handshake, headers, body and any error-body drain all spend from
+        the same budget; the :class:`_DeadlineWatchdog` closes the
+        connection at the deadline, ending whichever blocking primitive is
+        in flight. A complete reply already in hand is returned even if
+        the timer fires during teardown — ``fired`` only reclassifies
+        exceptions, never a success.
+        """
         deadline = time.monotonic() + timeout
+        connection = _connect(self._base_url, timeout)
+        watchdog = _DeadlineWatchdog(connection, deadline)
         try:
-            with urllib.request.urlopen(http_request, timeout=timeout) as reply:
+            with watchdog:
+                connection.request(
+                    "POST",
+                    _endpoint_path(self._base_url),
+                    body=payload,
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                    },
+                )
+                reply = connection.getresponse()
+                headers = _lowered(reply.headers.items())
+                if not 200 <= reply.status < 300:
+                    # Redirects are not followed: the adapter posts to one
+                    # fixed endpoint, so a 3xx is as much a fault as a 5xx.
+                    raise _error_for_status(
+                        reply.status,
+                        headers,
+                        _drain_error_body(reply, deadline=deadline),
+                    )
                 body = _read_bounded(reply, deadline=deadline, timeout=timeout)
-                return body, _lowered(reply.headers.items())
-        except urllib.error.HTTPError as exc:
-            raw_headers = getattr(exc, "headers", None)
-            raise _error_for_status(
-                exc.code,
-                _lowered(raw_headers.items()) if raw_headers is not None else {},
-                _error_body(exc),
-            ) from exc
-        except urllib.error.URLError as exc:
-            if isinstance(exc.reason, TimeoutError):
-                raise ProviderTimeoutError(
-                    f"no reply from the Muse endpoint within {timeout}s",
-                    timeout_seconds=timeout,
-                ) from exc
-            raise ProviderTransportError(
-                f"could not reach the Muse endpoint: {exc.reason}"
-            ) from exc
+                return body, headers
+        except ModelProviderError:
+            raise  # already typed by this seam; never reclassified
         except TimeoutError as exc:
             raise ProviderTimeoutError(
                 f"no reply from the Muse endpoint within {timeout}s",
                 timeout_seconds=timeout,
             ) from exc
-        except http.client.HTTPException as exc:
-            # BadStatusLine, IncompleteRead, LineTooLong and kin are not
-            # OSError, so without this clause they would escape the seam
-            # untyped: a reply that cannot even be framed is a transport
-            # failure like any other.
-            raise ProviderTransportError(
-                f"malformed HTTP exchange with the Muse endpoint: "
-                f"{type(exc).__name__}: {exc}"
-            ) from exc
-        except OSError as exc:
-            raise ProviderTransportError(
-                f"could not reach the Muse endpoint: {exc}"
-            ) from exc
+        except (
+            http.client.HTTPException,
+            OSError,
+            ValueError,
+            AttributeError,
+        ) as exc:
+            # A watchdog close surfaces as whatever the interrupted
+            # primitive raises — EBADF, ECONNRESET, BadStatusLine, a
+            # "closed file" ValueError, or an AttributeError from a
+            # response whose file object was torn down mid-read. When the
+            # deadline caused it, the deadline is the diagnosis.
+            if watchdog.fired:
+                raise ProviderTimeoutError(
+                    f"no reply from the Muse endpoint within {timeout}s",
+                    timeout_seconds=timeout,
+                ) from exc
+            if isinstance(exc, http.client.HTTPException):
+                # BadStatusLine, IncompleteRead, LineTooLong and kin are
+                # not OSError, so without this clause they would escape
+                # the seam untyped: a reply that cannot even be framed is
+                # a transport failure like any other.
+                raise ProviderTransportError(
+                    f"malformed HTTP exchange with the Muse endpoint: "
+                    f"{type(exc).__name__}: {exc}"
+                ) from exc
+            if isinstance(exc, OSError):
+                raise ProviderTransportError(
+                    f"could not reach the Muse endpoint: {exc}"
+                ) from exc
+            raise
+        finally:
+            connection.close()
+
+
+# -- the connection and its deadline ------------------------------------------
+
+
+def _connect(base_url: str, timeout: float) -> http.client.HTTPConnection:
+    """One connection for the adapter's single POST, scheme-dispatched.
+
+    ``https`` gets certificate verification via
+    :func:`ssl.create_default_context`; plain ``http`` is kept for loopback
+    test servers. Any other scheme is local misconfiguration. The
+    ``timeout`` here is the per-socket-operation fence; the absolute
+    deadline is the :class:`_DeadlineWatchdog`'s job. Module-level on
+    purpose: this is the deterministic test seam.
+    """
+    split = urllib.parse.urlsplit(base_url)
+    if split.scheme == "https":
+        return http.client.HTTPSConnection(
+            split.netloc, timeout=timeout, context=ssl.create_default_context()
+        )
+    if split.scheme == "http":
+        return http.client.HTTPConnection(split.netloc, timeout=timeout)
+    raise ProviderConfigurationError(
+        f"unsupported Muse base URL scheme {split.scheme!r}: "
+        f"expected http or https"
+    )
+
+
+def _endpoint_path(base_url: str) -> str:
+    """The request target: the base URL's path plus the documented route."""
+    return f"{urllib.parse.urlsplit(base_url).path}/chat/completions"
+
+
+class _DeadlineWatchdog:
+    """Makes the wall-clock deadline real for the phases the socket timeout
+    cannot bound in sum: at the absolute deadline it closes the connection,
+    so a blocked TLS read, header read or body read raises immediately
+    instead of restarting a fresh per-operation timeout. ``fired`` tells
+    the caller whether a raised exception *is* the deadline.
+
+    One blocking primitive stays out of reach: while ``getaddrinfo`` /
+    TCP connect are still resolving there is no socket to close, so the
+    per-attempt socket timeout is the only bound on that phase.
+    """
+
+    def __init__(
+        self, connection: http.client.HTTPConnection, deadline: float
+    ) -> None:
+        self._connection = connection
+        self._fired = threading.Event()
+        self._timer = threading.Timer(
+            max(0.0, deadline - time.monotonic()), self._expire
+        )
+        self._timer.daemon = True
+
+    def __enter__(self) -> _DeadlineWatchdog:
+        self._timer.start()
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self._timer.cancel()
+
+    @property
+    def fired(self) -> bool:
+        return self._fired.is_set()
+
+    def _expire(self) -> None:
+        self._fired.set()
+        # shutdown() reliably wakes a recv blocked in another thread on
+        # every platform; close() alone may leave it blocked on some.
+        sock = getattr(self._connection, "sock", None)
+        if sock is not None:
+            with contextlib.suppress(OSError):
+                sock.shutdown(socket.SHUT_RDWR)
+        with contextlib.suppress(OSError):
+            self._connection.close()
 
 
 # -- request translation ------------------------------------------------------
@@ -462,8 +579,8 @@ def _retry_after(headers: Mapping[str, str]) -> float | None:
 
 
 def _lowered(items: Iterable[tuple[str, str]]) -> dict[str, str]:
-    """Header pairs as a plain lower-cased dict — the last urllib-shaped
-    object converted before anything leaves the adapter."""
+    """Header pairs as a plain lower-cased dict — the last stdlib-HTTP-
+    shaped object converted before anything leaves the adapter."""
     return {key.lower(): value for key, value in items}
 
 
@@ -474,10 +591,10 @@ class _Reader(Protocol):
 def _read_bounded(reply: _Reader, *, deadline: float, timeout: float) -> bytes:
     """The whole success body, bounded in both time and size.
 
-    urllib's ``timeout`` is a per-socket-operation limit, and a buffered
-    ``read(n)`` issues as many socket reads as it takes to fill ``n``
-    bytes — so a server dripping one byte per interval would never trip
-    either the socket timeout or a between-chunks clock check. Two
+    The connection's ``timeout`` is a per-socket-operation limit, and a
+    buffered ``read(n)`` issues as many socket reads as it takes to fill
+    ``n`` bytes — so a server dripping one byte per interval would never
+    trip either the socket timeout or a between-chunks clock check. Two
     measures make the deadline real: each iteration reads with ``read1``
     (at most one underlying socket read, buffer served first), so the
     deadline check runs between every socket operation; and the socket
@@ -514,28 +631,45 @@ def _tighten_timeout(reply: object, remaining: float) -> None:
     """Best effort: shrink the socket timeout to the remaining deadline so
     the next blocking read cannot overshoot it. Reaches through stdlib
     internals (``fp.raw._sock``) behind hasattr-style guards; when the
-    socket is not reachable this way, the per-operation timeout set at
-    ``urlopen`` still bounds the read."""
+    socket is not reachable this way, the connection's per-operation
+    timeout still bounds the read."""
     fp = getattr(reply, "fp", None)
     raw = getattr(fp, "raw", None)
     sock = getattr(raw, "_sock", None)
     settimeout = getattr(sock, "settimeout", None)
     if callable(settimeout):
-        # A socket mid-close may refuse; the urlopen timeout still holds.
+        # A socket mid-close may refuse; the connection timeout still holds.
         with contextlib.suppress(OSError):
             settimeout(remaining)
 
 
-def _error_body(exc: urllib.error.HTTPError) -> bytes:
-    """The error envelope, best effort and bounded.
+def _drain_error_body(reply: _Reader, *, deadline: float) -> bytes:
+    """The error envelope, best effort and bounded in size *and* time.
 
     The status and headers already classify the failure, so a body that
     cannot be read — stalled mid-drain, dropped, or absent — degrades to
     the status-code fallback rather than replacing a classified HTTP
-    failure with an untyped crash from inside the error handler.
+    failure with an untyped crash from inside the error handler. The drain
+    runs inside the watchdog window and checks the deadline between
+    chunks, so a server dripping an error body cannot hold the call open
+    past the deadline either.
     """
+    read_one = getattr(reply, "read1", None)
+    chunks = bytearray()
     try:
-        return exc.read(_MAX_ERROR_BODY_BYTES + 1)
+        while len(chunks) <= _MAX_ERROR_BODY_BYTES:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            _tighten_timeout(reply, remaining)
+            chunk: bytes = (
+                read_one(_CHUNK_BYTES)
+                if callable(read_one)
+                else reply.read(_CHUNK_BYTES)
+            )
+            if not chunk:
+                break
+            chunks += chunk
     except (
         TimeoutError,
         OSError,
@@ -543,4 +677,5 @@ def _error_body(exc: urllib.error.HTTPError) -> bytes:
         AttributeError,
         http.client.HTTPException,
     ):
-        return b""
+        pass
+    return bytes(chunks)

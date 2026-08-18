@@ -15,15 +15,11 @@ keys in this file are obvious dummies.
 from __future__ import annotations
 
 import http.client
-import io
 import json
 import socket
 import threading
 import time
-import urllib.error
-import urllib.request
 from collections.abc import Callable, Mapping
-from email.message import Message as EmailMessage
 from typing import Any, ClassVar
 
 import pytest
@@ -452,9 +448,12 @@ def test_the_credential_is_passed_verbatim_never_rewritten(
 
 
 class _FakeReply:
-    def __init__(self, body: bytes, headers: dict[str, str]) -> None:
+    def __init__(
+        self, body: bytes, headers: dict[str, str], *, status: int = 200
+    ) -> None:
         self._body = body
         self._offset = 0
+        self.status = status
         self.headers = headers
 
     def read(self, amount: int = -1) -> bytes:
@@ -464,44 +463,77 @@ class _FakeReply:
         self._offset += len(chunk)
         return chunk
 
-    def __enter__(self) -> _FakeReply:
-        return self
-
-    def __exit__(self, *exc_info: object) -> None:
-        return None
-
 
 class _DrippingReply:
     """A body that never ends: each read yields another chunk."""
 
+    status: ClassVar[int] = 200
     headers: ClassVar[dict[str, str]] = {}
 
     def read(self, amount: int = -1) -> bytes:
         return b"drip"
 
-    def __enter__(self) -> _DrippingReply:
-        return self
 
-    def __exit__(self, *exc_info: object) -> None:
-        return None
+class _FakeConnection:
+    """The ``_connect`` seam, captured: records the one request and serves
+    one scripted reply or raises one scripted exception."""
+
+    def __init__(
+        self, base_url: str, outcome: _FakeReply | _DrippingReply | Exception
+    ) -> None:
+        self.base_url = base_url
+        self.requests: list[tuple[str, str, bytes, dict[str, str]]] = []
+        self.closed = False
+        self._outcome = outcome
+
+    def request(
+        self,
+        method: str,
+        url: str,
+        body: bytes | None = None,
+        headers: Mapping[str, str] | None = None,
+    ) -> None:
+        self.requests.append((method, url, body or b"", dict(headers or {})))
+
+    def getresponse(self) -> _FakeReply | _DrippingReply:
+        if isinstance(self._outcome, Exception):
+            raise self._outcome
+        return self._outcome
+
+    def close(self) -> None:
+        self.closed = True
 
 
-def _stub_urlopen(
-    monkeypatch: pytest.MonkeyPatch, outcome: _FakeReply | Exception
-) -> list[urllib.request.Request]:
-    seen: list[urllib.request.Request] = []
+def _stub_connection(
+    monkeypatch: pytest.MonkeyPatch,
+    outcome: _FakeReply | _DrippingReply | Exception,
+) -> list[_FakeConnection]:
+    seen: list[_FakeConnection] = []
 
-    def fake_urlopen(
-        request: urllib.request.Request, *, timeout: float
-    ) -> _FakeReply:
-        seen.append(request)
-        if isinstance(outcome, Exception):
-            raise outcome
-        return outcome
+    def fake_connect(base_url: str, timeout: float) -> _FakeConnection:
+        connection = _FakeConnection(base_url, outcome)
+        seen.append(connection)
+        return connection
 
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(muse, "_connect", fake_connect)
     monkeypatch.setenv("MUSE_API_KEY", "dummy-not-a-real-key")
     return seen
+
+
+def test_the_connection_is_scheme_dispatched() -> None:
+    """Constructing an http.client connection opens no socket, so the real
+    _connect is testable offline."""
+    plain = muse._connect("http://127.0.0.1:1", 1.0)
+    assert isinstance(plain, http.client.HTTPConnection)
+    assert not isinstance(plain, http.client.HTTPSConnection)
+    secure = muse._connect("https://api.meta.ai/v1", 1.0)
+    assert isinstance(secure, http.client.HTTPSConnection)
+    with pytest.raises(ProviderConfigurationError, match="scheme"):
+        muse._connect("ftp://api.meta.ai/v1", 1.0)
+    assert muse._endpoint_path("https://api.meta.ai/v1") == (
+        "/v1/chat/completions"
+    )
+    assert muse._endpoint_path("http://127.0.0.1:8080") == "/chat/completions"
 
 
 def test_invoke_sends_the_documented_request_and_translates_the_reply(
@@ -510,26 +542,29 @@ def test_invoke_sends_the_documented_request_and_translates_the_reply(
     reply = _FakeReply(
         json.dumps(_SUCCESS_BODY).encode(), dict(_SUCCESS_HEADERS)
     )
-    seen = _stub_urlopen(monkeypatch, reply)
+    seen = _stub_connection(monkeypatch, reply)
 
     response = MuseSparkProvider().invoke(_request())
 
-    (sent,) = seen
-    assert sent.full_url == "https://api.meta.ai/v1/chat/completions"
-    assert sent.get_header("Authorization") == "Bearer dummy-not-a-real-key"
-    assert sent.get_header("Content-type") == "application/json"
-    assert isinstance(sent.data, bytes)
-    wire = json.loads(sent.data)
+    (connection,) = seen
+    assert connection.base_url == "https://api.meta.ai/v1"
+    ((method, path, body, headers),) = connection.requests
+    assert method == "POST"
+    assert path == "/v1/chat/completions"
+    assert headers["Authorization"] == "Bearer dummy-not-a-real-key"
+    assert headers["Content-Type"] == "application/json"
+    wire = json.loads(body)
     assert wire["model"] == "muse-spark-1.2"
     assert response.structured is not None
     assert response.usage.output_tokens == 1537
     assert response.latency_seconds >= 0.0
+    assert connection.closed  # the connection never outlives the call
 
 
 def test_a_socket_timeout_maps_to_the_timeout_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _stub_urlopen(monkeypatch, urllib.error.URLError(TimeoutError()))
+    _stub_connection(monkeypatch, TimeoutError())
 
     with pytest.raises(ProviderTimeoutError) as caught:
         MuseSparkProvider().invoke(_request(timeout_seconds=45.0))
@@ -539,10 +574,7 @@ def test_a_socket_timeout_maps_to_the_timeout_error(
 def test_an_unreachable_endpoint_maps_to_a_transport_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _stub_urlopen(
-        monkeypatch,
-        urllib.error.URLError(ConnectionRefusedError("connection refused")),
-    )
+    _stub_connection(monkeypatch, ConnectionRefusedError("connection refused"))
     with pytest.raises(ProviderTransportError, match="could not reach"):
         MuseSparkProvider().invoke(_request())
 
@@ -550,14 +582,10 @@ def test_an_unreachable_endpoint_maps_to_a_transport_error(
 def test_an_http_error_maps_through_the_observed_envelope(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    http_error = urllib.error.HTTPError(
-        "https://api.meta.ai/v1/chat/completions",
-        401,
-        "Unauthorized",
-        EmailMessage(),
-        io.BytesIO(_AUTH_ERROR),
+    reply = _FakeReply(
+        _AUTH_ERROR, {"content-type": "application/json"}, status=401
     )
-    _stub_urlopen(monkeypatch, http_error)
+    _stub_connection(monkeypatch, reply)
 
     with pytest.raises(ProviderTransportError) as caught:
         MuseSparkProvider().invoke(_request())
@@ -568,7 +596,7 @@ def test_an_http_error_maps_through_the_observed_envelope(
 def test_a_non_json_success_body_is_an_invalid_response(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _stub_urlopen(monkeypatch, _FakeReply(b"not json at all", {}))
+    _stub_connection(monkeypatch, _FakeReply(b"not json at all", {}))
 
     with pytest.raises(InvalidModelResponseError, match="not valid JSON"):
         MuseSparkProvider().invoke(_request())
@@ -591,7 +619,7 @@ def test_http_client_exceptions_map_to_transport_errors(
     """http.client's exception family is not OSError, so without an explicit
     clause a malformed status line or a connection dropped mid-body escapes
     the seam as a raw stdlib exception."""
-    _stub_urlopen(monkeypatch, exc)
+    _stub_connection(monkeypatch, exc)
 
     with pytest.raises(ProviderTransportError, match="malformed HTTP"):
         MuseSparkProvider().invoke(_request())
@@ -616,7 +644,7 @@ def test_truncated_reply_with_partial_content_is_invalid() -> None:
 def test_a_non_utf8_success_body_is_an_invalid_response(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _stub_urlopen(monkeypatch, _FakeReply(b"\xff\xfe\x01 not utf-8", {}))
+    _stub_connection(monkeypatch, _FakeReply(b"\xff\xfe\x01 not utf-8", {}))
 
     with pytest.raises(InvalidModelResponseError, match="not valid JSON"):
         MuseSparkProvider().invoke(_request())
@@ -625,7 +653,7 @@ def test_a_non_utf8_success_body_is_an_invalid_response(
 def test_a_dripping_body_hits_the_overall_deadline(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """urllib's timeout bounds each socket operation, not the exchange: a
+    """The socket timeout bounds each socket operation, not the exchange: a
     server dripping chunks forever must still hit ProviderTimeoutError once
     the whole-call deadline passes."""
     from types import SimpleNamespace
@@ -634,7 +662,7 @@ def test_a_dripping_body_hits_the_overall_deadline(
     monkeypatch.setattr(
         muse, "time", SimpleNamespace(monotonic=lambda: float(next(tick)))
     )
-    _stub_urlopen(monkeypatch, _DrippingReply())  # type: ignore[arg-type]
+    _stub_connection(monkeypatch, _DrippingReply())
 
     with pytest.raises(ProviderTimeoutError, match="did not complete"):
         MuseSparkProvider().invoke(_request(timeout_seconds=120.0))
@@ -644,7 +672,7 @@ def test_an_oversized_body_is_rejected_not_buffered(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(muse, "_MAX_BODY_BYTES", 64)
-    _stub_urlopen(monkeypatch, _FakeReply(b"x" * 200, {}))
+    _stub_connection(monkeypatch, _FakeReply(b"x" * 200, {}))
 
     with pytest.raises(InvalidModelResponseError, match="exceeds"):
         MuseSparkProvider().invoke(_request())
@@ -702,6 +730,69 @@ def test_a_genuinely_stalled_read_times_out(
     assert time.monotonic() - started < 3.0
 
 
+def test_a_dripping_status_line_hits_the_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The exact class of the >570-second live stall of 2026-08-18,
+    reproduced pre-body: every byte of the reply arrives within the
+    per-socket-operation window, so no single socket operation ever times
+    out, while the wall clock runs far past the requested deadline. Before
+    the watchdog, this call ran ~15x its configured timeout and then
+    SUCCEEDED; the deadline must end it instead."""
+
+    reply = (
+        b"HTTP/1.1 200 OK\r\n"
+        b"Content-Type: application/json\r\n"
+        b"Content-Length: 2\r\n\r\n{}"
+    )
+
+    def drip_status(conn: socket.socket) -> None:
+        try:
+            for index in range(len(reply)):
+                conn.sendall(reply[index : index + 1])
+                time.sleep(0.15)
+        except OSError:
+            pass  # the client gave up, which is the point
+
+    port = _serve_once(drip_status)
+    monkeypatch.setenv("MUSE_API_KEY", "dummy-not-a-real-key")
+    started = time.monotonic()
+
+    with pytest.raises(ProviderTimeoutError, match="within") as caught:
+        MuseSparkProvider(base_url=f"http://127.0.0.1:{port}").invoke(
+            _request(timeout_seconds=0.5)
+        )
+
+    assert time.monotonic() - started < 2.0  # the deadline is wall-clock real
+    assert caught.value.timeout_seconds == 0.5
+    # A call that never produced a body carries no accounting: unknown
+    # spend stays unknown, and the ledger declines to invent a zero.
+    assert caught.value.accounting is None
+    ledger = UsageLedger()
+    assert ledger.record_failure(caught.value) is False
+    assert ledger.drain() == ProviderUsage()
+
+
+def test_a_server_that_never_sends_a_status_line_times_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Total pre-body silence: the server accepts, reads the request, and
+    sends nothing. Bounded by the socket timeout and the watchdog alike."""
+
+    def silent(conn: socket.socket) -> None:
+        time.sleep(3.0)
+
+    port = _serve_once(silent)
+    monkeypatch.setenv("MUSE_API_KEY", "dummy-not-a-real-key")
+    started = time.monotonic()
+
+    with pytest.raises(ProviderTimeoutError, match="within"):
+        MuseSparkProvider(base_url=f"http://127.0.0.1:{port}").invoke(
+            _request(timeout_seconds=0.4)
+        )
+    assert time.monotonic() - started < 2.0
+
+
 def test_a_genuinely_dripping_body_hits_the_deadline(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -733,18 +824,19 @@ def test_a_genuinely_dripping_body_hits_the_deadline(
     assert time.monotonic() - started < 3.0
 
 
-class _ExplodingBody:
-    """An error body whose read raises — a stalled or dropped connection
-    while draining the envelope."""
+class _ExplodingReply:
+    """An error reply whose body read raises — a stalled or dropped
+    connection while draining the envelope."""
 
-    def __init__(self, error: Exception) -> None:
+    def __init__(
+        self, error: Exception, *, status: int, headers: dict[str, str]
+    ) -> None:
         self._error = error
+        self.status = status
+        self.headers = headers
 
     def read(self, amount: int = -1) -> bytes:
         raise self._error
-
-    def close(self) -> None:  # addinfourl closes its wrapped file on teardown
-        return None
 
 
 @pytest.mark.parametrize(
@@ -761,16 +853,10 @@ def test_an_unreadable_error_body_still_yields_a_typed_error(
     """The status and headers already classify the failure; a body that
     cannot be read must degrade to that classification, never escape the
     handler as an untyped exception."""
-    headers = EmailMessage()
-    headers["Retry-After"] = "7"
-    http_error = urllib.error.HTTPError(
-        "https://api.meta.ai/v1/chat/completions",
-        429,
-        "Too Many Requests",
-        headers,
-        _ExplodingBody(body_error),  # type: ignore[arg-type]
+    reply = _ExplodingReply(
+        body_error, status=429, headers={"retry-after": "7"}
     )
-    _stub_urlopen(monkeypatch, http_error)
+    _stub_connection(monkeypatch, reply)  # type: ignore[arg-type]
 
     with pytest.raises(ProviderRateLimitError) as caught:
         MuseSparkProvider().invoke(_request())
@@ -781,14 +867,7 @@ def test_an_unreadable_error_body_still_yields_a_typed_error(
 def test_an_http_error_without_headers_or_body_is_still_typed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    http_error = urllib.error.HTTPError(
-        "https://api.meta.ai/v1/chat/completions",
-        500,
-        "boom",
-        None,  # type: ignore[arg-type]  # observed shape: hdrs can be absent
-        None,
-    )
-    _stub_urlopen(monkeypatch, http_error)
+    _stub_connection(monkeypatch, _FakeReply(b"", {}, status=500))
 
     with pytest.raises(ProviderTransportError) as caught:
         MuseSparkProvider().invoke(_request())
@@ -924,7 +1003,7 @@ def test_a_failure_without_reported_usage_stays_unknown() -> None:
 def test_missing_configuration_raises_before_any_network_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    seen = _stub_urlopen(monkeypatch, _FakeReply(b"{}", {}))
+    seen = _stub_connection(monkeypatch, _FakeReply(b"{}", {}))
     for name in KEY_ENV_VARS:
         monkeypatch.delenv(name, raising=False)
 
