@@ -49,3 +49,12 @@ def test_routing_only_uses_the_three_runtime_seats() -> None:
         RoleName.RESEARCH_ENGINEER,
         RoleName.RESULT_ANALYST,
     }
+
+
+def test_planning_routes_to_the_scientist_seat() -> None:
+    assert route(ResearchActionType.PLAN_NEXT_ACTION) is (
+        RoleName.RESEARCH_DIRECTOR
+    )
+    assert expected_proposals(ResearchActionType.PLAN_NEXT_ACTION) == frozenset(
+        {ProposalKind.HYPOTHESIS, ProposalKind.PREDICTION, ProposalKind.EXPERIMENT}
+    )

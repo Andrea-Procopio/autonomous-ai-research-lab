@@ -39,7 +39,7 @@ the host.
 from __future__ import annotations
 
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Final, NoReturn
@@ -181,6 +181,9 @@ class ModelBackedEngineer(ResearchRole):
         store: ImplementationStore,
         binding: JobBinding,
         template: ImplementationTemplate,
+        template_resolver: (
+            Callable[[ExperimentSpec], ImplementationTemplate | None] | None
+        ) = None,
         max_output_tokens: int = 8192,
         temperature: float = 0.0,
         request_timeout_seconds: float = 240.0,
@@ -194,6 +197,7 @@ class ModelBackedEngineer(ResearchRole):
         self._store = store
         self._binding = binding
         self._template = template
+        self._template_resolver = template_resolver
         self._max_output_tokens = max_output_tokens
         self._temperature = temperature
         self._request_timeout_seconds = request_timeout_seconds
@@ -230,8 +234,9 @@ class ModelBackedEngineer(ResearchRole):
             )
         spec = _the_spec(invocation)
         seed = _seed_for(spec, invocation)
+        template = self._template_for(spec)
 
-        request = self._request(invocation, spec, seed)
+        request = self._request(invocation, spec, seed, template)
         response = self._invoke(request)
         # Bounded generation repair, the smallest model-backed response to
         # the one failure class observed live (reply text corrupted before
@@ -259,7 +264,15 @@ class ModelBackedEngineer(ResearchRole):
 
         source_id, source_dir = self._store.persist_source(files)
         implementation_id = self._implementation_id(
-            invocation, spec, source_id, files, seed, request, response, rationale
+            invocation,
+            spec,
+            source_id,
+            files,
+            seed,
+            request,
+            response,
+            rationale,
+            template,
         )
         job = self._binding.bind(
             spec_id=spec.id,
@@ -276,8 +289,8 @@ class ModelBackedEngineer(ResearchRole):
             invocation_id=invocation.id,
             action_type=action_type.value,
             spec_id=spec.id,
-            template_id=self._template.id,
-            template_sha256=self._template.sha256,
+            template_id=template.id,
+            template_sha256=template.sha256,
             source_id=source_id,
             manifest={f.path: f.sha256 for f in files},
             entrypoint=ENTRYPOINT,
@@ -312,8 +325,22 @@ class ModelBackedEngineer(ResearchRole):
 
     # -- the model call ------------------------------------------------------
 
+    def _template_for(self, spec: ExperimentSpec) -> ImplementationTemplate:
+        """The template this spec starts from: the resolver's answer when
+        one is wired and it knows the spec (planner-selected templates
+        reach the engineer this way), else the constructor's template."""
+        if self._template_resolver is not None:
+            resolved = self._template_resolver(spec)
+            if resolved is not None:
+                return resolved
+        return self._template
+
     def _request(
-        self, invocation: RoleInvocation, spec: ExperimentSpec, seed: int | None
+        self,
+        invocation: RoleInvocation,
+        spec: ExperimentSpec,
+        seed: int | None,
+        template: ImplementationTemplate,
     ) -> ModelRequest:
         return ModelRequest(
             model=self._model,
@@ -321,7 +348,7 @@ class ModelBackedEngineer(ResearchRole):
             messages=(
                 Message(
                     role=MessageRole.USER,
-                    content=_render_task(spec, seed, self._template),
+                    content=_render_task(spec, seed, template),
                 ),
             ),
             schema=PROPOSAL_SCHEMA,
@@ -397,6 +424,7 @@ class ModelBackedEngineer(ResearchRole):
         request: ModelRequest,
         response: ModelResponse,
         rationale: str,
+        template: ImplementationTemplate,
     ) -> str:
         """The record id, needed *before* the job exists so the job's config
         can carry it. Identity excludes binding output (command, config,
@@ -406,8 +434,8 @@ class ModelBackedEngineer(ResearchRole):
             invocation_id=invocation.id,
             action_type=invocation.assignment.action_type.value,
             spec_id=spec.id,
-            template_id=self._template.id,
-            template_sha256=self._template.sha256,
+            template_id=template.id,
+            template_sha256=template.sha256,
             source_id=source_id,
             manifest={f.path: f.sha256 for f in files},
             entrypoint=ENTRYPOINT,

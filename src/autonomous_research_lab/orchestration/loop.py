@@ -400,7 +400,9 @@ class ResearchRuntime:
         invocation = RoleInvocation(
             role=seat,
             assignment=action,
-            context=_context_for(state, self.store, self.verifications, action),
+            context=_context_for(
+                state, self.store, self.verifications, action, admissible
+            ),
             allowed_actions=frozenset({action.action_type}),
             expected_output=expected_proposals(action.action_type),
             budget=estimated,
@@ -1909,6 +1911,7 @@ def _context_for(
     store: EvidenceStore,
     verifications: VerificationStore,
     action: ResearchAction,
+    admissible: ScientificAdmissibility,
 ) -> RoleContext:
     """The projection each seat receives: exactly what the assignment needs.
 
@@ -1960,8 +1963,56 @@ def _context_for(
             return _synthesis_context(state, store, verifications, target)
         case ResearchActionType.ASSESS_CLAIM:
             return _assessment_context(state, store, verifications, target)
+        case ResearchActionType.PLAN_NEXT_ACTION:
+            return _planning_context(state, store, verifications, admissible)
         case _:
             return RoleContext(objective=state.objective)
+
+
+#: The explicit bound on how many of the most recent results the planning
+#: projection carries — the prompt stays finite as history grows.
+_MAX_PLANNING_RESULTS = 32
+
+
+def _planning_context(
+    state: ResearchState,
+    store: EvidenceStore,
+    verifications: VerificationStore,
+    admissible: ScientificAdmissibility,
+) -> RoleContext:
+    """The planner's deterministic, bounded projection: the whole
+    scientific chain from authoritative state, every piece of evidence
+    annotated with admissibility, standing notes and contradictions in the
+    notes, and the remaining budget — never conversation history."""
+    results = tuple(
+        store.get_result(ref.result_id)
+        for ref in state.results[-_MAX_PLANNING_RESULTS:]
+    )
+    evidence = tuple(
+        store.get_evidence(evidence_id) for evidence_id in state.evidence_ids
+    )
+    contradiction_notes = tuple(
+        f"contradiction: {c.subject_kind} {c.subject_id} — {c.detail}"
+        for c in find_contradictions(state, admissible=admissible)
+    )
+    return RoleContext(
+        objective=state.objective,
+        questions=state.questions,
+        hypotheses=state.hypotheses,
+        predictions=state.predictions,
+        prediction_tests=state.prediction_tests,
+        experiments=state.experiments,
+        results=results,
+        evidence=evidence,
+        claims=state.claims,
+        evidence_links=state.evidence_links,
+        assessments=state.assessments,
+        notes=(*_standing_notes(evidence, verifications), *contradiction_notes),
+        admissible_evidence_ids=tuple(
+            item.id for item in evidence if admissible(item.result_id)
+        ),
+        remaining_budget=state.budget,
+    )
 
 
 def _synthesis_context(

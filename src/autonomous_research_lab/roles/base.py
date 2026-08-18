@@ -47,7 +47,7 @@ from typing import Protocol
 
 from ..core.actions import ResearchAction, ResearchActionType
 from ..core.assessment import EpistemicAssessment
-from ..core.budget import NO_COST, ResourceCost
+from ..core.budget import NO_COST, ResearchBudget, ResourceCost
 from ..core.claim import Claim, EvidenceLink
 from ..core.evidence import Evidence
 from ..core.experiment import ExperimentResult, ExperimentSpec
@@ -156,6 +156,14 @@ class RoleContext:
     assessments: tuple[EpistemicAssessment, ...] = ()
     replication_groups: tuple[ReplicationGroup, ...] = ()
     notes: tuple[str, ...] = ()
+    admissible_evidence_ids: tuple[str, ...] = ()
+    """Ids of the evidence entries whose results stand as verified
+    scientific evidence — the projection of admissibility a role may rely
+    on. Evidence present but not listed here is observation, not proof."""
+
+    remaining_budget: ResearchBudget | None = None
+    """The program's remaining budget, when the invocation's work includes
+    judging affordability. ``None`` means the orchestrator withheld it."""
 
 
 @dataclass(frozen=True, slots=True)

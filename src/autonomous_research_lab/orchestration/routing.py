@@ -44,6 +44,7 @@ STATIC_ROUTES: Final[dict[ResearchActionType, RoleName]] = {
     _A.EXPLORE_ALTERNATIVE: _SCIENTIST,
     _A.SYNTHESIZE_FINDING: _SCIENTIST,
     _A.STOP_INVESTIGATION: _SCIENTIST,
+    _A.PLAN_NEXT_ACTION: _SCIENTIST,
     _A.IMPLEMENT: _EXECUTOR,
     _A.DEBUG: _EXECUTOR,
     _A.RUN_EXPERIMENT: _EXECUTOR,
@@ -74,6 +75,11 @@ _PROPOSALS: Final[dict[ResearchActionType, frozenset[ProposalKind]]] = {
     ),
     _A.SYNTHESIZE_FINDING: frozenset({ProposalKind.CLAIM}),
     _A.STOP_INVESTIGATION: frozenset(),
+    # One planning decision may introduce the full proposition chain it
+    # tests atomically; a replicate or stop decision returns no proposals.
+    _A.PLAN_NEXT_ACTION: frozenset(
+        {ProposalKind.HYPOTHESIS, ProposalKind.PREDICTION, ProposalKind.EXPERIMENT}
+    ),
     _A.IMPLEMENT: frozenset({ProposalKind.EXPERIMENT}),
     _A.DEBUG: frozenset({ProposalKind.RESULT, ProposalKind.EVIDENCE}),
     _A.RUN_EXPERIMENT: frozenset({ProposalKind.RESULT}),

@@ -481,10 +481,14 @@ The pieces, all removable for ablation:
   implementation dimension no longer fails — which still says nothing
   about its scientific outcome.
 * **Preflight** (`runtime/preflight.py`): cheap deterministic pre-execution
-  checks (command resolves, declared input paths exist, seed propagated)
-  behind a small extensible interface; a failed check prevents the launch
-  and bills nothing. Checks decide their own applicability — nothing is
-  assumed universal.
+  checks (command resolves, declared input paths exist, seed propagated,
+  the interpreter's `.pth` files are not hidden-flagged) behind a small
+  extensible interface; a failed check prevents the launch and bills
+  nothing. Checks decide their own applicability — nothing is assumed
+  universal. `PthFilesVisible` is diagnosis only: it names the externally
+  caused condition (CPython ≥ 3.11.9 skips hidden `.pth` files, so an
+  editable install vanishes from `sys.path`) and its remediation, and
+  mutates nothing itself.
 * **Positive controls** (`PositiveControl`): experiment-specific invariants
   a faithful implementation must satisfy (tiny set overfits, zero learning
   rate changes nothing, a known probe reads exactly right), evaluated
@@ -756,6 +760,57 @@ provider and served model, rationale, and the exact binding). The job's
 config carries the implementation id, which the executor round-trips into
 `ExperimentResult.config` — so result → exact executed bytes is a two-hop
 lookup through existing infrastructure, and `core/` is untouched.
+
+### The research planner: one decision, gated deterministically
+
+`ModelBackedPlanner` (`roles/planner.py`) is the second model-backed role,
+on the scientist seat, performing exactly one action type:
+`PLAN_NEXT_ACTION`. From a deterministic, bounded projection of the
+authoritative state — the scientific chain, every piece of evidence
+annotated ADMISSIBLE or INADMISSIBLE from the durable verification
+records, standing notes and contradictions, the remaining budget, and an
+explicitly supplied catalog of trusted templates with their measurable
+metrics — it selects exactly one next action: a **new falsifiable
+experiment**, a **replication** at the next unused declared seed, an
+**ablation** removing one named component of an existing procedure, or a
+**typed stop**. Never a plan, never a tree.
+
+Its authority is narrow the same way the engineer's is. The flat decision
+schema has no slot for an observed value, a command, a path, a dependency,
+or a container setting; experiment costs are stamped from the catalog,
+never taken from the reply; and because the supported schema subset has no
+`oneOf`, inapplicable fields carry typed sentinels that a deterministic
+gate checks mechanically — which is what makes "a stop hides no
+experiment" an equality test rather than prose. The gate
+(`check_decision`) rejects, with stable rule names, everything the charter
+forbids: unknown or mismatched ids, inadmissible evidence cited as
+grounds, unsupported templates or metrics, unfalsifiable predictions,
+duplicate experiments by content identity, replications off the
+deterministic seed policy (the exact seed `_seed_for` will pick),
+ablations without a valid parent or named component, budget violations,
+and internally inconsistent chains. A rejected decision is preserved
+durably and earns at most one corrective call carrying every rule that
+fired; scientific disagreement is not a rule, so a valid-but-unwelcome
+decision has no route to a second call. Accepted decisions expand
+deterministically into ordinary proposals — (hypothesis?, prediction,
+experiment), committed atomically by the existing `commit_bundle` — or
+into no proposals at all for replicate and stop, whose causal artifact is
+the durable `PlanningRecord` (`runtime/planning_store.py`: full provider
+provenance, write-once, with rejected attempts and dispatch markers
+beside it).
+
+The governance seam is `PlanningDirector`
+(`orchestration/planning.py`), a deterministic `FrontierDirector`: an open
+stop decision becomes `STOP_INVESTIGATION` through the loop's existing
+halt path with the typed reason in its rationale; a pending experiment
+becomes `RUN_EXPERIMENT` (how an accepted decision reaches the engineer);
+an open replicate decision with a live gap becomes `REPLICATE`; otherwise
+the planner is invoked. Decisions are dispatched exactly once, durably.
+The unmodified `ResearchRuntime` remains the one orchestration loop, every
+Tier-0 gate included; the engineer learns which template the planner chose
+through a wiring-time resolver reading the planning store, and stamps it
+into the implementation record — decision and implementation cross-check
+by template id.
 
 ## Evidence model
 

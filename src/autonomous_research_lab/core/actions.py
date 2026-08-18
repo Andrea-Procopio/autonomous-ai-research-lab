@@ -43,6 +43,10 @@ class ResearchActionType(StrEnum):
     SYNTHESIZE_FINDING = "synthesize_finding"
     ASSESS_CLAIM = "assess_claim"
     STOP_INVESTIGATION = "stop_investigation"
+    PLAN_NEXT_ACTION = "plan_next_action"
+    """Select exactly one next scientific action from the authoritative
+    state: a new falsifiable experiment, a replication, an ablation, or a
+    justified stop. One decision — never a multi-step plan."""
 
 
 @dataclass(frozen=True, slots=True)
