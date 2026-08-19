@@ -58,16 +58,23 @@ from ..mapping.gates import (
     check_coverage_language,
     check_text_integrity,
 )
+from .plan import (
+    FORBIDDEN_TERM_CHARACTERS,
+    FORBIDDEN_TERM_WORDS,
+    MAX_ALTERNATIVES_PER_GROUP,
+    MAX_CONCEPT_GROUPS,
+    MAX_RENDERED_CHARS,
+    MAX_TERM_CHARS,
+    MIN_TERM_CHARS,
+    canonical_groups,
+    normalized_term,
+    render_query,
+)
 from .records import (
     DIMENSIONS,
     PriorArtQueryFamily,
     SimilarityLabel,
 )
-
-#: Proposed query text must be a usable search string, not a sentence
-#: fragment or an essay.
-QUERY_TEXT_MIN_CHARS: Final = 3
-QUERY_TEXT_MAX_CHARS: Final = 300
 
 # Mirrors of the mapping gates' private number helpers, kept private here
 # for the same reason ideation keeps its own.
@@ -131,46 +138,86 @@ def _check_grounded_numbers(
 
 
 def check_prior_art_queries(
-    payload: Mapping[str, object], *, max_queries_per_family: int
+    payload: Mapping[str, object],
+    *,
+    max_queries_per_family: int,
+    candidate_haystack: str,
 ) -> tuple[MappingRejection, ...]:
-    """The query gate: every family covered, every text a bounded,
-    uncorrupted search string, no family over budget, no duplicates.
-    Dates never appear here — trusted code owns them."""
+    """The query-plan gate: every family covered, every plan a bounded
+    set of concept groups whose Boolean meaning is explicit. The model
+    supplies plain terms only — groups are conjoined, alternatives
+    within a group are alternatives, and trusted code renders the one
+    expression that structure means. A final query string cannot be
+    expressed here at all, so whitespace can no longer silently decide
+    Boolean behavior (the Task 5D live defect). Dates never appear —
+    trusted code owns them."""
     rejections: list[MappingRejection] = []
     per_family: dict[str, int] = {}
-    seen: set[tuple[str, str]] = set()
+    seen_plans: set[tuple[str, tuple[tuple[str, ...], ...]]] = set()
+    haystack = " ".join(candidate_haystack.casefold().split())
     for index, item in enumerate(_sequence(payload["queries"])):
         assert isinstance(item, Mapping)
         where = f"queries[{index}]"
         family = str(item["family"])
-        text = str(item["text"])
         per_family[family] = per_family.get(family, 0) + 1
-        if not text.strip():
-            rejections.append(
-                MappingRejection("empty_finding", f"{where} is empty")
-            )
-            continue
-        check_text_integrity(text, where, rejections)
-        if not (
-            QUERY_TEXT_MIN_CHARS <= len(text.strip()) <= QUERY_TEXT_MAX_CHARS
-        ):
+        groups = _plan_groups(item)
+        if not groups:
             rejections.append(
                 MappingRejection(
-                    "malformed_finding",
-                    f"{where} must be {QUERY_TEXT_MIN_CHARS}.."
-                    f"{QUERY_TEXT_MAX_CHARS} characters of plain search "
-                    f"text, got {len(text.strip())}",
+                    "empty_finding",
+                    f"{where} proposes no concept groups; a search names "
+                    f"at least one concept",
                 )
             )
-        key = (family, _normalized(text))
-        if key in seen:
+            continue
+        if len(groups) > MAX_CONCEPT_GROUPS:
+            rejections.append(
+                MappingRejection(
+                    "excessive_conjunctivity",
+                    f"{where} conjoins {len(groups)} concept groups; at "
+                    f"most {MAX_CONCEPT_GROUPS} are allowed — every group "
+                    f"is a simultaneous requirement, and over-conjoined "
+                    f"searches return nothing (the Task 5D live failure); "
+                    f"drop groups or fold terms into one group's "
+                    f"alternatives",
+                )
+            )
+        plan_ok = _check_groups(groups, where, rejections)
+        if not plan_ok:
+            continue
+        rendered = render_query(groups)
+        if len(rendered) > MAX_RENDERED_CHARS:
+            rejections.append(
+                MappingRejection(
+                    "budget_violation",
+                    f"{where} renders to {len(rendered)} characters; the "
+                    f"bound is {MAX_RENDERED_CHARS} — use fewer or "
+                    f"shorter alternatives",
+                )
+            )
+        anchored = any(
+            normalized_term(term) in haystack
+            for group in groups
+            for term in group
+        )
+        if not anchored:
+            rejections.append(
+                MappingRejection(
+                    "missing_support",
+                    f"{where} has no candidate-specific anchor: no "
+                    f"alternative appears in the candidate's own record; "
+                    f"ground at least one group in the candidate's terms",
+                )
+            )
+        key = (family, canonical_groups(groups))
+        if key in seen_plans:
             rejections.append(
                 MappingRejection(
                     "duplicate_finding",
-                    f"{where} duplicates an earlier query in its family",
+                    f"{where} duplicates an earlier plan in its family",
                 )
             )
-        seen.add(key)
+        seen_plans.add(key)
     for family in PriorArtQueryFamily:
         count = per_family.get(family.value, 0)
         if count == 0:
@@ -190,6 +237,115 @@ def check_prior_art_queries(
                 )
             )
     return tuple(rejections)
+
+
+def _plan_groups(item: Mapping[str, object]) -> tuple[tuple[str, ...], ...]:
+    groups = []
+    for group in _sequence(item["groups"]):
+        assert isinstance(group, Mapping)
+        groups.append(
+            tuple(str(term) for term in _sequence(group["alternatives"]))
+        )
+    return tuple(groups)
+
+
+def _check_groups(
+    groups: tuple[tuple[str, ...], ...],
+    where: str,
+    rejections: list[MappingRejection],
+) -> bool:
+    """Every term a plain, bounded, uncorrupted phrase; every group a
+    non-empty set of distinct alternatives; no group repeated. Returns
+    False when the plan is too malformed to render meaningfully."""
+    ok = True
+    seen_groups: set[tuple[str, ...]] = set()
+    for group_index, group in enumerate(groups):
+        group_where = f"{where}.groups[{group_index}]"
+        if not group:
+            rejections.append(
+                MappingRejection(
+                    "empty_finding",
+                    f"{group_where} offers no alternatives; a concept "
+                    f"group names at least one term",
+                )
+            )
+            ok = False
+            continue
+        if len(group) > MAX_ALTERNATIVES_PER_GROUP:
+            rejections.append(
+                MappingRejection(
+                    "budget_violation",
+                    f"{group_where} offers {len(group)} alternatives; at "
+                    f"most {MAX_ALTERNATIVES_PER_GROUP} are allowed — "
+                    f"alternatives are synonyms for one concept, not a "
+                    f"topic list",
+                )
+            )
+        seen_terms: set[str] = set()
+        for term_index, term in enumerate(group):
+            term_where = f"{group_where}.alternatives[{term_index}]"
+            if not term.strip():
+                rejections.append(
+                    MappingRejection(
+                        "empty_finding", f"{term_where} is empty"
+                    )
+                )
+                ok = False
+                continue
+            check_text_integrity(term, term_where, rejections)
+            stripped = term.strip()
+            if not (MIN_TERM_CHARS <= len(stripped) <= MAX_TERM_CHARS):
+                rejections.append(
+                    MappingRejection(
+                        "malformed_finding",
+                        f"{term_where} must be {MIN_TERM_CHARS}.."
+                        f"{MAX_TERM_CHARS} characters of plain search "
+                        f"text, got {len(stripped)}",
+                    )
+                )
+            bad_characters = sorted(
+                set(stripped) & FORBIDDEN_TERM_CHARACTERS
+            )
+            bad_words = sorted(
+                {
+                    word
+                    for word in stripped.casefold().split()
+                    if word in FORBIDDEN_TERM_WORDS
+                }
+            )
+            if bad_characters or bad_words:
+                offending = ", ".join(
+                    (*map(repr, bad_characters), *map(repr, bad_words))
+                )
+                rejections.append(
+                    MappingRejection(
+                        "unsupported_syntax",
+                        f"{term_where} carries Boolean, wildcard, or "
+                        f"quoting syntax ({offending}); supply plain "
+                        f"terms — structure comes from the groups, and "
+                        f"trusted code renders the operators",
+                    )
+                )
+            key = normalized_term(term)
+            if key in seen_terms:
+                rejections.append(
+                    MappingRejection(
+                        "duplicate_finding",
+                        f"{term_where} duplicates an earlier alternative "
+                        f"in its group",
+                    )
+                )
+            seen_terms.add(key)
+        group_key = tuple(sorted(seen_terms))
+        if group_key and group_key in seen_groups:
+            rejections.append(
+                MappingRejection(
+                    "duplicate_finding",
+                    f"{group_where} repeats an earlier concept group",
+                )
+            )
+        seen_groups.add(group_key)
+    return ok
 
 
 def check_similarity_screening(

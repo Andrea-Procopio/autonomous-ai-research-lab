@@ -56,47 +56,89 @@ def _rules(rejections: tuple[MappingRejection, ...]) -> set[str]:
     return {entry.rule for entry in rejections}
 
 
-# -- the query gate -----------------------------------------------------------
+# -- the query-plan gate ------------------------------------------------------
+
+#: What the candidate's rendered record contains — plan anchors are
+#: checked against this.
+CANDIDATE_HAYSTACK = (
+    "reweights attention heads to select semantic induction heads for "
+    "in-context learning via prefix matching and copying; search "
+    "terms: attention head reweighting; head ablation"
+)
 
 
-def _queries_payload(
-    **replacements: str,
-) -> dict[str, list[dict[str, str]]]:
-    texts = {
-        "mechanism": "attention head reweighting scalars",
-        "problem_mechanism": "in-context learning head reweighting",
-        "evaluation_setup": "prefix matching copying accuracy benchmark",
-        "synonyms_legacy": "soft head masking gating",
-        "competing_approaches": "head pruning LoRA adapters",
-        "recent": "attention head reweighting",
+def _group(*alternatives: str) -> dict[str, list[str]]:
+    return {"alternatives": list(alternatives)}
+
+
+def _plan(
+    family: str, *groups: dict[str, list[str]]
+) -> dict[str, object]:
+    return {"family": family, "groups": list(groups)}
+
+
+def _plans_payload(
+    **replacements: dict[str, object],
+) -> dict[str, list[dict[str, object]]]:
+    plans = {
+        "mechanism": _plan(
+            "mechanism",
+            _group("attention head reweighting", "head gating"),
+            _group("induction heads"),
+        ),
+        "problem_mechanism": _plan(
+            "problem_mechanism",
+            _group("in-context learning"),
+            _group("attention head reweighting"),
+        ),
+        "evaluation_setup": _plan(
+            "evaluation_setup",
+            _group("prefix matching", "copying"),
+            _group("in-context learning"),
+        ),
+        "synonyms_legacy": _plan(
+            "synonyms_legacy",
+            _group("attention heads"),
+            _group("soft masking", "gating", "pruning"),
+        ),
+        "competing_approaches": _plan(
+            "competing_approaches",
+            _group("attention heads"),
+            _group("LoRA", "adapters", "head pruning"),
+        ),
+        "recent": _plan(
+            "recent", _group("attention head reweighting")
+        ),
     }
-    texts.update(replacements)
-    return {
-        "queries": [
-            {"family": family, "text": text}
-            for family, text in texts.items()
-        ]
-    }
+    plans.update(replacements)
+    return {"queries": list(plans.values())}
 
 
-def test_a_full_query_slate_passes() -> None:
-    assert (
-        check_prior_art_queries(
-            _queries_payload(), max_queries_per_family=1
-        )
-        == ()
+def _check_queries(
+    payload: dict[str, list[dict[str, object]]],
+    *,
+    max_queries_per_family: int = 1,
+) -> tuple[MappingRejection, ...]:
+    return check_prior_art_queries(
+        payload,
+        max_queries_per_family=max_queries_per_family,
+        candidate_haystack=CANDIDATE_HAYSTACK,
     )
+
+
+def test_a_full_plan_slate_passes() -> None:
+    assert _check_queries(_plans_payload()) == ()
 
 
 def test_a_missing_family_is_rejected() -> None:
     payload = {
         "queries": [
-            entry
-            for entry in _queries_payload()["queries"]
-            if entry["family"] != "synonyms_legacy"
+            plan
+            for plan in _plans_payload()["queries"]
+            if plan["family"] != "synonyms_legacy"
         ]
     }
-    rejections = check_prior_art_queries(payload, max_queries_per_family=1)
+    rejections = _check_queries(payload)
     assert _rules(rejections) == {"missing_family"}
     assert "synonyms_legacy" in rejections[0].detail
 
@@ -104,47 +146,134 @@ def test_a_missing_family_is_rejected() -> None:
 def test_an_over_budget_family_is_rejected() -> None:
     payload = {
         "queries": [
-            *_queries_payload()["queries"],
-            {"family": "recent", "text": "another recent query"},
+            *_plans_payload()["queries"],
+            _plan("recent", _group("induction heads")),
         ]
     }
-    assert _rules(
-        check_prior_art_queries(payload, max_queries_per_family=1)
-    ) == {"budget_violation"}
+    assert _rules(_check_queries(payload)) == {"budget_violation"}
 
 
-def test_duplicate_queries_are_rejected() -> None:
+def test_a_reordered_duplicate_plan_is_still_a_duplicate() -> None:
+    # Canonicalization makes ordering non-semantic: the same plan with
+    # groups and alternatives shuffled is the same plan.
     payload = {
         "queries": [
-            *_queries_payload()["queries"],
-            {"family": "recent", "text": "Attention  Head\tReweighting"},
+            *_plans_payload()["queries"],
+            _plan(
+                "mechanism",
+                _group("Induction Heads"),
+                _group("head gating", "attention head reweighting"),
+            ),
         ]
     }
-    assert "duplicate_finding" in _rules(
-        check_prior_art_queries(payload, max_queries_per_family=2)
+    rejections = _check_queries(payload, max_queries_per_family=2)
+    assert "duplicate_finding" in _rules(rejections)
+
+
+def test_the_observed_failure_shape_cannot_execute() -> None:
+    # The Task 5D live defect: ten-plus terms intended as one search.
+    # As ten conjoined groups it is excessive conjunctivity; as one
+    # opaque string it is not expressible in the schema at all.
+    terms = (
+        "learned",
+        "attention",
+        "head",
+        "reweighting",
+        "scalars",
+        "semantic",
+        "induction",
+        "heads",
+        "prefix matching",
+        "copying",
     )
+    payload = _plans_payload(
+        mechanism=_plan("mechanism", *(_group(term) for term in terms))
+    )
+    rejections = _check_queries(payload)
+    assert "excessive_conjunctivity" in _rules(rejections)
 
 
-def test_query_text_bounds_are_enforced() -> None:
-    assert "empty_finding" in _rules(
-        check_prior_art_queries(
-            _queries_payload(recent="  "), max_queries_per_family=1
+def test_group_and_term_bounds_are_enforced() -> None:
+    over_alternatives = _plans_payload(
+        recent=_plan(
+            "recent",
+            _group("attention heads", "a1", "a2", "a3", "a4"),
         )
     )
-    assert "malformed_finding" in _rules(
-        check_prior_art_queries(
-            _queries_payload(recent="x" * 301), max_queries_per_family=1
-        )
+    assert "budget_violation" in _rules(_check_queries(over_alternatives))
+    too_long = _plans_payload(
+        recent=_plan("recent", _group("attention heads", "x" * 61))
     )
+    assert "malformed_finding" in _rules(_check_queries(too_long))
+    empty_group = _plans_payload(
+        recent=_plan("recent", _group("attention heads"), _group())
+    )
+    assert "empty_finding" in _rules(_check_queries(empty_group))
+    no_groups = _plans_payload(recent=_plan("recent"))
+    assert "empty_finding" in _rules(_check_queries(no_groups))
+    blank_term = _plans_payload(
+        recent=_plan("recent", _group("attention heads", "  "))
+    )
+    assert "empty_finding" in _rules(_check_queries(blank_term))
 
 
-def test_control_characters_in_queries_are_rejected() -> None:
-    assert "corrupted_text" in _rules(
-        check_prior_art_queries(
-            _queries_payload(recent="reweighting\x00heads"),
-            max_queries_per_family=1,
+def test_boolean_syntax_in_terms_is_rejected() -> None:
+    for bad in (
+        'induction "heads"',
+        "(induction heads)",
+        "induction OR heads",
+        "heads AND reweighting",
+        "not heads",
+        "induction head*",
+        "heads | gating",
+        "heads~2",
+    ):
+        payload = _plans_payload(
+            recent=_plan("recent", _group("attention heads", bad))
+        )
+        assert "unsupported_syntax" in _rules(_check_queries(payload)), bad
+
+
+def test_duplicate_alternatives_after_normalization_are_rejected() -> None:
+    payload = _plans_payload(
+        recent=_plan(
+            "recent",
+            _group("attention heads", "Attention  Heads"),
         )
     )
+    assert "duplicate_finding" in _rules(_check_queries(payload))
+
+
+def test_a_plan_without_a_candidate_anchor_is_rejected() -> None:
+    payload = _plans_payload(
+        recent=_plan(
+            "recent",
+            _group("protein folding"),
+            _group("crystallography"),
+        )
+    )
+    rejections = _check_queries(payload)
+    assert "missing_support" in _rules(rejections)
+    assert "anchor" in "; ".join(r.detail for r in rejections)
+
+
+def test_an_over_rendered_plan_is_rejected_before_execution() -> None:
+    # Every alternative legal on its own, but the rendered expression
+    # exceeds the ceiling: rejected deterministically, never truncated.
+    wide = [
+        _group(*(f"some formidable established phrase {g}{a}" for a in range(4)))
+        for g in range(3)
+    ]
+    wide[0]["alternatives"][0] = "attention head reweighting"
+    payload = _plans_payload(recent=_plan("recent", *wide))
+    assert "budget_violation" in _rules(_check_queries(payload))
+
+
+def test_control_characters_in_terms_are_rejected() -> None:
+    payload = _plans_payload(
+        recent=_plan("recent", _group("attention\x00heads"))
+    )
+    assert "corrupted_text" in _rules(_check_queries(payload))
 
 
 # -- the screening gate -------------------------------------------------------

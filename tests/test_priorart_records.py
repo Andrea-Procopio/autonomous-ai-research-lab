@@ -250,6 +250,41 @@ def test_a_query_execution_records_the_executed_text() -> None:
         )
 
 
+def test_plan_provenance_binds_plan_and_renderer() -> None:
+    def _execution(**overrides: object) -> PriorArtQueryExecution:
+        defaults: dict[str, object] = {
+            "run_id": "pac_1",
+            "candidate_id": "idea_1",
+            "family": PriorArtQueryFamily.MECHANISM,
+            "text": '("attention head reweighting")',
+            "from_date": "",
+            "to_date": "2026-08-18",
+            "query_fingerprint": "litq_1",
+            "search_record_id": "lits_1",
+            "retrieved": 5,
+            "new_unique": 4,
+            "from_cache": False,
+            "ordering": ResultOrdering.INFLUENCE,
+        }
+        defaults.update(overrides)
+        return PriorArtQueryExecution(**defaults)  # type: ignore[arg-type]
+
+    planned = _execution(
+        plan_groups=(("attention head reweighting",),),
+        renderer="boolean-v1",
+    )
+    legacy = _execution()
+    # A plan without its renderer (or vice versa) is unconstructible.
+    with pytest.raises(ValueError, match="renderer"):
+        _execution(plan_groups=(("term",),))
+    with pytest.raises(ValueError, match="renderer"):
+        _execution(renderer="boolean-v1")
+    # The plan joins the identity only when present, so a pre-5D.1
+    # record keeps deriving its original id.
+    assert planned.id != legacy.id
+    assert legacy.id == _execution().id
+
+
 # -- screening ----------------------------------------------------------------
 
 

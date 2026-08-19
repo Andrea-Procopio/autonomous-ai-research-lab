@@ -407,7 +407,7 @@ def _directive_from(payload: Mapping[str, object]) -> PriorArtDirective:
 
 
 def _execution_payload(record: PriorArtQueryExecution) -> dict[str, object]:
-    return {
+    payload: dict[str, object] = {
         "id": record.id,
         "run_id": record.run_id,
         "candidate_id": record.candidate_id,
@@ -422,6 +422,14 @@ def _execution_payload(record: PriorArtQueryExecution) -> dict[str, object]:
         "from_cache": record.from_cache,
         "ordering": record.ordering.value,
     }
+    # Pre-5D.1 records carried no plan; the keys appear only when the
+    # fields do, so the old files stay byte-identical and re-derivable.
+    if record.plan_groups or record.renderer:
+        payload["plan_groups"] = [
+            list(group) for group in record.plan_groups
+        ]
+        payload["renderer"] = record.renderer
+    return payload
 
 
 def _execution_from(payload: Mapping[str, object]) -> PriorArtQueryExecution:
@@ -438,7 +446,17 @@ def _execution_from(payload: Mapping[str, object]) -> PriorArtQueryExecution:
         new_unique=int(str(payload["new_unique"])),
         from_cache=bool(payload["from_cache"]),
         ordering=ResultOrdering(str(payload["ordering"])),
+        plan_groups=tuple(
+            _strings(group) for group in _group_lists(payload)
+        ),
+        renderer=str(payload.get("renderer", "")),
     )
+
+
+def _group_lists(payload: Mapping[str, object]) -> list[object]:
+    groups = payload.get("plan_groups", [])
+    assert isinstance(groups, list)
+    return groups
 
 
 def _screening_payload(record: PriorArtScreeningRecord) -> dict[str, object]:

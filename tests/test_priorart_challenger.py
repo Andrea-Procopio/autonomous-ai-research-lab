@@ -266,14 +266,49 @@ RETRIEVALS: tuple[RetrievedSearch, ...] = (
     _retrieved(),
 )
 
-QUERY_REPLY = json.dumps(
-    {
-        "queries": [
-            {"family": family.value, "text": f"probe {family.value}"}
-            for family in PriorArtQueryFamily
-        ]
-    }
-)
+#: One distinct, candidate-anchored plan per family, so every
+#: rendered query fingerprints distinctly.
+PLAN_GROUPS: dict[str, list[list[str]]] = {
+    "mechanism": [["attention head reweighting", "head gating"]],
+    "problem_mechanism": [
+        ["in-context learning"],
+        ["attention head reweighting"],
+    ],
+    "evaluation_setup": [
+        ["held-out probes", "probe tasks"],
+        ["induction heads"],
+    ],
+    "synonyms_legacy": [
+        ["head gating", "head masking", "head pruning"],
+        ["induction heads"],
+    ],
+    "competing_approaches": [
+        ["LoRA", "adapters"],
+        ["attention head reweighting"],
+    ],
+    "recent": [["attention head reweighting"]],
+}
+
+
+def _query_reply(families: tuple[str, ...] | None = None) -> str:
+    chosen = families or tuple(f.value for f in PriorArtQueryFamily)
+    return json.dumps(
+        {
+            "queries": [
+                {
+                    "family": family,
+                    "groups": [
+                        {"alternatives": list(group)}
+                        for group in PLAN_GROUPS[family]
+                    ],
+                }
+                for family in chosen
+            ]
+        }
+    )
+
+
+QUERY_REPLY = _query_reply()
 
 
 def _screen_entry(source_id: str, decision: str) -> dict[str, str]:
@@ -598,14 +633,12 @@ def test_a_schema_violation_earns_one_bounded_correction(
 def test_a_gate_rejection_earns_one_bounded_correction(
     tmp_path: Path,
 ) -> None:
-    missing_family = json.dumps(
-        {
-            "queries": [
-                {"family": family.value, "text": f"probe {family.value}"}
-                for family in PriorArtQueryFamily
-                if family is not PriorArtQueryFamily.SYNONYMS_LEGACY
-            ]
-        }
+    missing_family = _query_reply(
+        tuple(
+            family.value
+            for family in PriorArtQueryFamily
+            if family is not PriorArtQueryFamily.SYNONYMS_LEGACY
+        )
     )
     challenger, provider, _, store, _, record_id = _challenger(
         tmp_path, (missing_family, *HAPPY_REPLIES)
@@ -621,14 +654,12 @@ def test_a_gate_rejection_earns_one_bounded_correction(
 def test_gate_exhaustion_fails_closed_with_everything_preserved(
     tmp_path: Path,
 ) -> None:
-    missing_family = json.dumps(
-        {
-            "queries": [
-                {"family": family.value, "text": f"probe {family.value}"}
-                for family in PriorArtQueryFamily
-                if family is not PriorArtQueryFamily.SYNONYMS_LEGACY
-            ]
-        }
+    missing_family = _query_reply(
+        tuple(
+            family.value
+            for family in PriorArtQueryFamily
+            if family is not PriorArtQueryFamily.SYNONYMS_LEGACY
+        )
     )
     challenger, provider, _, store, _, record_id = _challenger(
         tmp_path, (missing_family, missing_family)
@@ -768,3 +799,58 @@ def test_requests_are_deterministic_across_runs(tmp_path: Path) -> None:
     assert [c.fingerprint for c in first_provider.calls] == [
         c.fingerprint for c in second_provider.calls
     ]
+
+
+def test_the_executed_query_is_the_rendered_boolean(
+    tmp_path: Path,
+) -> None:
+    # The model proposed groups; what actually executed is the trusted
+    # renderer's Boolean expression, recorded with its plan and version.
+    challenger, _, _, _, scripted, record_id = _challenger(
+        tmp_path, HAPPY_REPLIES
+    )
+    result = challenger.run(_directive(ideation_run_record_id=record_id))
+    by_family = {e.family.value: e for e in result.executions}
+    mechanism = by_family["mechanism"]
+    assert mechanism.text == (
+        '("attention head reweighting" OR "head gating")'
+    )
+    assert mechanism.plan_groups == (
+        ("attention head reweighting", "head gating"),
+    )
+    assert mechanism.renderer == "boolean-v1"
+    executed = {query.text for query in scripted.queries}
+    assert mechanism.text in executed
+    conjunctive = by_family["problem_mechanism"]
+    assert conjunctive.text == (
+        '("attention head reweighting") AND ("in-context learning")'
+    )
+
+
+def test_an_opaque_query_string_is_not_expressible(
+    tmp_path: Path,
+) -> None:
+    # The Task 5D failure shape as a raw string: the schema has no text
+    # field, so the reply is a schema violation, not a search.
+    opaque = json.dumps(
+        {
+            "queries": [
+                {
+                    "family": family.value,
+                    "text": "learned attention head reweighting scalars "
+                    "semantic induction heads prefix matching copying",
+                }
+                for family in PriorArtQueryFamily
+            ]
+        }
+    )
+    challenger, provider, _, store, _, record_id = _challenger(
+        tmp_path, (opaque, *HAPPY_REPLIES)
+    )
+    result = challenger.run(_directive(ideation_run_record_id=record_id))
+    (rejected,) = store.rejected()
+    assert rejected["stage"] == "queries"
+    assert _rules_of(rejected) == {"invalid_structured_output"}
+    assert len(provider.calls) == 4
+    (assessment,) = result.assessments
+    assert assessment.verdict is PriorArtVerdict.DISTINGUISHED

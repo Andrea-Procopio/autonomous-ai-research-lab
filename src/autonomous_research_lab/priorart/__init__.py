@@ -57,11 +57,20 @@ from .directive import (
     PriorArtDirective,
 )
 from .gates import (
-    QUERY_TEXT_MAX_CHARS,
-    QUERY_TEXT_MIN_CHARS,
     check_comparisons,
     check_prior_art_queries,
     check_similarity_screening,
+)
+from .plan import (
+    MAX_ALTERNATIVES_PER_GROUP,
+    MAX_CONCEPT_GROUPS,
+    MAX_RENDERED_CHARS,
+    MAX_TERM_CHARS,
+    MIN_TERM_CHARS,
+    RENDERER_VERSION,
+    REQUIRED_INTENTS,
+    canonical_groups,
+    render_query,
 )
 from .records import (
     CLAIM_KINDS,
@@ -89,12 +98,17 @@ __all__ = [
     "COMPARISON_INSTRUCTION",
     "COMPARISON_SCHEMA",
     "DIMENSIONS",
+    "MAX_ALTERNATIVES_PER_GROUP",
+    "MAX_CONCEPT_GROUPS",
+    "MAX_RENDERED_CHARS",
+    "MAX_TERM_CHARS",
+    "MIN_TERM_CHARS",
     "MODEL_CALLS_CEILING",
     "PRIOR_ART_QUERY_SCHEMA",
     "PRIOR_ART_RETRIEVAL_STRATEGIES",
     "QUERY_INSTRUCTION",
-    "QUERY_TEXT_MAX_CHARS",
-    "QUERY_TEXT_MIN_CHARS",
+    "RENDERER_VERSION",
+    "REQUIRED_INTENTS",
     "RESULTS_PER_QUERY_CEILING",
     "SCREENED_PER_CANDIDATE_CEILING",
     "SCREENING_INSTRUCTION",
@@ -126,8 +140,10 @@ __all__ = [
     "SimilarityLabel",
     "WorkComparison",
     "assess_prior_art",
+    "canonical_groups",
     "check_comparisons",
     "check_prior_art_queries",
     "check_similarity_screening",
+    "render_query",
     "require_candidates_for_prior_art",
 ]

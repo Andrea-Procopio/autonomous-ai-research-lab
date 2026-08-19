@@ -81,31 +81,45 @@ class PriorArtQueryExecution:
     new_unique: int
     from_cache: bool
     ordering: ResultOrdering
+    plan_groups: tuple[tuple[str, ...], ...] = ()
+    """The canonical concept groups the trusted renderer built ``text``
+    from — groups conjoined, alternatives within a group as
+    alternatives. Empty on pre-5D.1 records, whose ``text`` was the
+    model's own string; both join the identity only when present, so
+    the old records still verify."""
+
+    renderer: str = ""
+    """The rendering-scheme version that produced ``text`` from
+    ``plan_groups``; empty on pre-5D.1 records."""
+
     id: str = field(default="")
 
     def __post_init__(self) -> None:
         if not self.text.strip():
             raise ValueError("a query execution records the executed text")
-        if not self.id:
-            object.__setattr__(
-                self,
-                "id",
-                content_id(
-                    "pqx",
-                    self.run_id,
-                    self.candidate_id,
-                    self.family,
-                    self.text,
-                    self.from_date,
-                    self.to_date,
-                    self.query_fingerprint,
-                    self.search_record_id,
-                    self.retrieved,
-                    self.new_unique,
-                    self.from_cache,
-                    self.ordering,
-                ),
+        if bool(self.plan_groups) != bool(self.renderer):
+            raise ValueError(
+                "a planned execution names its renderer, and a renderer "
+                "implies a plan"
             )
+        if not self.id:
+            parts: tuple[object, ...] = (
+                self.run_id,
+                self.candidate_id,
+                self.family,
+                self.text,
+                self.from_date,
+                self.to_date,
+                self.query_fingerprint,
+                self.search_record_id,
+                self.retrieved,
+                self.new_unique,
+                self.from_cache,
+                self.ordering,
+            )
+            if self.plan_groups or self.renderer:
+                parts = (*parts, self.plan_groups, self.renderer)
+            object.__setattr__(self, "id", content_id("pqx", *parts))
 
 
 class SimilarityDecision(StrEnum):

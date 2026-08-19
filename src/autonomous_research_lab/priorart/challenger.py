@@ -68,6 +68,7 @@ from .gates import (
     check_prior_art_queries,
     check_similarity_screening,
 )
+from .plan import RENDERER_VERSION, canonical_groups, render_query
 from .records import (
     DIMENSIONS,
     ComparisonDimension,
@@ -134,15 +135,35 @@ PRIOR_ART_QUERY_SCHEMA: Final = OutputSchema(
                             "type": "string",
                             "enum": list(_FAMILIES),
                         },
-                        "text": {
-                            "type": "string",
+                        "groups": {
+                            "type": "array",
                             "description": (
-                                "Plain keyword search text; no dates — "
-                                "trusted code sets every date range."
+                                "Concept groups, conjoined: a result "
+                                "must match every group. Keep to 2-3."
                             ),
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "alternatives": {
+                                        "type": "array",
+                                        "description": (
+                                            "Alternative terms or "
+                                            "phrases for this ONE "
+                                            "concept; a result needs "
+                                            "any one of them. Plain "
+                                            "words only — no quotes, "
+                                            "parentheses, or operator "
+                                            "words; trusted code "
+                                            "renders the Boolean."
+                                        ),
+                                        "items": {"type": "string"},
+                                    }
+                                },
+                                "required": ["alternatives"],
+                            },
                         },
                     },
-                    "required": ["family", "text"],
+                    "required": ["family", "groups"],
                 },
             }
         },
@@ -264,16 +285,23 @@ QUERY_INSTRUCTION: Final = (
     "You design literature searches whose job is to FALSIFY a research "
     "candidate's differentiation: find the prior work most likely to "
     "have already done what the candidate proposes. Propose exactly one "
-    "plain keyword query per listed family: the exact mechanism or "
+    "search plan per listed family: the exact mechanism or "
     "intervention; the problem combined with the mechanism; the task, "
     "dataset, metric, or evaluation combination; synonyms and older "
     "terminology for the same idea (the strongest prior art often "
     "predates today's vocabulary); the closest cited work and competing "
-    "approaches; and recent work. Use the candidate's own search terms "
-    "as a starting point, then search adversarially - the queries that "
-    "would embarrass the candidate, not the ones that would flatter it. "
-    "Plain search text only: no dates, no operators, no quotes - "
-    "trusted code sets every date range and executes every search."
+    "approaches; and recent work. A plan is a list of concept groups "
+    "with strict Boolean meaning: a result must match EVERY group, and "
+    "within a group any ONE alternative suffices. So use few groups - "
+    "one or two, three at most - and put synonyms, rephrasings, and "
+    "older terminology in the SAME group as alternatives, never as "
+    "extra groups: every extra group narrows the search, and a search "
+    "conjoining many terms returns nothing. A multi-word alternative "
+    "is matched as an exact phrase, so prefer short established "
+    "phrases; at least one alternative must come from the candidate's "
+    "own record. Plain terms only: no dates, no quotes, no "
+    "parentheses, no AND/OR/NOT - trusted code renders the Boolean "
+    "expression, sets every date range, and executes every search."
     + _TEXT_NOTE
 )
 
@@ -520,7 +548,11 @@ class PriorArtChallenger:
                 run_id,
                 "queries",
             ),
-            gate=partial(check_prior_art_queries, max_queries_per_family=1),
+            gate=partial(
+                check_prior_art_queries,
+                max_queries_per_family=1,
+                candidate_haystack=candidate_block,
+            ),
             stage="queries",
             run_id=run_id,
             spend=spend,
@@ -635,7 +667,8 @@ class PriorArtChallenger:
         for item in entries:
             assert isinstance(item, Mapping)
             family = PriorArtQueryFamily(str(item["family"]))
-            text = str(item["text"]).strip()
+            groups = canonical_groups(_accepted_groups(item))
+            text = render_query(groups)
             from_date = (
                 directive.recent_window_start
                 if family is PriorArtQueryFamily.RECENT
@@ -666,6 +699,8 @@ class PriorArtChallenger:
                     new_unique=len(new),
                     from_cache=result.from_cache,
                     ordering=ordering,
+                    plan_groups=groups,
+                    renderer=RENDERER_VERSION,
                 )
             )
             executions.append(execution)
@@ -1104,8 +1139,10 @@ def render_candidate_for_queries(candidate_block: str) -> str:
         f"- {family.value}" for family in PriorArtQueryFamily
     )
     return (
-        f"{candidate_block}\n\n## Query families (exactly one query "
-        f"each)\n{families}\n\nPropose the queries as schema JSON."
+        f"{candidate_block}\n\n## Query families (exactly one search "
+        f"plan each)\n{families}\n\nPropose one plan per family as "
+        f"schema JSON: concept groups conjoined, alternatives within a "
+        f"group as alternatives."
     )
 
 
@@ -1158,6 +1195,20 @@ def render_comparison_batch(
         f"JSON."
     )
     return "\n".join(lines)
+
+
+def _accepted_groups(
+    item: Mapping[str, object],
+) -> tuple[tuple[str, ...], ...]:
+    groups = item["groups"]
+    assert isinstance(groups, Sequence)
+    projected = []
+    for group in groups:
+        assert isinstance(group, Mapping)
+        alternatives = group["alternatives"]
+        assert isinstance(alternatives, Sequence)
+        projected.append(tuple(str(term) for term in alternatives))
+    return tuple(projected)
 
 
 def _clip(text: str) -> str:

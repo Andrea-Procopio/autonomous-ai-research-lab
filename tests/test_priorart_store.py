@@ -320,6 +320,52 @@ def test_rejected_payloads_are_preserved_as_data(tmp_path: Path) -> None:
     assert rejected["payload"] == {"comparisons": [{"source_id": "lit_9"}]}
 
 
+def test_a_pre_5d1_execution_still_loads_and_verifies(
+    tmp_path: Path,
+) -> None:
+    # A record built without a plan serializes exactly like the
+    # preserved Task 5D artifacts: no plan keys at all. It must load,
+    # verify, and re-record as a no-op forever.
+    store = PriorArtStore(tmp_path / "priorart")
+    legacy = store.record_query_execution(_execution())
+    path = (
+        tmp_path / "priorart" / "executions" / f"{legacy.id}.json"
+    )
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert "plan_groups" not in payload
+    assert "renderer" not in payload
+    fresh = PriorArtStore(tmp_path / "priorart")
+    assert fresh.get_query_execution(legacy.id) == legacy
+
+
+def test_a_planned_execution_round_trips(tmp_path: Path) -> None:
+    store = PriorArtStore(tmp_path / "priorart")
+    planned = PriorArtQueryExecution(
+        run_id=RUN,
+        candidate_id="idea_1",
+        family=PriorArtQueryFamily.MECHANISM,
+        text='("attention head reweighting" OR "head gating")',
+        from_date="",
+        to_date="2026-08-18",
+        query_fingerprint="litq_2",
+        search_record_id="lits_2",
+        retrieved=5,
+        new_unique=4,
+        from_cache=False,
+        ordering=ResultOrdering.INFLUENCE,
+        plan_groups=(("attention head reweighting", "head gating"),),
+        renderer="boolean-v1",
+    )
+    store.record_query_execution(planned)
+    fresh = PriorArtStore(tmp_path / "priorart")
+    reloaded = fresh.get_query_execution(planned.id)
+    assert reloaded == planned
+    assert reloaded is not None
+    assert reloaded.plan_groups == (
+        ("attention head reweighting", "head gating"),
+    )
+
+
 def test_absent_kinds_read_as_empty(tmp_path: Path) -> None:
     store = PriorArtStore(tmp_path / "priorart")
     assert store.get_directive("pdir_missing") is None
