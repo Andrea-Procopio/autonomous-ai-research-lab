@@ -1244,10 +1244,15 @@ candidate:
 ```
 PriorArtDirective
   -> require_candidates_for_prior_art        (before any model call)
+  -> check_budget_coherence                  (refuse a directive that
+                                              cannot complete its own
+                                              promised work)
   -> one gated query-proposal call           (model supplies text only)
   -> trusted retrieval through a fresh corpus (dates, ordering, budgets)
-  -> cited-source injection, identifier dedup, cutoff filter
-  -> gated similarity screening in batches
+  -> cited-source injection, identifier dedup, cutoff filter,
+     cited works ordered first
+  -> gated similarity screening in batches   (abstract-level and
+                                              metadata-only apart)
   -> one gated nearest-work comparison call   (each call: at most one
                                                corrective call)
   -> trusted coverage + assess_prior_art      (the deterministic verdict)
@@ -1288,7 +1293,20 @@ this stage exists to prevent.
 
 **Comparison held to accessible text.** Screening judges similarity to
 *this* candidate (`potential_overlap / related / unrelated /
-undecidable` — undecidable is honest); the closest abstract-level works
+undecidable` — undecidable is honest), in two gated calls with two
+precise instructions: abstract-level sources under the similarity
+gate, and metadata-only sources — title, year, venue; no abstract was
+retrieved — under the material-ambiguity gate, where a
+`potential_overlap` decision must carry an attested
+`OverlapHypothesis`: the candidate claim at risk re-found verbatim in
+the candidate's rendered record, the supporting source text re-found
+verbatim in the named accessible part, the overlapping dimension, and
+why the concern reaches the core contribution. Generic topical
+similarity — a shared broad topic, a common dataset, generic terms —
+cannot carry a hypothesis and therefore cannot block; an undecidable
+metadata screen is explicitly costless and honest. Cited works screen
+first, so any bound ever hit costs the fresh tail, never the most
+likely falsifiers. The closest abstract-level works
 then get one comparison call covering five explicit dimensions —
 scientific question, mechanism, data and setting, evaluation protocol,
 claimed contribution — each grounded in a verbatim snippet the gate
@@ -1307,17 +1325,46 @@ rule evaluated, typed reasons, thresholds traveling inside the
 content-addressed assessment, fail-closed aggregation. `OVERLAPPING`
 needs one accepted comparison whose substantial match the gate already
 forced to ground itself; `DISTINGUISHED` needs a complete family sweep,
-an adequate deduplicated pool, bounded screening uncertainty, every
+an adequate screenable pool, bounded screening uncertainty, every
 potentially overlapping abstract actually compared, and nothing left
-unscreened; everything else is `NOVELTY_UNRESOLVED`. A metadata-only
-source screened as possibly overlapping blocks differentiation
-outright — deciding it "is the same overlap" as some compared work
-would be a model judgment where only trusted code may conclude. Every
-verdict describes this bounded corpus alone: `DISTINGUISHED` is never
-proof of novelty, absence from the corpus is never novelty, and
-citation counts only order retrieval. An `OVERLAPPING` or
-`NOVELTY_UNRESOLVED` result is a successful scientific outcome; a
-verdict the caller dislikes has no route to a second call.
+unscreened; everything else is `NOVELTY_UNRESOLVED`. The rule bases
+are part of the semantics (Task 5D.2): the source threshold measures
+the in-cutoff *screenable* pool — a work the cutoff excludes can never
+be screened, so it cannot help ground differentiation — and the
+uncertainty fraction measures abstract-level screens only, because a
+metadata-only source is *expected* to screen undecidable and counting
+that here would bill the same missing abstract twice. A metadata-only
+source blocks differentiation exactly when it was screened as a
+*material* potential overlap under an attested hypothesis (a pre-5D.2
+metadata potential-overlap screen, which could not carry one, still
+blocks fail-closed); a bare undecidable metadata screen is a coverage
+fact — counted, recorded, and blocking nothing. Deciding a material
+ambiguity "is the same overlap" as some compared work would still be a
+model judgment where only trusted code may conclude. Every verdict
+describes this bounded corpus alone: `DISTINGUISHED` is never proof of
+novelty, absence from the corpus is never novelty, and citation counts
+only order retrieval. An `OVERLAPPING` or `NOVELTY_UNRESOLVED` result
+is a successful scientific outcome; a verdict the caller dislikes has
+no route to a second call.
+
+**Budget coherence.** A directive must not promise work its own budgets
+cannot complete. `check_budget_coherence` runs after the door and
+before any model or network call: every candidate's worst-case pool
+(six families times `results_per_query`, plus its cited injection)
+must fit the screening cap, the comparison cap must reach the
+threshold's minimum, a pool clearing `min_unique_sources` must be
+screenable without truncation, and the worst-case gated calls — query
+proposal, `ceil(S/b) + 1` screening batches, comparison, each with its
+bounded corrective call, per candidate — must fit `max_model_calls`.
+Every violation is collected into one named refusal, and only the
+directive record (an input, not an outcome) is durable. The defaults
+are the coherent fixed point for a three-candidate portfolio —
+35 screened, 36 calls, batches of 12: exactly `3 x 6 x 2` at the
+ceiling — so mechanical `SCREENING_TRUNCATED` is no longer expressible
+as an executed run, and the runtime budget guard survives only as
+defense in depth. A five-candidate portfolio needs 60 worst-case calls
+against the ceiling of 36; the preflight names that mismatch instead
+of aborting mid-flight.
 
 **Durability and accounting.** The `PriorArtStore` mirrors the ideation
 store — write-once, ids recomputed on load, tamper-loud, `rejected/`
@@ -1364,9 +1411,86 @@ source-attested phrases became quotations — the 5C.1 lesson applied to
 words; candidate-describing text keeps the strict rule), and
 anonymous OpenAlex search 429s under cluster load abort a run into
 durable partials, fail-closed (preserved as `task5d1-…partial-2`).
-What the evidence demands next is access-level resolution for
+What the evidence demanded next was access-level resolution for
 metadata-only works and screening-budget headroom — never a weaker
 refusal.
+
+Task 5D.2 (proven live 2026-08-19) audited that demand instead of
+obeying it, under one governing principle: **a high refusal rate is
+not evidence of scientific rigor unless the acceptance path is
+demonstrably reachable under evidence that should satisfy it.** The
+blocker audit classified every path that can prevent `DISTINGUISHED`:
+family coverage, no-comparable-work, and uncompared-potential-overlap
+are necessary conditions and stand unchanged; the source threshold and
+the uncertainty fraction were necessary but mis-based (counting
+unscreenable post-cutoff works, and undecidable screens that merely
+restate a missing abstract — in the preserved 5D.1 records every one
+of the six metadata-ambiguity blockers was an undecidable title-only
+screen, and each also double-counted into the uncertainty fraction);
+the metadata-ambiguity rule as written was a proxy for access level,
+not an overlap signal; and mechanical screening truncation was a
+configuration incoherence, not a scientific fact — the directive
+itself could retrieve more than it could screen. The corrections are
+the smallest each defect supports: narrowed and re-based rules with
+unchanged threshold *values* (ten stays ten, on the screenable pool,
+with the fresh/cited split reported — the cited-injection confound is
+documented, not yet separately enforced), the attested-hypothesis bar
+for material metadata ambiguity, the coherence preflight, and one
+prompt correction (the group/alternative caps were enforced but never
+stated — all three 5D.1 corrective calls, about a fifth of that run's
+budget, bought exactly that omission). The calibration suite proves
+all three verdicts reachable end to end on closed corpora at the
+default thresholds, that the one metadata condition which must block
+(a title directly claiming the candidate's contribution, attested both
+ways) still blocks alone, that unattested speculation fails closed,
+and that padding a pool past the count threshold repairs exactly one
+reason, never its neighbors. The counterfactual replay of the
+preserved 5D.1 records under the calibrated rules — run read-only,
+before any new live attempt — changed one verdict of three: two
+candidates stayed `NOVELTY_UNRESOLVED` on distinct single causes (nine
+screenable sources; three truncated), one became counterfactually
+`DISTINGUISHED`.
+
+The live rerun over the same three candidates (18 searches, 180
+credits, pools of 11/22/20 unique, 15 Muse calls at 32,295in/70,140out
+tokens reconciling exactly with the ledger, one verbatim-quote repair,
+zero truncation, zero undecidable screens, two 429-aborted partials
+preserved beside it) returned three `DISTINGUISHED` verdicts — twelve
+nearest-work comparisons, every snippet re-found, with grounded
+material differences against the candidates' own cited works and
+against fresh discoveries. All three flipping is exactly the outcome
+the 5D.2 directive flags for inspection, and the inspection is on the
+record: the counterfactual flipped only one candidate on the old
+evidence; the second cleared because the budget now screens the whole
+pool it retrieves (a configuration fact); the third cleared because
+fresh retrieval crossed the unchanged ten-source bar on its own
+(eleven screenable against 5D.1's honest nine). No threshold value
+moved, no rule was fit to a candidate, and every rule that released
+was shown by controlled calibration to have been restating access
+level or configuration — while the conditions that must still refuse
+were demonstrated, live and in calibration, to refuse. `DISTINGUISHED`
+still means exactly what it meant: materially differentiated from the
+closest works *this bounded search surfaced* — never proof of novelty.
+What remains honestly absent: access-level resolution for
+metadata-only works (a material ambiguity, when one is attested, still
+has no lawful in-repo path to an abstract), and any separate bar on
+citation-dominated pools should live evidence ever show one gamed.
+
+**The Task 5E ingress contract (defined, not implemented).** A
+candidate is selectable for experimentation only when its latest
+applicable prior-art assessment is `DISTINGUISHED`. `OVERLAPPING`
+candidates are ineligible, carrying their grounded
+`overlapping_work_ids`; `NOVELTY_UNRESOLVED` candidates are ineligible
+too, carrying their typed reasons — and downstream reporting must
+distinguish *why* no candidate was selectable (grounded overlap,
+insufficient evidence, execution failure before assessment, or a
+mixture) using those existing records rather than new terminal stop
+states. An evidence-limited candidate is never described as
+scientifically indefensible, and an empty selection is an honest stop:
+there is no retrieval-retry loop whose purpose is to manufacture a
+selectable candidate. Selection itself, ranking, and admission to
+`ResearchState` remain future work behind the same governed commit as
+every other proposal.
 
 ## Architectural invariants
 
@@ -1389,6 +1513,10 @@ scientific state, and their novelty stays unassessed until challenged.
 A bounded prior-art search never certifies novelty: its verdicts
 describe the searched corpus, fail closed to NOVELTY_UNRESOLVED, and
 never modify the candidates they judge.
+A high refusal rate is not evidence of rigor: every prior-art verdict,
+DISTINGUISHED included, stays demonstrably reachable under evidence
+that should satisfy it, and every blocker fires on its own recorded
+cause.
 Every important research decision is reconstructible later.
 ```
 

@@ -62,24 +62,34 @@ has been proven in live end-to-end runs:
   every problem the candidates did not address.
 
 - **An adversarial prior-art challenge** over that portfolio: one
-  guarded door in, six trusted-dated query families of fresh OpenAlex
-  retrieval per candidate, the candidate's own cited works injected
-  into the pool through an identifier dedup bridge, gated similarity
-  screening, nearest-work comparisons across five explicit dimensions
-  with every quoted snippet re-found verbatim in accessible text, and a
-  deterministic fail-closed verdict per candidate — `OVERLAPPING`,
-  `DISTINGUISHED` (differentiated from the closest works this bounded
-  search surfaced — never proof of novelty), or `NOVELTY_UNRESOLVED`.
-  Proven live twice over all three preserved candidates: first
-  exposing its own retrieval defect (ten-term conjunctive queries,
-  sixteen empty searches of eighteen), then — after the trusted
-  concept-group query boundary of Task 5D.1 — retrieving pools of 9,
-  23, and 17 unique works and comparing fresh discoveries beyond the
-  candidates' own citations. All verdicts remain honestly
-  `NOVELTY_UNRESOLVED`, now on metadata-only ambiguity and bounded
-  screening budgets; full zero-network replay verified both times, and
-  the candidate records stay untouched, their own novelty status still
-  structurally unassessed.
+  guarded door in, a budget-coherence preflight that refuses a
+  directive unable to complete its own promised work, six trusted-dated
+  query families of fresh OpenAlex retrieval per candidate, the
+  candidate's own cited works injected into the pool through an
+  identifier dedup bridge and screened first, gated similarity
+  screening — metadata-only sources in their own gated call, where
+  only an attested material overlap hypothesis (both ends re-found
+  verbatim in recorded text) can block — nearest-work comparisons
+  across five explicit dimensions with every quoted snippet re-found
+  verbatim in accessible text, and a deterministic fail-closed verdict
+  per candidate — `OVERLAPPING`, `DISTINGUISHED` (differentiated from
+  the closest works this bounded search surfaced — never proof of
+  novelty), or `NOVELTY_UNRESOLVED`. Proven live three times over the
+  same three preserved candidates: first exposing its own retrieval
+  defect (ten-term conjunctive queries, sixteen empty searches of
+  eighteen), then — through the trusted concept-group boundary of
+  Task 5D.1 — refusing on pools of 9/23/17 with every blocker an
+  undecidable title-only screen, a nine-source pool, or a truncation
+  the directive's own budgets caused; and then, after the Task 5D.2
+  calibration (blocker audit, attested materiality, re-based rules
+  with unchanged threshold values, coherence preflight, a calibration
+  suite proving all three verdicts reachable, and a read-only
+  counterfactual replay that changed one verdict of three), returning
+  three `DISTINGUISHED` verdicts on pools of 11/22/20 with zero
+  truncation and spend reconciling exactly with the ledger. Full
+  zero-network replay verified every time, and the candidate records
+  stay untouched, their own novelty status still structurally
+  unassessed.
 
 Nothing a model says becomes scientific state until deterministic code
 has gated, committed, executed, and verified it — and literature-derived
@@ -91,7 +101,10 @@ a fixed-priority director dispatches work, and every model decision
 passes a deterministic gate before it takes effect.
 
 What does not exist yet: access-level resolution for metadata-only
-retrieved works (the limit the 5D.1 live evidence names),
+retrieved works (an attested material ambiguity still has no lawful
+in-repo path to an abstract), Task 5E candidate selection over the
+challenge verdicts (its ingress contract is defined: selectable only
+on a `DISTINGUISHED` assessment, with honest distinguishable stops),
 literature-grounded findings entering research state, cloud execution,
 statistician and skeptic roles with real inference, and paper writing.
 

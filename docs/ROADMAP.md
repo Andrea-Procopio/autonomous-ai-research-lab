@@ -77,14 +77,33 @@ in the loop, producing results that survive scrutiny.
   source-attested-phrase rule (a described source's own words are
   quotations, not claims), and an unchanged verdict engine. The rerun
   lifted the pools from 2-4 to 9/23/17 unique sources and compared
-  eight freshly discovered works; all three candidates remain honestly
-  `NOVELTY_UNRESOLVED`, now on metadata-only ambiguity, one
-  source-short pool, and one screening-budget truncation. Still open:
-  access-level resolution for metadata-only works and screening-budget
-  headroom (the next evidence-backed retrieval limits, never a weaker
-  refusal), and only after a portfolio clears the challenge, findings
-  entering the state as structured objects carrying their sources,
-  through the same governed commit as every other proposal.
+  eight freshly discovered works; all three candidates remained
+  honestly `NOVELTY_UNRESOLVED`, now on metadata-only ambiguity, one
+  source-short pool, and one screening-budget truncation. Task 5D.2
+  (proven live 2026-08-19): the calibration pass that evidence
+  demanded — a blocker audit separating necessary conditions from
+  proxies (every 5D.1 metadata blocker was an undecidable title-only
+  screen restating access level; the truncation was the directive's
+  own retrieval/screening incoherence), material metadata ambiguity
+  behind an attested `OverlapHypothesis` gate with its own screening
+  call, verdict rules re-based on the screenable pool and
+  abstract-level screens with unchanged threshold values, a
+  budget-coherence preflight that refuses an inconsistent directive
+  before any call, a calibration suite proving all three verdicts
+  reachable at the default thresholds, and a read-only counterfactual
+  replay (one of three preserved verdicts changes) run before the live
+  rerun. The live rerun returned three `DISTINGUISHED` verdicts —
+  pools of 11/22/20, twelve grounded comparisons, zero truncation,
+  spend reconciling exactly with the ledger — each meaning only
+  "materially differentiated from the closest works this bounded
+  search surfaced", never novelty; the Task 5E ingress contract
+  (selectable iff the latest assessment is `DISTINGUISHED`, honest
+  distinguishable stops otherwise) is defined but not implemented.
+  Still open: access-level resolution for attested material
+  ambiguities on metadata-only works, Task 5E candidate selection, and
+  only after that, findings entering the state as structured objects
+  carrying their sources, through the same governed commit as every
+  other proposal.
 - **Real experiment execution.** ML training runs under the existing executor
   contract — checkpoints, longer timeouts, GPU accounting.
 - **Scientific debugging and experiment verification.** Done in its Phase 1

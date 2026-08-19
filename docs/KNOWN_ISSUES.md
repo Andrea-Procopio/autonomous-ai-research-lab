@@ -62,6 +62,12 @@ The test's value is exactly that it uses a real socket and a real clock
   the failure mode is expected rather than rediscovered.
 - **First observed:** 2026-08-19, mid-way through the second Task 5D.1
   live attempt (preserved as `live_runs/task5d1-2026-08-19.partial-2`).
+- **Recurred:** 2026-08-19, under sustained cluster load, one
+  candidate into each of the first two Task 5D.2 live attempts
+  (preserved as `live_runs/task5d2-2026-08-19.partial-1` and
+  `.partial-2`, each with its completed candidate durable beside the
+  abort); the advertised 30-40s backoff was not enough between
+  candidates, and the completing rerun needed a several-minute wait.
 
 The anonymous search cluster sheds load with HTTP 429 ("Anonymous
 search is temporarily rate-limited... retry in Ns, or use a free API
