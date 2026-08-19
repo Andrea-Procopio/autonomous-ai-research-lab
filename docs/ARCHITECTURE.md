@@ -1228,6 +1228,115 @@ that gives novelty its first assessed value, and only after it,
 findings entering the state as structured objects carrying their
 sources, through the same governed commit as every other proposal.
 
+## The prior-art challenge (Task 5D)
+
+The `priorart` package tries to falsify each candidate's differentiation
+against fresh, bounded retrieval — the adversarial stage the ideation
+records were built to meet, and the first place novelty acquires an
+assessed value. It consumes `ideation` (the immutable portfolio),
+`mapping` (the shared gate vocabulary and grounding surface), and
+`literature` directly (it runs its own searches through a fresh corpus
+root); the one-consumer chain becomes a small DAG whose invariant is
+unchanged: retrieved papers and everything derived from them have no
+path into scientific state. One run performs a fixed sequence per
+candidate:
+
+```
+PriorArtDirective
+  -> require_candidates_for_prior_art        (before any model call)
+  -> one gated query-proposal call           (model supplies text only)
+  -> trusted retrieval through a fresh corpus (dates, ordering, budgets)
+  -> cited-source injection, identifier dedup, cutoff filter
+  -> gated similarity screening in batches
+  -> one gated nearest-work comparison call   (each call: at most one
+                                               corrective call)
+  -> trusted coverage + assess_prior_art      (the deterministic verdict)
+```
+
+**The one door, again.** A challenge enters through a durable ideation
+run record whose portfolio holds loadable candidates —
+`require_candidates_for_prior_art` mirrors the adequacy door one stage
+down, refusing an unknown record, an honest refusal run, or a partial
+portfolio before any model call. The candidate records themselves are
+never touched: their novelty status stays structurally `UNASSESSED`,
+and the verdicts live beside them in the prior-art store, not on them.
+
+**Adversarial retrieval under trusted dates.** Six fixed query families
+per candidate — exact mechanism, problem plus mechanism, evaluation
+setup, synonyms and older terminology, competing approaches, recent
+work — with the model supplying nothing but search text; trusted code
+sets every date range from the directive's recorded `cutoff_date`
+(prior art "as of" is a recorded fact, never a wall-clock accident),
+fixes the retrieval strategy per family (influence surfaces canonical
+prior work a date sort buries), executes through the corpus, and drops
+post-cutoff retrievals before anything is screened. The candidate's own
+cited sources join the pool — a candidate overlapping work it itself
+cites is the most likely falsifier — deduplicated against fresh
+snapshots by exact identifiers, with `known_prior_art` stamped by
+trusted code. There are deliberately no refinement rounds: retrieval
+too thin to distinguish against is honestly `NOVELTY_UNRESOLVED`, and
+tuning the search until a candidate survives is exactly the failure
+this stage exists to prevent.
+
+**Comparison held to accessible text.** Screening judges similarity to
+*this* candidate (`potential_overlap / related / unrelated /
+undecidable` — undecidable is honest); the closest abstract-level works
+then get one comparison call covering five explicit dimensions —
+scientific question, mechanism, data and setting, evaluation protocol,
+claimed contribution — each grounded in a verbatim snippet the gate
+re-finds in the named part of the source (title or abstract, exactly
+what was retrieved; `full_text` support is expressible and rejectable).
+Metadata-only sources are never rendered for comparison. A similarity
+label that contradicts its own lists — a match naming no overlaps, a
+distinction naming no differences — is a gate violation, and the same
+label coherence is unconstructible on the record. Novelty language is
+banned in both directions, and the 5C.1 identifier lesson carries
+forward verbatim: known ids are names, never numerical claims.
+
+**The deterministic verdict.** `assess_prior_art` is trusted code all
+the way down, the adequacy discipline applied to falsification: every
+rule evaluated, typed reasons, thresholds traveling inside the
+content-addressed assessment, fail-closed aggregation. `OVERLAPPING`
+needs one accepted comparison whose substantial match the gate already
+forced to ground itself; `DISTINGUISHED` needs a complete family sweep,
+an adequate deduplicated pool, bounded screening uncertainty, every
+potentially overlapping abstract actually compared, and nothing left
+unscreened; everything else is `NOVELTY_UNRESOLVED`. A metadata-only
+source screened as possibly overlapping blocks differentiation
+outright — deciding it "is the same overlap" as some compared work
+would be a model judgment where only trusted code may conclude. Every
+verdict describes this bounded corpus alone: `DISTINGUISHED` is never
+proof of novelty, absence from the corpus is never novelty, and
+citation counts only order retrieval. An `OVERLAPPING` or
+`NOVELTY_UNRESOLVED` result is a successful scientific outcome; a
+verdict the caller dislikes has no route to a second call.
+
+**Durability and accounting.** The `PriorArtStore` mirrors the ideation
+store — write-once, ids recomputed on load, tamper-loud, `rejected/`
+preserving every refused payload — plus one assessment per candidate
+per run and one account of each run. Provider calls reach the
+`UsageLedger` exactly once, failures included; the directive's call
+budget fails closed before the exceeding call; and every executed query
+is a durable record that rebuilds its exact `LiteratureQuery`, so a
+completed challenge replays from its corpus with zero network calls.
+
+Proven live 2026-08-19 over the three preserved Task 5C candidates:
+eighteen fresh OpenAlex searches (six families each, 180 credits), nine
+Muse calls, zero repairs, zero rejections, all eighteen queries replayed
+from the corpus with zero network calls, and three durable
+`NOVELTY_UNRESOLVED` verdicts — each on `too_few_unique_sources`,
+recorded with dimension-by-dimension comparisons against the
+candidates' own cited works, every snippet verbatim-verified, and one
+cited source independently re-surfaced by fresh search through the
+identifier dedup bridge. The thin pools are the live finding: the model
+proposed ten-plus-term conjunctive queries, and `title_and_abstract`
+matching ANDs terms, so sixteen of eighteen searches returned nothing —
+the same class of retrieval evidence that turned Task 5B into 5B.1. The
+verdict machinery refused, correctly, to certify differentiation on
+pools of two to four sources; a 5D.1 corrective pass on query
+conjunctivity is what the evidence demands, and it must not weaken the
+refusal.
+
 ## Architectural invariants
 
 The list this pass was made against; each is enforced by at least one test.
@@ -1245,7 +1354,10 @@ Independent replications remain independent evidence.
 Successful outcomes cannot claim nonexistent outputs.
 Retrieved literature describes; it never becomes evidence.
 Candidate ideas carry their sources; generation alone never makes them
-scientific state, and their novelty stays unassessed.
+scientific state, and their novelty stays unassessed until challenged.
+A bounded prior-art search never certifies novelty: its verdicts
+describe the searched corpus, fail closed to NOVELTY_UNRESOLVED, and
+never modify the candidates they judge.
 Every important research decision is reconstructible later.
 ```
 
@@ -1275,7 +1387,14 @@ mapping       what the literature adds up to: model-backed field
 ideation      what might be worth investigating: CFP-directed, gated
               candidate generation over the assessed map, tier-stamped
               and source-carrying, write-once  (depends on core,
-              mapping, and the provider seam; nothing imports it)
+              mapping, and the provider seam; exactly one
+              consumer — priorart)
+priorart      whether it was already done: the adversarial prior-art
+              challenge over the portfolio — fresh bounded retrieval,
+              gated screening and comparison, a deterministic
+              fail-closed verdict per candidate, write-once  (depends
+              on core, literature, mapping, ideation, and the provider
+              seam; nothing imports it)
 search        which move to take
 roles         who does the work, under what contract; the model-backed
               engineer

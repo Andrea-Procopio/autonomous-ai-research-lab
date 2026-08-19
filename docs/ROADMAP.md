@@ -56,11 +56,24 @@ in the loop, producing results that survive scrutiny.
   statements, kinds, support tiers, theme eras, and cited-source era
   mixes, structurally `UNASSESSED` novelty, honest refusal as a
   first-class recorded outcome, and portfolio accounting that names
-  every unaddressed problem. Still open (Task 5D): the prior-art
-  challenge that falsifies novelty against fresh retrieval — and only
-  after it, findings entering the state as structured objects carrying
-  their sources, through the same governed commit as every other
-  proposal.
+  every unaddressed problem. Task 5D (proven live
+  2026-08-19): the adversarial prior-art challenge over that portfolio —
+  entering through `require_candidates_for_prior_art`, six trusted-dated
+  query families per candidate over a fresh corpus, cited-source
+  injection with identifier dedup, gated similarity screening and
+  five-dimension nearest-work comparisons held verbatim to accessible
+  text, and a deterministic fail-closed `PriorArtAssessment`
+  (`OVERLAPPING` / `DISTINGUISHED` / `NOVELTY_UNRESOLVED`) per
+  candidate that never modifies the candidate records. The live run
+  returned three honest `NOVELTY_UNRESOLVED` verdicts on
+  `too_few_unique_sources` — the model's ten-plus-term conjunctive
+  queries yielded sixteen empty searches of eighteen under
+  title/abstract AND-matching, the same class of live retrieval
+  evidence that produced Task 5B.1. Still open: a 5D.1 corrective pass
+  on query conjunctivity (which must not weaken the refusal), and only
+  after a portfolio clears the challenge, findings entering the state
+  as structured objects carrying their sources, through the same
+  governed commit as every other proposal.
 - **Real experiment execution.** ML training runs under the existing executor
   contract — checkpoints, longer timeouts, GPU accounting.
 - **Scientific debugging and experiment verification.** Done in its Phase 1
