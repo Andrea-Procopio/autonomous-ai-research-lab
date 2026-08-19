@@ -53,3 +53,23 @@ sized for a lightly loaded machine.
 The test's value is exactly that it uses a real socket and a real clock
 — it reproduced the >570 s live stall class that motivated the watchdog
 — so the fix should widen margins, not fake the clock.
+
+## Operational: OpenAlex anonymous search returns 429 under cluster load
+
+- **Where:** live prior-art runs through `OpenAlexProvider` without
+  `OPENALEX_API_KEY`.
+- **Status:** external service behavior, not a defect here; recorded so
+  the failure mode is expected rather than rediscovered.
+- **First observed:** 2026-08-19, mid-way through the second Task 5D.1
+  live attempt (preserved as `live_runs/task5d1-2026-08-19.partial-2`).
+
+The anonymous search cluster sheds load with HTTP 429 ("Anonymous
+search is temporarily rate-limited... retry in Ns, or use a free API
+key"). The adapter's bounded single retry honors `Retry-After`, but a
+saturated cluster can outlast it; the run then fails closed with
+durable partials — coverage stays incomplete, no verdict is recorded,
+and a later rerun re-executes from a fresh root (cached queries replay
+free). Remediation: wait and rerun, or set `OPENALEX_API_KEY` (free)
+for uninterrupted access. The bounded retry policy is deliberate; a
+patient retry loop would hide provider degradation inside a
+scientific run.

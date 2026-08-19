@@ -1262,9 +1262,17 @@ never touched: their novelty status stays structurally `UNASSESSED`,
 and the verdicts live beside them in the prior-art store, not on them.
 
 **Adversarial retrieval under trusted dates.** Six fixed query families
-per candidate — exact mechanism, problem plus mechanism, evaluation
-setup, synonyms and older terminology, competing approaches, recent
-work — with the model supplying nothing but search text; trusted code
+per candidate — serving the specification's seven search intents
+through the explicit `REQUIRED_INTENTS` mapping — with the model
+supplying nothing but *concept groups*: each group the alternative
+terms for one concept, groups conjoined, alternatives OR-joined, every
+term quoted as an exact phrase by the trusted `boolean-v1` renderer
+(order-canonicalized, so the same plan renders and fingerprints
+identically). A final query string is not expressible in the schema at
+all, and a term carrying its own Boolean, wildcard, or quoting syntax
+is a gate rejection — as is a plan conjoining more than three groups
+(`excessive_conjunctivity`) or anchored nowhere in the candidate's own
+record. Trusted code
 sets every date range from the directive's recorded `cutoff_date`
 (prior art "as of" is a recorded fact, never a wall-clock accident),
 fixes the retrieval strategy per family (influence surfaces canonical
@@ -1328,13 +1336,36 @@ from the corpus with zero network calls, and three durable
 recorded with dimension-by-dimension comparisons against the
 candidates' own cited works, every snippet verbatim-verified, and one
 cited source independently re-surfaced by fresh search through the
-identifier dedup bridge. The thin pools are the live finding: the model
+identifier dedup bridge. The thin pools were the live finding: the model
 proposed ten-plus-term conjunctive queries, and `title_and_abstract`
 matching ANDs terms, so sixteen of eighteen searches returned nothing —
 the same class of retrieval evidence that turned Task 5B into 5B.1. The
 verdict machinery refused, correctly, to certify differentiation on
-pools of two to four sources; a 5D.1 corrective pass on query
-conjunctivity is what the evidence demands, and it must not weaken the
+pools of two to four sources.
+
+Task 5D.1 (proven live 2026-08-19) removed the conjunctivity
+mechanically. OpenAlex Boolean semantics were verified through a
+controlled probe before the design was fixed (union arithmetic closed
+exactly; lowercase operators read as plain terms; the ten-bare-term
+shape reproduced zero), the structured-plan boundary above replaced the
+free-text query stage, and the rerun over the same three candidates
+under the same directive, thresholds, and cutoff retrieved pools of 9,
+23, and 17 unique sources (five zero-result searches of eighteen,
+against sixteen), compared twelve nearest works — eight of them fresh
+discoveries beyond the candidates' own citations — and again returned
+three fail-closed `NOVELTY_UNRESOLVED` verdicts, now on the next
+honest limits: metadata-only sources screened as possibly overlapping,
+one pool one source short of threshold, and one screening budget
+truncation. Two more live lessons are recorded beside it: prose that
+*describes one source* may quote that source's own banned phrases (a
+retrieved abstract's literal 'novel compositions of visual concepts'
+fired `novelty_claim` on an honest unrelated-screen until
+source-attested phrases became quotations — the 5C.1 lesson applied to
+words; candidate-describing text keeps the strict rule), and
+anonymous OpenAlex search 429s under cluster load abort a run into
+durable partials, fail-closed (preserved as `task5d1-…partial-2`).
+What the evidence demands next is access-level resolution for
+metadata-only works and screening-budget headroom — never a weaker
 refusal.
 
 ## Architectural invariants

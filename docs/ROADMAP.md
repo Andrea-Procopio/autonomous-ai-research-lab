@@ -69,11 +69,22 @@ in the loop, producing results that survive scrutiny.
   `too_few_unique_sources` — the model's ten-plus-term conjunctive
   queries yielded sixteen empty searches of eighteen under
   title/abstract AND-matching, the same class of live retrieval
-  evidence that produced Task 5B.1. Still open: a 5D.1 corrective pass
-  on query conjunctivity (which must not weaken the refusal), and only
-  after a portfolio clears the challenge, findings entering the state
-  as structured objects carrying their sources, through the same
-  governed commit as every other proposal.
+  evidence that produced Task 5B.1. Task 5D.1 (proven live
+  2026-08-19): the corrective pass that evidence demanded — verified
+  OpenAlex Boolean semantics, a structured concept-group plan schema in
+  which an opaque query string cannot be expressed, the trusted
+  `boolean-v1` renderer with mechanical conjunctivity bounds, the
+  source-attested-phrase rule (a described source's own words are
+  quotations, not claims), and an unchanged verdict engine. The rerun
+  lifted the pools from 2-4 to 9/23/17 unique sources and compared
+  eight freshly discovered works; all three candidates remain honestly
+  `NOVELTY_UNRESOLVED`, now on metadata-only ambiguity, one
+  source-short pool, and one screening-budget truncation. Still open:
+  access-level resolution for metadata-only works and screening-budget
+  headroom (the next evidence-backed retrieval limits, never a weaker
+  refusal), and only after a portfolio clears the challenge, findings
+  entering the state as structured objects carrying their sources,
+  through the same governed commit as every other proposal.
 - **Real experiment execution.** ML training runs under the existing executor
   contract — checkpoints, longer timeouts, GPU accounting.
 - **Scientific debugging and experiment verification.** Done in its Phase 1

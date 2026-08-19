@@ -70,10 +70,16 @@ has been proven in live end-to-end runs:
   deterministic fail-closed verdict per candidate — `OVERLAPPING`,
   `DISTINGUISHED` (differentiated from the closest works this bounded
   search surfaced — never proof of novelty), or `NOVELTY_UNRESOLVED`.
-  Proven live over all three preserved candidates: three honest
-  `NOVELTY_UNRESOLVED` verdicts on thin retrieval pools, zero repairs,
-  full replay with zero network calls — and the candidate records
-  untouched, their own novelty status still structurally unassessed.
+  Proven live twice over all three preserved candidates: first
+  exposing its own retrieval defect (ten-term conjunctive queries,
+  sixteen empty searches of eighteen), then — after the trusted
+  concept-group query boundary of Task 5D.1 — retrieving pools of 9,
+  23, and 17 unique works and comparing fresh discoveries beyond the
+  candidates' own citations. All verdicts remain honestly
+  `NOVELTY_UNRESOLVED`, now on metadata-only ambiguity and bounded
+  screening budgets; full zero-network replay verified both times, and
+  the candidate records stay untouched, their own novelty status still
+  structurally unassessed.
 
 Nothing a model says becomes scientific state until deterministic code
 has gated, committed, executed, and verified it — and literature-derived
@@ -84,11 +90,10 @@ other proposal. Orchestration itself is deliberately not model-driven:
 a fixed-priority director dispatches work, and every model decision
 passes a deterministic gate before it takes effect.
 
-What does not exist yet: the corrective pass the 5D live evidence
-demands (less conjunctive search queries, without weakening the
-refusal), literature-grounded findings entering research state, cloud
-execution, statistician and skeptic roles with real inference, and
-paper writing.
+What does not exist yet: access-level resolution for metadata-only
+retrieved works (the limit the 5D.1 live evidence names),
+literature-grounded findings entering research state, cloud execution,
+statistician and skeptic roles with real inference, and paper writing.
 
 Expect interfaces to change.
 
