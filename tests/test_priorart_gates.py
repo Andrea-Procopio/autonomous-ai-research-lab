@@ -356,6 +356,102 @@ def test_a_screen_reason_may_not_claim_novelty() -> None:
     assert "novelty_claim" in _rules(rejections)
 
 
+def test_a_screen_may_describe_a_source_in_its_own_words() -> None:
+    # Observed live (Task 5D.1): an abstract's own "novel compositions"
+    # fired novelty_claim on an honest unrelated-screen. An attested
+    # phrase is a quotation; the same phrase unattested still fires.
+    accessible = {
+        "lit_1": (
+            "we study referring expression segmentation and meta "
+            "optimization for novel compositions of visual concepts"
+        ),
+        "lit_2": "a systematic review of optimizers for deep networks",
+    }
+    honest = check_similarity_screening(
+        _screens_payload(
+            _screen(
+                decision="unrelated",
+                reason=(
+                    "describes meta optimization for novel compositions "
+                    "of visual concepts, not attention heads"
+                ),
+            ),
+            _screen(
+                source_id="lit_2",
+                decision="unrelated",
+                reason="a systematic review of optimizers, not adaptation",
+            ),
+        ),
+        accessible=accessible,
+        candidate_tokens=frozenset(),
+        known_ids=frozenset(accessible),
+    )
+    assert honest == ()
+    unattested = check_similarity_screening(
+        _screens_payload(
+            _screen(
+                decision="unrelated",
+                reason="claims exhaustive coverage of nothing relevant",
+            ),
+            # lit_2's text has no novelty language, so 'novel' about it
+            # is a claim, not a quotation.
+            _screen(
+                source_id="lit_2",
+                decision="unrelated",
+                reason="a novel take on optimizer surveys",
+            ),
+        ),
+        accessible=accessible,
+        candidate_tokens=frozenset(),
+        known_ids=frozenset(accessible),
+    )
+    assert _rules(unattested) == {"novelty_claim", "coverage_language"}
+
+
+def test_a_prior_work_position_may_quote_attested_language() -> None:
+    quoting = _source(
+        abstract=(
+            "We prune attention heads and report novel emergent "
+            "behavior in the pruned model."
+        )
+    )
+    entry = _comparison_entry(
+        dimensions=[
+            _dimension_entry(dimension.value, snippet="prune attention heads")
+            | (
+                {
+                    "prior_work_position": (
+                        "reports novel emergent behavior after pruning"
+                    )
+                }
+                if dimension is DIMENSIONS[0]
+                else {}
+            )
+            for dimension in DIMENSIONS
+        ]
+    )
+    assert _check(entry, sources={"lit_1": quoting}) == ()
+    # The candidate side keeps the strict rule even when attested.
+    strict = _comparison_entry(
+        dimensions=[
+            _dimension_entry(dimension.value, snippet="prune attention heads")
+            | (
+                {
+                    "candidate_position": (
+                        "proposes a novel reweighting of heads"
+                    )
+                }
+                if dimension is DIMENSIONS[0]
+                else {}
+            )
+            for dimension in DIMENSIONS
+        ]
+    )
+    assert "novelty_claim" in _rules(
+        _check(strict, sources={"lit_1": quoting})
+    )
+
+
 def test_ungrounded_numbers_in_reasons_are_rejected() -> None:
     grounded = check_similarity_screening(
         _screens_payload(

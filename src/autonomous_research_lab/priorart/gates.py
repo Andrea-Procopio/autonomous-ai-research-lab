@@ -50,9 +50,10 @@ import re
 from collections.abc import Mapping, Sequence
 from typing import Final
 
-from ..ideation.gates import check_novelty_language
+from ..ideation.gates import NOVELTY_PHRASES, check_novelty_language
 from ..literature.retrieval import LiteratureSource
 from ..mapping.gates import (
+    BANNED_COVERAGE_PHRASES,
     MappingRejection,
     accessible_text_of,
     check_coverage_language,
@@ -79,6 +80,10 @@ from .records import (
 # Mirrors of the mapping gates' private number helpers, kept private here
 # for the same reason ideation keeps its own.
 _NUMBER: Final = re.compile(r"\d+(?:\.\d+)?")
+
+_NOVELTY_PATTERN: Final = re.compile(
+    r"\b(?:" + "|".join(re.escape(p) for p in NOVELTY_PHRASES) + r")\b"
+)
 
 
 def _number_tokens(text: str) -> frozenset[str]:
@@ -116,6 +121,52 @@ def _check_prior_art_text(
         return
     check_coverage_language(text, where, rejections)
     check_novelty_language(text, where, rejections)
+
+
+def _check_source_described_text(
+    text: str,
+    where: str,
+    attested: str,
+    rejections: list[MappingRejection],
+) -> None:
+    """The text discipline for prose that *describes one source*: a
+    screening reason or a prior-work position. A banned phrase the
+    source's own accessible text contains is a quotation, not a claim —
+    observed live (Task 5D.1, 2026-08-19): a retrieved abstract's own
+    'novel compositions of visual concepts' fired ``novelty_claim`` on
+    an honest unrelated-screen through both attempts. Only attested
+    phrases are exempt — the same phrase about an unattested subject,
+    or any claim the source never made, still fires. This is the
+    Task 5C.1 lesson again: what the trusted context contains is a
+    name or a quote; what it does not is a claim."""
+    if not text.strip():
+        rejections.append(
+            MappingRejection("empty_finding", f"{where} is empty")
+        )
+        return
+    check_text_integrity(text, where, rejections)
+    lowered = text.casefold()
+    for phrase in BANNED_COVERAGE_PHRASES:
+        if phrase in lowered and phrase not in attested:
+            rejections.append(
+                MappingRejection(
+                    "coverage_language",
+                    f"{where} claims what a bounded run cannot know "
+                    f"({phrase!r}) and the source's own text does not "
+                    f"say it: {text!r}",
+                )
+            )
+    for phrase in sorted(set(_NOVELTY_PATTERN.findall(lowered))):
+        if phrase not in attested:
+            rejections.append(
+                MappingRejection(
+                    "novelty_claim",
+                    f"{where} uses novelty language ({phrase!r}) the "
+                    f"source's own text does not contain; describe the "
+                    f"source in its own words or drop the claim: "
+                    f"{text!r}",
+                )
+            )
 
 
 def _check_grounded_numbers(
@@ -385,7 +436,9 @@ def check_similarity_screening(
             )
             continue
         decided.add(source_id)
-        _check_prior_art_text(reason, f"{where}.reason", rejections)
+        _check_source_described_text(
+            reason, f"{where}.reason", accessible[source_id], rejections
+        )
         _check_grounded_numbers(
             reason,
             _number_tokens(accessible[source_id]) | candidate_tokens,
@@ -565,8 +618,11 @@ def _check_comparison_body(
         _check_prior_art_text(
             candidate_position, f"{entry_where}.candidate_position", rejections
         )
-        _check_prior_art_text(
-            prior_position, f"{entry_where}.prior_work_position", rejections
+        _check_source_described_text(
+            prior_position,
+            f"{entry_where}.prior_work_position",
+            accessible_text_of(source),
+            rejections,
         )
         _check_grounded_numbers(
             candidate_position,
