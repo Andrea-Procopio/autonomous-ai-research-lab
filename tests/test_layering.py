@@ -21,8 +21,17 @@
    ``core``, ``mapping``, and the provider seam — never ``literature``
    directly; sources reach candidates only as opaque ids on mapping
    records — it cannot reach scientific state, evidence, or execution,
-   and nothing in the package depends on it. Candidate ideas are
+   and exactly one other package depends on it. Candidate ideas are
    conjectures carrying their sources, never propositions.
+7. ``priorart`` is that consumer — the adversarial challenge that tries
+   to falsify each candidate's differentiation against fresh bounded
+   retrieval. It reads ``core``, ``literature`` (it runs its own
+   searches), ``mapping`` (the grounding surface and shared gate
+   vocabulary), ``ideation`` (the portfolio it challenges), and the
+   provider seam; it cannot reach scientific state, evidence, or
+   execution, and nothing in the package depends on it. The analysis
+   chain is a DAG with one invariant: retrieved papers and everything
+   derived from them have no path into scientific state.
 """
 
 from __future__ import annotations
@@ -37,6 +46,7 @@ ROLES = SRC / "roles"
 LITERATURE = SRC / "literature"
 MAPPING = SRC / "mapping"
 IDEATION = SRC / "ideation"
+PRIORART = SRC / "priorart"
 PROVIDERS = SRC / "runtime" / "providers.py"
 PROVIDER_MODULES = (PROVIDERS, SRC / "runtime" / "muse.py")
 
@@ -265,14 +275,19 @@ def test_literature_imports_no_vendor_sdk() -> None:
         assert roots & VENDOR_SDKS == set(), f"{path.name} imports a vendor SDK"
 
 
-def test_literature_has_exactly_one_consumer_in_the_package() -> None:
-    """Only ``mapping`` — the deliberate literature-analysis stage, itself
-    barred from scientific state — may import literature. No
-    orchestration, role, runtime, or evidence module may depend on it:
-    retrieved papers must have no path into scientific state."""
+def test_literature_is_imported_only_by_its_analysis_stages() -> None:
+    """Only ``mapping`` and ``priorart`` — the deliberate
+    literature-analysis stages, both barred from scientific state — may
+    import literature. No orchestration, role, runtime, or evidence
+    module may depend on it: retrieved papers must have no path into
+    scientific state."""
     violations: list[str] = []
     for path in sorted(SRC.rglob("*.py")):
-        if LITERATURE in path.parents or MAPPING in path.parents:
+        if (
+            LITERATURE in path.parents
+            or MAPPING in path.parents
+            or PRIORART in path.parents
+        ):
             continue
         tree = ast.parse(path.read_text(), filename=str(path))
         for node in ast.walk(tree):
@@ -386,14 +401,20 @@ def test_mapping_imports_no_vendor_sdk() -> None:
         )
 
 
-def test_mapping_has_exactly_one_consumer_in_the_package() -> None:
+def test_mapping_is_imported_only_by_its_analysis_stages() -> None:
     """Only ``ideation`` — the deliberate idea-generation stage Task 5C
-    built, itself barred from scientific state — may import mapping. No
-    orchestration, role, runtime, or evidence module may depend on it:
-    a field map must have no path into scientific state."""
+    built — and ``priorart`` — the challenge stage that shares its gate
+    vocabulary and grounding surface — may import mapping, both barred
+    from scientific state. No orchestration, role, runtime, or evidence
+    module may depend on it: a field map must have no path into
+    scientific state."""
     violations: list[str] = []
     for path in sorted(SRC.rglob("*.py")):
-        if MAPPING in path.parents or IDEATION in path.parents:
+        if (
+            MAPPING in path.parents
+            or IDEATION in path.parents
+            or PRIORART in path.parents
+        ):
             continue
         tree = ast.parse(path.read_text(), filename=str(path))
         for node in ast.walk(tree):
@@ -510,13 +531,15 @@ def test_ideation_imports_no_vendor_sdk() -> None:
         )
 
 
-def test_nothing_in_the_package_imports_ideation() -> None:
-    """Ideation is the new leaf: candidate ideas reach scientific state
-    only when a later task deliberately builds the proposal path through
-    the governed commit."""
+def test_ideation_has_exactly_one_consumer_in_the_package() -> None:
+    """Only ``priorart`` — the challenge stage that reads the portfolio
+    it tries to falsify, itself barred from scientific state — may
+    import ideation: candidate ideas reach scientific state only when a
+    later task deliberately builds the proposal path through the
+    governed commit."""
     violations: list[str] = []
     for path in sorted(SRC.rglob("*.py")):
-        if IDEATION in path.parents:
+        if IDEATION in path.parents or PRIORART in path.parents:
             continue
         tree = ast.parse(path.read_text(), filename=str(path))
         for node in ast.walk(tree):
@@ -531,6 +554,139 @@ def test_nothing_in_the_package_imports_ideation() -> None:
                     f"{path.relative_to(SRC)}: imports {alias.name}"
                     for alias in node.names
                     if "ideation" in alias.name.split(".")
+                )
+    assert violations == []
+
+
+def test_priorart_depends_only_on_its_declared_inputs() -> None:
+    """The prior-art challenger reads ``core``, ``literature`` (it runs
+    its own bounded searches), ``mapping`` (the shared gate vocabulary
+    and grounding surface), ``ideation`` (the portfolio it challenges),
+    and the provider seam (``runtime.providers`` / ``runtime.metrics``)
+    — nothing else in the package. A priorart module that needed roles,
+    orchestration, evidence, or execution would be doing science, not
+    challenge."""
+    allowed_absolute = (
+        f"{PACKAGE}.core",
+        f"{PACKAGE}.literature",
+        f"{PACKAGE}.mapping",
+        f"{PACKAGE}.ideation",
+        f"{PACKAGE}.priorart",
+        f"{PACKAGE}.runtime.providers",
+        f"{PACKAGE}.runtime.metrics",
+    )
+    allowed_relative = (
+        "core",
+        "literature",
+        "mapping",
+        "ideation",
+        "runtime.providers",
+        "runtime.metrics",
+    )
+    violations: list[str] = []
+    for path in sorted(PRIORART.rglob("*.py")):
+        tree = ast.parse(path.read_text(), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+                if node.level == 0 and module.startswith(f"{PACKAGE}."):
+                    if not module.startswith(allowed_absolute):
+                        violations.append(f"{path.name}: imports {module}")
+                elif node.level == 2 and not module.startswith(
+                    allowed_relative
+                ):
+                    violations.append(
+                        f"{path.name}: relative import of {module}"
+                    )
+                elif node.level > 2:
+                    violations.append(
+                        f"{path.name}: relative import above package"
+                    )
+            elif isinstance(node, ast.Import):
+                violations.extend(
+                    f"{path.name}: imports {alias.name}"
+                    for alias in node.names
+                    if alias.name.startswith(f"{PACKAGE}.")
+                    and not alias.name.startswith(allowed_absolute)
+                )
+    assert violations == []
+
+
+def test_priorart_cannot_touch_scientific_state() -> None:
+    """A prior-art verdict is a judgment about a bounded corpus, never a
+    scientific-state proposition: no module in ``priorart`` may import
+    the state, proposal, transition, evidence, or execution machinery,
+    reference ``ResearchState``, ``Evidence``, or ``ExperimentResult``
+    by name, or call a state mutator. Admission through the governed
+    commit belongs to a later task."""
+    forbidden_names = {"ResearchState", "Evidence", "ExperimentResult"}
+    violations: list[str] = []
+    for path in sorted(PRIORART.rglob("*.py")):
+        tree = ast.parse(path.read_text(), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+                if any(
+                    fragment in module
+                    for fragment in (
+                        ".state",
+                        "proposals",
+                        "transitions",
+                        "evidence",
+                        "execution",
+                    )
+                ):
+                    violations.append(f"{path.name}: imports {module}")
+            elif (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr in STATE_MUTATORS
+            ):
+                violations.append(
+                    f"{path.name}:{node.lineno}: calls .{node.func.attr}(...)"
+                )
+            elif isinstance(node, ast.Name) and node.id in forbidden_names:
+                violations.append(
+                    f"{path.name}:{node.lineno}: references {node.id}"
+                )
+    assert violations == []
+
+
+def test_priorart_imports_no_vendor_sdk() -> None:
+    """The challenger is provider-neutral: it speaks to the generic
+    seam, and no Muse-specific (or any vendor-specific) logic may
+    appear here."""
+    for path in sorted(PRIORART.rglob("*.py")):
+        roots = {module.split(".")[0] for module in _imported_modules(path)}
+        assert roots & VENDOR_SDKS == set(), f"{path.name} imports a vendor SDK"
+        modules = set(_imported_modules(path))
+        assert not any("muse" in module for module in modules), (
+            f"{path.name} imports the Muse adapter; the challenger knows "
+            f"only the generic provider seam"
+        )
+
+
+def test_nothing_in_the_package_imports_priorart() -> None:
+    """Priorart is the new leaf: a prior-art assessment reaches
+    scientific state only when a later task deliberately builds the
+    proposal path through the governed commit."""
+    violations: list[str] = []
+    for path in sorted(SRC.rglob("*.py")):
+        if PRIORART in path.parents:
+            continue
+        tree = ast.parse(path.read_text(), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+                if "priorart" in module.split("."):
+                    violations.append(
+                        f"{path.relative_to(SRC)}: imports {module}"
+                    )
+            elif isinstance(node, ast.Import):
+                violations.extend(
+                    f"{path.relative_to(SRC)}: imports {alias.name}"
+                    for alias in node.names
+                    if "priorart" in alias.name.split(".")
                 )
     assert violations == []
 
