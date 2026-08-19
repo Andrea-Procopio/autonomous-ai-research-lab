@@ -10,7 +10,8 @@ PriorArtDirective
        one gated query-proposal call         (model supplies text only)
        trusted retrieval through the corpus  (dates, ordering, budgets)
        cited-source injection + deduplication, cutoff filter
-       gated similarity screening in batches
+       gated similarity screening in batches (abstract-level and
+         metadata-only sources apart, cited works first)
        one gated nearest-work comparison call
        trusted coverage + assess_prior_art   (the deterministic verdict)
   -> one run record with full lineage
@@ -65,6 +66,7 @@ from .directive import PriorArtDirective
 from .gates import (
     _number_tokens,
     check_comparisons,
+    check_metadata_screening,
     check_prior_art_queries,
     check_similarity_screening,
 )
@@ -73,6 +75,7 @@ from .records import (
     DIMENSIONS,
     ComparisonDimension,
     DimensionComparison,
+    OverlapHypothesis,
     PriorArtCoverage,
     PriorArtQueryExecution,
     PriorArtQueryFamily,
@@ -190,6 +193,77 @@ SIMILARITY_SCREENING_SCHEMA: Final = OutputSchema(
                             ],
                         },
                         "reason": {"type": "string"},
+                    },
+                    "required": ["source_id", "decision", "reason"],
+                },
+            }
+        },
+        "required": ["screens"],
+    },
+)
+
+_OVERLAP_HYPOTHESIS_SCHEMA: Final = {
+    "type": "object",
+    "properties": {
+        "candidate_claim": {
+            "type": "string",
+            "description": (
+                "A verbatim fragment of the candidate record naming the "
+                "claim at risk; the gate re-finds it there."
+            ),
+        },
+        "source_text": {
+            "type": "string",
+            "description": (
+                "A verbatim quote from the named part of the source; "
+                "the gate re-finds it there."
+            ),
+        },
+        "support_location": {
+            "type": "string",
+            "enum": [location.value for location in SupportLocation],
+        },
+        "dimension": {
+            "type": "string",
+            "enum": [dimension.value for dimension in ComparisonDimension],
+        },
+        "rationale": {
+            "type": "string",
+            "description": (
+                "Why this overlap could reach the candidate's core "
+                "contribution rather than only its background."
+            ),
+        },
+    },
+    "required": [
+        "candidate_claim",
+        "source_text",
+        "support_location",
+        "dimension",
+        "rationale",
+    ],
+}
+
+METADATA_SCREENING_SCHEMA: Final = OutputSchema(
+    name="prior_art_metadata_screening",
+    json_schema={
+        "type": "object",
+        "properties": {
+            "screens": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "source_id": {"type": "string"},
+                        "decision": {
+                            "type": "string",
+                            "enum": [
+                                decision.value
+                                for decision in SimilarityDecision
+                            ],
+                        },
+                        "reason": {"type": "string"},
+                        "overlap_hypothesis": _OVERLAP_HYPOTHESIS_SCHEMA,
                     },
                     "required": ["source_id", "decision", "reason"],
                 },
@@ -321,6 +395,28 @@ SCREENING_INSTRUCTION: Final = (
     + _TEXT_NOTE
 )
 
+METADATA_SCREENING_INSTRUCTION: Final = (
+    "You screen retrieved papers for similarity to ONE research "
+    "candidate from bibliographic metadata alone - title, year, venue; "
+    "no abstract was retrieved for these sources. Decide every listed "
+    "source exactly once. Choose potential_overlap ONLY when the shown "
+    "metadata itself supports a specific, material concern that the "
+    "paper may have already done what the candidate proposes; such a "
+    "decision must carry an overlap_hypothesis quoting the candidate "
+    "claim at risk verbatim from the candidate record, the supporting "
+    "source text verbatim from the named accessible part, the "
+    "overlapping dimension, and why the concern reaches the "
+    "candidate's core contribution. Sharing a broad topic, a common "
+    "dataset, or generic terms is never material on its own: decide "
+    "related or unrelated instead. When the metadata cannot settle "
+    "the question, undecidable is honest, never a failure, and "
+    "carries no hypothesis. Give one short reason per source, "
+    "grounded in its shown text; use only numbers that appear in the "
+    "source's text or the candidate's record, and never assert that "
+    "no prior work exists."
+    + _TEXT_NOTE
+)
+
 COMPARISON_INSTRUCTION: Final = (
     "You compare ONE research candidate against the closest retrieved "
     "prior works, dimension by dimension, from each work's title and "
@@ -410,11 +506,19 @@ class _Pool:
             self.known_prior_art[rep_id] = known
             if known and members & fresh_ids:
                 self.recovered += 1
-        self.in_cutoff = [
+        in_cutoff = [
             source
             for source in self.representatives
             if source.publication_date is None
             or source.publication_date <= cutoff_date
+        ]
+        # Known prior art screens first: the candidate's own cited works
+        # are the most likely falsifiers, so a screening truncation must
+        # cost the fresh tail, never them (the Task 5D.1 live defect —
+        # cited works sorted last, and exactly they were truncated).
+        self.in_cutoff = [
+            *(s for s in in_cutoff if self.known_prior_art[s.id]),
+            *(s for s in in_cutoff if not self.known_prior_art[s.id]),
         ]
         self.post_cutoff_excluded = len(self.representatives) - len(
             self.in_cutoff
@@ -720,9 +824,21 @@ class PriorArtChallenger:
         to_screen: Sequence[LiteratureSource],
         spend: _Spend,
     ) -> list[PriorArtScreeningRecord]:
+        """Two screening tasks, two precise instructions: abstract-level
+        sources under the similarity gate, metadata-only sources under
+        the material-ambiguity gate — a small batch whose rejection
+        never forces re-doing the abstract screens."""
         records: list[PriorArtScreeningRecord] = []
-        for start in range(0, len(to_screen), self._screening_batch_size):
-            batch = to_screen[start : start + self._screening_batch_size]
+        abstract_level = [
+            source for source in to_screen if source.id not in pool.metadata_ids
+        ]
+        metadata_only = [
+            source for source in to_screen if source.id in pool.metadata_ids
+        ]
+        for start in range(
+            0, len(abstract_level), self._screening_batch_size
+        ):
+            batch = abstract_level[start : start + self._screening_batch_size]
             accessible = {
                 source.id: accessible_text_of(source) for source in batch
             }
@@ -761,6 +877,56 @@ class PriorArtChallenger:
                             ),
                             reason=str(item["reason"]),
                             provenance=provenance,
+                        )
+                    )
+                )
+        for start in range(
+            0, len(metadata_only), self._screening_batch_size
+        ):
+            batch = metadata_only[start : start + self._screening_batch_size]
+            sources = {source.id: source for source in batch}
+            payload, provenance = self._gated_call(
+                self._request(
+                    METADATA_SCREENING_INSTRUCTION,
+                    render_metadata_screening_batch(candidate_block, batch),
+                    METADATA_SCREENING_SCHEMA,
+                    run_id,
+                    "metadata_screening",
+                ),
+                gate=partial(
+                    check_metadata_screening,
+                    sources=sources,
+                    candidate_haystack=candidate_block,
+                    candidate_tokens=candidate_tokens,
+                    known_ids=known_ids,
+                ),
+                stage="metadata_screening",
+                run_id=run_id,
+                spend=spend,
+            )
+            screens = payload["screens"]
+            assert isinstance(screens, Sequence)
+            for item in screens:
+                assert isinstance(item, Mapping)
+                source_id = str(item["source_id"])
+                hypothesis = item.get("overlap_hypothesis")
+                records.append(
+                    self._store.record_screening(
+                        PriorArtScreeningRecord(
+                            run_id=run_id,
+                            candidate_id=candidate.id,
+                            source_id=source_id,
+                            known_prior_art=pool.known_prior_art[source_id],
+                            decision=SimilarityDecision(
+                                str(item["decision"])
+                            ),
+                            reason=str(item["reason"]),
+                            provenance=provenance,
+                            overlap_hypothesis=(
+                                _overlap_hypothesis(hypothesis)
+                                if hypothesis is not None
+                                else None
+                            ),
                         )
                     )
                 )
@@ -1168,6 +1334,29 @@ def render_screening_batch(
     return "\n".join(lines)
 
 
+def render_metadata_screening_batch(
+    candidate_block: str, sources: Sequence[LiteratureSource]
+) -> str:
+    lines = [
+        candidate_block,
+        "\n## Metadata-only sources to screen (no abstract retrieved)",
+    ]
+    for source in sources:
+        lines.append(f"\n### {source.id}")
+        lines.append(f"title: {source.title or '(no title reported)'}")
+        lines.append(
+            f"year: {source.publication_year!r}; venue: "
+            f"{source.venue or '(unreported)'}; type: "
+            f"{source.work_type or '(unreported)'}"
+        )
+    lines.append(
+        "\nScreen every source above against the candidate, exactly once "
+        "each, as schema JSON; a potential_overlap decision carries its "
+        "attested overlap_hypothesis."
+    )
+    return "\n".join(lines)
+
+
 def render_comparison_batch(
     candidate_block: str, sources: Sequence[LiteratureSource]
 ) -> str:
@@ -1221,6 +1410,17 @@ def _dimension(entry: object) -> DimensionComparison:
         prior_work_position=str(entry["prior_work_position"]),
         support_location=SupportLocation(str(entry["support_location"])),
         support_snippet=str(entry["support_snippet"]),
+    )
+
+
+def _overlap_hypothesis(entry: object) -> OverlapHypothesis:
+    assert isinstance(entry, Mapping)
+    return OverlapHypothesis(
+        candidate_claim=str(entry["candidate_claim"]),
+        source_text=str(entry["source_text"]),
+        support_location=SupportLocation(str(entry["support_location"])),
+        dimension=ComparisonDimension(str(entry["dimension"])),
+        rationale=str(entry["rationale"]),
     )
 
 

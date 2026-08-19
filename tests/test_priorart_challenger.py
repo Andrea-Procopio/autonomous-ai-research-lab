@@ -540,16 +540,127 @@ def test_post_cutoff_sources_are_excluded_before_screening(
     assert late.id not in screened_ids
 
 
+SHADOW = _source("W_shadow", "Head Reweighting at Scale", None)
+
+_SHADOW_HYPOTHESIS: dict[str, str] = {
+    "candidate_claim": "a causal test of head reweighting",
+    "source_text": "head reweighting at scale",
+    "support_location": "title",
+    "dimension": "mechanism",
+    "rationale": (
+        "the title names the same head reweighting intervention the "
+        "candidate proposes as its contribution"
+    ),
+}
+
+
 def test_metadata_only_sources_are_never_compared(tmp_path: Path) -> None:
-    shadow = _source("W_shadow", "Head Reweighting at Scale", None)
-    retrievals = (_retrieved(SRC_A, SRC_B, shadow), *RETRIEVALS[1:])
+    # The shadow source screens in its own gated metadata call; its
+    # attested potential overlap blocks differentiation but is never
+    # rendered for comparison.
+    retrievals = (_retrieved(SRC_A, SRC_B, SHADOW), *RETRIEVALS[1:])
+    metadata_reply = json.dumps(
+        {
+            "screens": [
+                {
+                    "source_id": SHADOW.id,
+                    "decision": "potential_overlap",
+                    "reason": (
+                        "the title names the head reweighting intervention"
+                    ),
+                    "overlap_hypothesis": dict(_SHADOW_HYPOTHESIS),
+                }
+            ]
+        }
+    )
+    challenger, provider, _, _, _, record_id = _challenger(
+        tmp_path,
+        (QUERY_REPLY, SCREENING_REPLY, metadata_reply, COMPARISON_REPLY),
+        literature_outcomes=retrievals,
+    )
+    result = challenger.run(_directive(ideation_run_record_id=record_id))
+    (assessment,) = result.assessments
+    compared = {record.source_id for record in result.comparisons}
+    assert SHADOW.id not in compared
+    assert assessment.verdict is PriorArtVerdict.NOVELTY_UNRESOLVED
+    assert PriorArtReasonCode.METADATA_AMBIGUITY in {
+        reason.code for reason in assessment.reasons
+    }
+    detail = next(
+        reason.detail
+        for reason in assessment.reasons
+        if reason.code is PriorArtReasonCode.METADATA_AMBIGUITY
+    )
+    assert "a causal test of head reweighting" in detail
+    shadow_screen = next(
+        record
+        for record in result.screenings
+        if record.source_id == SHADOW.id
+    )
+    assert shadow_screen.overlap_hypothesis is not None
+    assert (
+        shadow_screen.overlap_hypothesis.source_text
+        == "head reweighting at scale"
+    )
+    stages = [str(call.metadata.get("stage")) for call in provider.calls]
+    assert stages == [
+        "queries",
+        "screening",
+        "metadata_screening",
+        "comparison",
+    ]
+
+
+def test_an_undecidable_metadata_screen_does_not_block(
+    tmp_path: Path,
+) -> None:
+    # The Task 5D.1 failure shape, corrected: a metadata-only source
+    # honestly screened undecidable is coverage, and differentiation
+    # stays reachable beside it.
+    retrievals = (_retrieved(SRC_A, SRC_B, SHADOW), *RETRIEVALS[1:])
+    metadata_reply = json.dumps(
+        {
+            "screens": [
+                {
+                    "source_id": SHADOW.id,
+                    "decision": "undecidable",
+                    "reason": "a title alone cannot settle the question",
+                }
+            ]
+        }
+    )
+    challenger, _, _, _, _, record_id = _challenger(
+        tmp_path,
+        (QUERY_REPLY, SCREENING_REPLY, metadata_reply, COMPARISON_REPLY),
+        literature_outcomes=retrievals,
+    )
+    result = challenger.run(_directive(ideation_run_record_id=record_id))
+    (assessment,) = result.assessments
+    assert assessment.verdict is PriorArtVerdict.DISTINGUISHED
+    assert assessment.reasons == ()
+    coverage = assessment.coverage
+    assert coverage.metadata_level == 1
+    assert coverage.undecidable == 1
+    assert coverage.metadata_ambiguous == 0
+
+
+def test_cited_works_screen_first_and_truncation_costs_the_fresh_tail(
+    tmp_path: Path,
+) -> None:
+    # The Task 5D.1 live defect, corrected: cited works sorted last and
+    # were exactly the sources the screening cap truncated.
+    extra = _source(
+        "W_c",
+        "Sparse Attention Benchmarks",
+        "We benchmark sparse attention variants on language tasks.",
+    )
+    retrievals = (_retrieved(SRC_A, SRC_B, extra), *RETRIEVALS[1:])
     screening_reply = json.dumps(
         {
             "screens": [
+                _screen_entry(CITED.id, "related"),
                 _screen_entry(SRC_A.id, "potential_overlap"),
                 _screen_entry(SRC_B.id, "unrelated"),
-                _screen_entry(shadow.id, "potential_overlap"),
-                _screen_entry(CITED.id, "related"),
             ]
         }
     )
@@ -558,12 +669,17 @@ def test_metadata_only_sources_are_never_compared(tmp_path: Path) -> None:
         (QUERY_REPLY, screening_reply, COMPARISON_REPLY),
         literature_outcomes=retrievals,
     )
-    result = challenger.run(_directive(ideation_run_record_id=record_id))
+    result = challenger.run(
+        _directive(
+            ideation_run_record_id=record_id, max_screened_per_candidate=3
+        )
+    )
     (assessment,) = result.assessments
-    compared = {record.source_id for record in result.comparisons}
-    assert shadow.id not in compared
-    assert assessment.verdict is PriorArtVerdict.NOVELTY_UNRESOLVED
-    assert PriorArtReasonCode.METADATA_AMBIGUITY in {
+    screened_ids = {record.source_id for record in result.screenings}
+    assert CITED.id in screened_ids
+    assert extra.id not in screened_ids
+    assert assessment.coverage.screening_truncated == 1
+    assert PriorArtReasonCode.SCREENING_TRUNCATED in {
         reason.code for reason in assessment.reasons
     }
 
