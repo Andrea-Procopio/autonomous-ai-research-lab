@@ -1088,11 +1088,7 @@ def _coverage(
             1
             for record in screenings
             if record.source_id in pool.metadata_ids
-            and record.decision
-            in (
-                SimilarityDecision.POTENTIAL_OVERLAP,
-                SimilarityDecision.UNDECIDABLE,
-            )
+            and record.decision is SimilarityDecision.POTENTIAL_OVERLAP
         ),
         screening_truncated=len(in_cutoff) - len(to_screen),
         compared_works=len(comparisons),

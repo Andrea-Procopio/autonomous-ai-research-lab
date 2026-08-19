@@ -381,9 +381,14 @@ class PriorArtCoverage:
     unrelated: int
     undecidable: int
     metadata_ambiguous: int
-    """METADATA-access sources screened potentially overlapping or
-    undecidable: possible direct prior art with no abstract to compare.
-    Each one blocks a DISTINGUISHED verdict."""
+    """METADATA-access sources screened as material potential overlaps:
+    possible direct prior art, attested by an overlap hypothesis, with
+    no abstract to compare against. Each one blocks a DISTINGUISHED
+    verdict. An undecidable metadata-only screen is an access fact —
+    counted in ``metadata_level`` and ``undecidable`` — never a
+    blocker. The structural bound below stays permissive so preserved
+    pre-5D.2 coverages, which counted undecidable screens here, remain
+    loadable forever."""
 
     screening_truncated: int
     compared_works: int

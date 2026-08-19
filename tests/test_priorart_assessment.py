@@ -40,7 +40,9 @@ from autonomous_research_lab.priorart.assessment import (
 )
 from autonomous_research_lab.priorart.records import (
     DIMENSIONS,
+    ComparisonDimension,
     DimensionComparison,
+    OverlapHypothesis,
     PriorArtCoverage,
     PriorArtQueryFamily,
     PriorArtScreeningRecord,
@@ -260,6 +262,141 @@ def test_excessive_undecidable_screens_are_unresolved() -> None:
     )
     assert assessment.verdict is PriorArtVerdict.NOVELTY_UNRESOLVED
     assert _codes(assessment) == {PriorArtReasonCode.EXCESSIVE_UNCERTAINTY}
+
+
+def test_a_metadata_undecidable_is_coverage_not_a_blocker() -> None:
+    # The Task 5D.1 live evidence: every blocking metadata screen was
+    # an undecidable title-only screen — the access level restated,
+    # never an overlap signal. Undecidability without an attested
+    # hypothesis is a coverage fact, and differentiation stays
+    # reachable beside it.
+    decisions = dict(_DECISIONS)
+    decisions["lit_5"] = SimilarityDecision.UNDECIDABLE
+    assessment = _assess(
+        screenings=tuple(
+            _screening(source_id, decision)
+            for source_id, decision in decisions.items()
+        ),
+        metadata_source_ids=frozenset({"lit_5"}),
+        coverage=_coverage(
+            abstract_level=11,
+            metadata_level=1,
+            unrelated=7,
+            undecidable=1,
+        ),
+    )
+    assert assessment.verdict is PriorArtVerdict.DISTINGUISHED
+    assert assessment.reasons == ()
+
+
+def test_uncertainty_is_measured_where_text_exists() -> None:
+    # Two of twelve abstract-level screens undecidable (0.1667) beside
+    # five metadata-only undecidables: the old whole-pool reading
+    # (7/17 = 0.41) would have fired on the missing abstracts alone;
+    # the abstract-level basis does not.
+    decisions = dict(_DECISIONS)
+    decisions["lit_9"] = SimilarityDecision.UNDECIDABLE
+    decisions["lit_10"] = SimilarityDecision.UNDECIDABLE
+    for index in range(13, 18):
+        decisions[f"lit_{index}"] = SimilarityDecision.UNDECIDABLE
+    assessment = _assess(
+        screenings=tuple(
+            _screening(source_id, decision)
+            for source_id, decision in decisions.items()
+        ),
+        metadata_source_ids=frozenset(
+            f"lit_{index}" for index in range(13, 18)
+        ),
+        coverage=_coverage(
+            total_retrieved=17,
+            unique_sources=17,
+            abstract_level=12,
+            metadata_level=5,
+            screened=17,
+            unrelated=6,
+            undecidable=7,
+        ),
+    )
+    assert assessment.verdict is PriorArtVerdict.DISTINGUISHED
+    assert assessment.reasons == ()
+
+
+def test_the_thin_pool_rule_measures_the_screenable_pool() -> None:
+    # Post-cutoff works can never be screened, so they cannot count
+    # toward the pool that grounds differentiation.
+    nine = tuple(
+        _screening(source_id, decision)
+        for source_id, decision in tuple(_DECISIONS.items())[:9]
+    )
+    blocked = _assess(
+        screenings=nine,
+        coverage=_coverage(
+            post_cutoff_excluded=3,
+            abstract_level=9,
+            screened=9,
+            unrelated=5,
+        ),
+    )
+    assert blocked.verdict is PriorArtVerdict.NOVELTY_UNRESOLVED
+    assert _codes(blocked) == {PriorArtReasonCode.TOO_FEW_UNIQUE_SOURCES}
+    assert "excluded post-cutoff" in blocked.reasons[0].detail
+    ten = tuple(
+        _screening(source_id, decision)
+        for source_id, decision in tuple(_DECISIONS.items())[:10]
+    )
+    passing = _assess(
+        screenings=ten,
+        coverage=_coverage(
+            unique_sources=13,
+            overlap=1,
+            post_cutoff_excluded=3,
+            abstract_level=10,
+            screened=10,
+            unrelated=6,
+        ),
+    )
+    assert passing.verdict is PriorArtVerdict.DISTINGUISHED
+
+
+def test_a_material_ambiguity_names_its_attested_claim() -> None:
+    attested = PriorArtScreeningRecord(
+        run_id=RUN,
+        candidate_id=CANDIDATE,
+        source_id="lit_2",
+        known_prior_art=False,
+        decision=SimilarityDecision.POTENTIAL_OVERLAP,
+        reason="the title names the candidate's exact mechanism",
+        provenance=_provenance(),
+        overlap_hypothesis=OverlapHypothesis(
+            candidate_claim="reweights attention heads",
+            source_text="attention head reweighting",
+            support_location=SupportLocation.TITLE,
+            dimension=ComparisonDimension.MECHANISM,
+            rationale="the title claims the proposed core mechanism",
+        ),
+    )
+    assessment = _assess(
+        screenings=tuple(
+            attested
+            if source_id == "lit_2"
+            else _screening(source_id, decision)
+            for source_id, decision in _DECISIONS.items()
+        ),
+        comparisons=(_comparison("lit_1"),),
+        metadata_source_ids=frozenset({"lit_2"}),
+        coverage=_coverage(
+            abstract_level=11,
+            metadata_level=1,
+            metadata_ambiguous=1,
+            compared_works=1,
+        ),
+    )
+    assert assessment.verdict is PriorArtVerdict.NOVELTY_UNRESOLVED
+    assert _codes(assessment) == {PriorArtReasonCode.METADATA_AMBIGUITY}
+    detail = assessment.reasons[0].detail
+    assert "claim at risk" in detail
+    assert "reweights attention heads" in detail
+    assert "mechanism" in detail
 
 
 def test_a_metadata_potential_overlap_forces_unresolved() -> None:

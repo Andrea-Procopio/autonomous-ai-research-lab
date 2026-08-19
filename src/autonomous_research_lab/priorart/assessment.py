@@ -17,11 +17,18 @@ ground itself dimension by dimension in a source's accessible text.
 differentiated from the closest works *this bounded search surfaced*,
 under adequate recorded coverage — it is never proof of novelty, and no
 value of this enum certifies anything about the world's literature. A
-metadata-only source screened as possibly overlapping blocks
-``DISTINGUISHED`` outright: it could contain direct prior art, there is
-no abstract to compare, and deciding it is "the same overlap" as some
-compared work would be a model judgment where only trusted code may
-conclude.
+metadata-only source blocks ``DISTINGUISHED`` exactly when it was
+screened as a *material* potential overlap — a decision the gate
+refuses to record without an attested hypothesis naming the candidate
+claim at risk and the source text supporting the concern. A
+metadata-only source screened undecidable does not block: with no
+abstract, undecidability restates the access level the coverage
+already counts, and the Task 5D.1 live evidence showed that treating
+it as ambiguity made every realistic pool block on access alone —
+never on an overlap signal. The refusal stays honest because the
+counts stay on the record, and deciding a material ambiguity "is the
+same overlap" as some compared work would still be a model judgment
+where only trusted code may conclude.
 
 :func:`require_candidates_for_prior_art` is the door, mirroring
 ``require_adequate_for_idea_generation`` one stage down: a challenge run
@@ -85,7 +92,19 @@ class PriorArtReason:
 class PriorArtThresholds:
     """The recorded bar a DISTINGUISHED verdict must clear. Travels
     inside every assessment: a reloaded verdict carries the thresholds
-    it was judged against."""
+    it was judged against.
+
+    The bases are part of the semantics, fixed by the assessing code:
+    ``min_unique_sources`` is measured against the in-cutoff screenable
+    pool (unique sources minus post-cutoff exclusions) — a work the
+    cutoff excludes can never be screened, so it cannot help ground
+    differentiation — and ``max_undecidable_fraction`` bounds
+    undecidable screens among abstract-level screens only, because a
+    metadata-only source is expected to screen undecidable: that
+    restates its access level, already counted by the coverage, and
+    billing it here again would be the same missing abstract twice.
+    Both operands of each basis travel in every coverage record, so any
+    historical verdict can be re-derived under either reading."""
 
     min_unique_sources: int = 10
     max_undecidable_fraction: float = 0.34
@@ -211,18 +230,15 @@ def assess_prior_art(
             "the coverage must count exactly the recorded comparisons"
         )
     ambiguous = tuple(
-        record.source_id
+        record
         for record in screenings
         if record.source_id in metadata_source_ids
-        and record.decision
-        in (
-            SimilarityDecision.POTENTIAL_OVERLAP,
-            SimilarityDecision.UNDECIDABLE,
-        )
+        and record.decision is SimilarityDecision.POTENTIAL_OVERLAP
     )
     if len(ambiguous) != coverage.metadata_ambiguous:
         raise ValueError(
-            "the coverage must count exactly the metadata-ambiguous screens"
+            "the coverage must count exactly the material "
+            "metadata-ambiguous screens"
         )
 
     reasons: list[PriorArtReason] = []
@@ -239,36 +255,64 @@ def assess_prior_art(
                 f"can be claimed",
             )
         )
-    if coverage.unique_sources < thresholds.min_unique_sources:
+    screenable = coverage.unique_sources - coverage.post_cutoff_excluded
+    if screenable < thresholds.min_unique_sources:
         reasons.append(
             PriorArtReason(
                 PriorArtReasonCode.TOO_FEW_UNIQUE_SOURCES,
-                f"{coverage.unique_sources} unique sources against a "
-                f"threshold of {thresholds.min_unique_sources}; a pool "
-                f"this thin cannot ground differentiation",
+                f"{screenable} in-cutoff screenable sources "
+                f"({coverage.unique_sources} unique, "
+                f"{coverage.post_cutoff_excluded} excluded post-cutoff, "
+                f"{coverage.known_prior_art_listed} candidate-cited) "
+                f"against a threshold of {thresholds.min_unique_sources}; "
+                f"a pool this thin cannot ground differentiation",
             )
         )
-    if coverage.screened:
-        fraction = round(coverage.undecidable / coverage.screened, 4)
+    abstract_screens = tuple(
+        record
+        for record in screenings
+        if record.source_id not in metadata_source_ids
+    )
+    if abstract_screens:
+        undecided = sum(
+            1
+            for record in abstract_screens
+            if record.decision is SimilarityDecision.UNDECIDABLE
+        )
+        fraction = round(undecided / len(abstract_screens), 4)
         if fraction > thresholds.max_undecidable_fraction:
             reasons.append(
                 PriorArtReason(
                     PriorArtReasonCode.EXCESSIVE_UNCERTAINTY,
-                    f"{coverage.undecidable} of {coverage.screened} "
-                    f"screens were undecidable ({fraction}, threshold "
+                    f"{undecided} of {len(abstract_screens)} "
+                    f"abstract-level screens were undecidable "
+                    f"({fraction}, threshold "
                     f"{thresholds.max_undecidable_fraction}); the pool is "
                     f"not understood well enough to distinguish against",
                 )
             )
     if ambiguous:
-        listed = ", ".join(ambiguous)
+        accounts = []
+        for record in ambiguous:
+            hypothesis = record.overlap_hypothesis
+            if hypothesis is not None:
+                accounts.append(
+                    f"{record.source_id} (claim at risk: "
+                    f"{hypothesis.candidate_claim!r}; dimension: "
+                    f"{hypothesis.dimension.value})"
+                )
+            else:
+                accounts.append(
+                    f"{record.source_id} (recorded without an attested "
+                    f"hypothesis; a pre-5D.2 screen blocks fail-closed)"
+                )
         reasons.append(
             PriorArtReason(
                 PriorArtReasonCode.METADATA_AMBIGUITY,
                 f"metadata-only source"
-                f"{'s' if len(ambiguous) > 1 else ''} {listed} screened as "
-                f"possibly overlapping or undecidable: possible direct "
-                f"prior art with no abstract to compare",
+                f"{'s' if len(ambiguous) > 1 else ''} screened as "
+                f"materially overlapping with no abstract to compare: "
+                f"{'; '.join(accounts)}",
             )
         )
     if coverage.compared_works < thresholds.min_compared_works:
