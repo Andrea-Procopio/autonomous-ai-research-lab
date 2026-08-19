@@ -4,6 +4,8 @@ records. No network, no model."""
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from autonomous_research_lab.ideation.gates import (
     check_candidates,
     claim_text_of,
@@ -11,14 +13,17 @@ from autonomous_research_lab.ideation.gates import (
 from autonomous_research_lab.ideation.records import problem_key, theme_key
 from autonomous_research_lab.mapping.brief import SourceEra
 from autonomous_research_lab.mapping.records import (
+    CallProvenance,
     DatasetUse,
     ExtractionRecord,
     Limitation,
     LimitationKind,
     ProblemEntry,
+    ProblemInventoryRecord,
     ProblemKind,
     SupportLocation,
 )
+from autonomous_research_lab.mapping.store import MappingStore
 
 CLAIMS_A = (
     "attention head reweighting improves accuracy by 2.4 points on glue\n"
@@ -28,7 +33,11 @@ CLAIMS_B = (
     "kalman filter view of in-context learning\n"
     "evaluated only on synthetic regression with 3 seeds"
 )
-ACCESSIBLE = {"lit_a": CLAIMS_A, "lit_b": CLAIMS_B}
+#: A realistically hex-tailed source id, sanitized from the preserved
+#: Task 5C live rejection (task5c-2026-08-19, irej_f14746558f874cb9):
+#: its digit runs are what the number gate misread as claims.
+LIT_HEX = "lit_452f82f87d6c12e8"
+ACCESSIBLE = {"lit_a": CLAIMS_A, "lit_b": CLAIMS_B, LIT_HEX: CLAIMS_A}
 
 P_MULTI = ProblemEntry(
     statement=(
@@ -388,6 +397,82 @@ def test_numbers_grounded_in_problem_texts_pass() -> None:
     assert "ungrounded_number" in _rules(_check(_payload(unrelated)))
 
 
+def test_known_identifiers_in_prose_are_not_numerical_claims() -> None:
+    # One known id: the hex tail contributes no number tokens; the real
+    # number beside it is still validated (and grounded here).
+    single = _candidate(
+        cited_source_ids=["lit_a", "lit_b", LIT_HEX],
+        grounding=(
+            f"As {LIT_HEX} reports, reweighting improves accuracy by "
+            f"2.4 points on GLUE."
+        ),
+    )
+    assert _check(_payload(single)) == ()
+    # Several known handles at once — a source id, a derived problem
+    # key, and a derived theme key — all names, none numbers.
+    several = _candidate(
+        cited_source_ids=["lit_a", "lit_b", LIT_HEX],
+        grounding=(
+            f"Problem {problem_key(P_MULTI.statement)} (grounded by "
+            f"{LIT_HEX}, theme {theme_key('Mechanistic accounts')}) "
+            f"reports a 2.4 point reweighting gain."
+        ),
+    )
+    assert _check(_payload(several)) == ()
+    # An id with no other number in the sentence leaves nothing to
+    # check at all.
+    bare = _candidate(
+        cited_source_ids=["lit_a", "lit_b", LIT_HEX],
+        grounding=f"{LIT_HEX} and the records ground this premise.",
+    )
+    assert _check(_payload(bare)) == ()
+
+
+def test_unknown_identifiers_still_read_as_ungrounded_numbers() -> None:
+    # A fabricated id is not in the accepted context: its digit runs
+    # surface as ungrounded numbers, exactly as before the fix.
+    fabricated = _candidate(
+        grounding=(
+            "As lit_deadbeef12345678 reports, reweighting improves "
+            "accuracy by 2.4 points on GLUE."
+        ),
+    )
+    rejections = _check(_payload(fabricated))
+    assert _rules(rejections) == {"ungrounded_number"}
+    details = " ".join(r.detail for r in rejections)  # type: ignore[attr-defined]
+    assert "12345678" in details
+    invented_key = _candidate(
+        grounding=(
+            "Problem prob_00ff00ff00ff00ff reports a 2.4 point gain."
+        ),
+    )
+    assert _rules(_check(_payload(invented_key))) == {"ungrounded_number"}
+
+
+def test_a_number_beside_a_known_identifier_is_still_validated() -> None:
+    invented = _candidate(
+        cited_source_ids=["lit_a", "lit_b", LIT_HEX],
+        grounding=f"{LIT_HEX} reports an 88.8 point gain.",
+    )
+    rejections = _check(_payload(invented))
+    assert _rules(rejections) == {"ungrounded_number"}
+    details = " ".join(r.detail for r in rejections)  # type: ignore[attr-defined]
+    assert "88.8" in details
+    # Only the invented number fires — no fragment of the known id does.
+    assert "452" not in details
+
+
+def test_refusal_prose_may_name_known_identifiers() -> None:
+    refusal = _payload(
+        rationale="",
+        refusal=(
+            f"The records behind {LIT_HEX} report single-paper "
+            f"limitations only; no defensible candidate follows."
+        ),
+    )
+    assert _check(refusal) == ()
+
+
 def test_cfp_alignment_numbers_come_from_the_direction() -> None:
     grounded = _candidate(
         cfp_alignment=(
@@ -399,6 +484,13 @@ def test_cfp_alignment_numbers_come_from_the_direction() -> None:
         cfp_alignment="Fits all 12 tracks of the call."
     )
     assert "ungrounded_number" in _rules(_check(_payload(invented)))
+    named = _candidate(
+        cited_source_ids=["lit_a", "lit_b", LIT_HEX],
+        cfp_alignment=(
+            f"Extends what {LIT_HEX} reports toward the call's topics."
+        ),
+    )
+    assert _check(_payload(named)) == ()
 
 
 # -- claim language -----------------------------------------------------------
@@ -574,6 +666,125 @@ def test_claim_text_of_collects_the_extractions_claims() -> None:
         "evaluated on english only",
     ):
         assert expected in haystack
+
+
+def test_grounding_is_deterministic_after_durable_reload(
+    tmp_path: Path,
+) -> None:
+    """The id-exclusion behaves identically on in-memory records and on
+    the same records reloaded from the write-once mapping store: the
+    known-identifier universe derives from the durable inputs, so a
+    reload changes nothing."""
+    hex_a = "lit_452f82f87d6c12e8"
+    hex_b = "lit_662dfe59da752898"
+    provenance = CallProvenance(
+        request_fingerprint="mreq_1",
+        response_id="mcall_1",
+        provider="fake",
+        requested_model="model-x",
+        served_model="model-x",
+        provider_request_id=None,
+        latency_seconds=0.25,
+        input_tokens=10,
+        output_tokens=20,
+        repair_count=0,
+    )
+
+    def _extract(source_id: str, *claims: str) -> ExtractionRecord:
+        return ExtractionRecord(
+            run_id="map_x",
+            source_id=source_id,
+            era=SourceEra.RECENT,
+            access_level="abstract",
+            support_location=SupportLocation.ABSTRACT,
+            sufficient_support=True,
+            insufficiency_reason="",
+            methods=claims,
+            datasets=(),
+            metrics=(),
+            evaluation_protocols=(),
+            baselines=(),
+            reported_results=("improves accuracy by 2.4 points",),
+            limitations=(),
+            future_work=(),
+            open_problems=(),
+            provenance=None,
+        )
+
+    extract_a = _extract(hex_a, "attention head reweighting")
+    extract_b = _extract(hex_b, "kalman filtering account")
+    problem = ProblemEntry(
+        statement="Mechanism accounts disagree across the records.",
+        kind=ProblemKind.OPEN_PROBLEM,
+        grounding="Both records report open mechanism questions.",
+        supporting_source_ids=(hex_a, hex_b),
+    )
+    inventory = ProblemInventoryRecord(
+        run_id="map_x",
+        brief_id="brief_x",
+        problems=(problem,),
+        provenance=provenance,
+    )
+    store = MappingStore(tmp_path / "mapping")
+    store.record_extraction(extract_a)
+    store.record_extraction(extract_b)
+    store.record_inventory(inventory)
+
+    def _context(
+        extractions: tuple[ExtractionRecord, ...],
+        problems: tuple[ProblemEntry, ...],
+    ) -> dict[str, object]:
+        return {
+            "problems": {
+                problem_key(entry.statement): entry for entry in problems
+            },
+            "themes": {
+                theme_key("Mechanistic accounts"): "Mechanistic accounts"
+            },
+            "direction_topics": TOPICS,
+            "direction_text": DIRECTION_TEXT,
+            "accessible": {
+                record.source_id: claim_text_of(record)
+                for record in extractions
+            },
+            "max_candidates": 3,
+        }
+
+    def _entry(grounding: str) -> dict[str, object]:
+        return _candidate(
+            problem_keys=[problem_key(problem.statement)],
+            cited_source_ids=[hex_a, hex_b],
+            grounding=grounding,
+            datasets=[
+                {
+                    "name": "a new probe suite",
+                    "status": "new_requirement",
+                    "role": "evaluation",
+                }
+            ],
+        )
+
+    grounded = _payload(
+        _entry(f"{hex_a} and {hex_b} report a 2.4 point gain.")
+    )
+    fabricated = _payload(
+        _entry("lit_00dd00dd00dd00dd reports a 2.4 point gain.")
+    )
+    fresh = MappingStore(tmp_path / "mapping")
+    reloaded_inventory = fresh.get_inventory(inventory.id)
+    assert reloaded_inventory is not None
+    live = _context((extract_a, extract_b), inventory.problems)
+    reloaded = _context(fresh.extractions(), reloaded_inventory.problems)
+    assert (
+        check_candidates(grounded, **live)  # type: ignore[arg-type]
+        == check_candidates(grounded, **reloaded)  # type: ignore[arg-type]
+        == ()
+    )
+    assert (
+        _rules(check_candidates(fabricated, **live))  # type: ignore[arg-type]
+        == _rules(check_candidates(fabricated, **reloaded))  # type: ignore[arg-type]
+        == {"ungrounded_number"}
+    )
 
 
 def test_the_gate_never_raises_on_taste() -> None:

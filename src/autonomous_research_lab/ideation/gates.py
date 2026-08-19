@@ -20,7 +20,11 @@ Three decisions carry the epistemic weight:
   proposing new numbers is their job — and are exempt. The grounding
   surface is always the mapping run's own gated claim texts
   (:func:`claim_text_of`), never raw literature: what this package cannot
-  read, it cannot pretend to have read.
+  read, it cannot pretend to have read. A known identifier is a name,
+  not a number: exact ``lit_``/``prob_``/``thm_`` handles from the
+  accepted context are stripped before number extraction, while the
+  digits of an unknown or fabricated id still read as ungrounded
+  numbers.
 
 * **Novelty language is banned outright.** Every candidate's novelty
   status is structurally ``UNASSESSED``; text claiming an idea is novel,
@@ -165,6 +169,23 @@ def _check_grounded_numbers(
             )
 
 
+def _without_known_ids(text: str, known_ids: frozenset[str]) -> str:
+    """Strip exact occurrences of known durable identifiers before
+    number extraction: an id is a name, not a numerical claim, yet its
+    hexadecimal tail reads as digit runs. Observed live (Task 5C,
+    2026-08-19): ``lit_`` source ids pasted into grounding prose fired
+    ``ungrounded_number`` 51 times on fragments of their own hex. Only
+    identifiers the trusted context actually knows are stripped — the
+    digits of a fabricated or unknown id still surface as ungrounded
+    numbers, which is the honest fail-closed outcome — and stripping
+    replaces the id with a space, so a real number standing beside a
+    known id is still validated."""
+    cleaned = text
+    for identifier in sorted(known_ids, key=len, reverse=True):
+        cleaned = cleaned.replace(identifier, " ")
+    return cleaned
+
+
 def _normalized(text: str) -> str:
     return " ".join(text.casefold().split())
 
@@ -254,6 +275,9 @@ def check_candidates(
     candidates = _sequence(payload["candidates"])
     refusal = str(payload["refusal_justification"])
     rationale = str(payload["diversity_rationale"])
+    known_ids = (
+        frozenset(problems) | frozenset(themes) | frozenset(accessible)
+    )
 
     if not candidates:
         if not refusal.strip():
@@ -269,7 +293,7 @@ def check_candidates(
             refusal, "refusal_justification", rejections
         )
         _check_grounded_numbers(
-            refusal,
+            _without_known_ids(refusal, known_ids),
             _number_tokens(
                 "\n".join(
                     (
@@ -380,10 +404,13 @@ def check_candidates(
         )
         tokens = _number_tokens(haystack)
         _check_grounded_numbers(
-            str(entry["grounding"]), tokens, f"{label}.grounding", rejections
+            _without_known_ids(str(entry["grounding"]), known_ids),
+            tokens,
+            f"{label}.grounding",
+            rejections,
         )
         _check_grounded_numbers(
-            str(entry["cfp_alignment"]),
+            _without_known_ids(str(entry["cfp_alignment"]), known_ids),
             _number_tokens(direction_text.casefold()),
             f"{label}.cfp_alignment",
             rejections,
