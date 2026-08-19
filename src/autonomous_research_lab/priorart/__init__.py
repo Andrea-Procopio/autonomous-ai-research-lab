@@ -25,6 +25,16 @@ records.
 """
 
 from ..mapping.gates import MappingRejection
+from .assessment import (
+    MissingCandidatePortfolioError,
+    PriorArtAssessment,
+    PriorArtReason,
+    PriorArtReasonCode,
+    PriorArtThresholds,
+    PriorArtVerdict,
+    assess_prior_art,
+    require_candidates_for_prior_art,
+)
 from .directive import (
     COMPARED_WORKS_CEILING,
     MODEL_CALLS_CEILING,
@@ -66,16 +76,24 @@ __all__ = [
     "ComparisonDimension",
     "DimensionComparison",
     "MappingRejection",
+    "MissingCandidatePortfolioError",
+    "PriorArtAssessment",
     "PriorArtCoverage",
     "PriorArtDirective",
     "PriorArtQueryExecution",
     "PriorArtQueryFamily",
+    "PriorArtReason",
+    "PriorArtReasonCode",
     "PriorArtRunRecord",
     "PriorArtScreeningRecord",
+    "PriorArtThresholds",
+    "PriorArtVerdict",
     "SimilarityDecision",
     "SimilarityLabel",
     "WorkComparison",
+    "assess_prior_art",
     "check_comparisons",
     "check_prior_art_queries",
     "check_similarity_screening",
+    "require_candidates_for_prior_art",
 ]
