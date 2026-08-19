@@ -77,6 +77,7 @@ from .plan import (
     canonical_groups,
     render_query,
 )
+from .preflight import check_budget_coherence
 from .records import (
     DIMENSIONS,
     ComparisonDimension,
@@ -556,7 +557,7 @@ class PriorArtChallenger:
         corpus: LiteratureCorpus,
         store: PriorArtStore,
         thresholds: PriorArtThresholds | None = None,
-        screening_batch_size: int = 10,
+        screening_batch_size: int = 12,
         max_output_tokens: int = 16384,
         temperature: float = 0.0,
         request_timeout_seconds: float = 240.0,
@@ -589,6 +590,18 @@ class PriorArtChallenger:
             candidate = self._ideation_store.get_idea(candidate_id)
             assert candidate is not None  # the door verified loadability
             candidates.append(candidate)
+
+        # Budget coherence before the first call: a directive that
+        # cannot complete its own maximum work is refused here, so the
+        # runtime budget guard below is defense in depth, not a path a
+        # preflighted run can reach.
+        check_budget_coherence(
+            directive=directive,
+            candidates=candidates,
+            thresholds=self._thresholds,
+            screening_batch_size=self._screening_batch_size,
+            max_corrective_calls=self._max_corrective_calls,
+        )
 
         run_id = occurrence_id("pac")
         spend = _Spend(directive.max_model_calls)

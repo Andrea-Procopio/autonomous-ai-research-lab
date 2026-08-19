@@ -50,7 +50,6 @@ from autonomous_research_lab.priorart.assessment import (
 from autonomous_research_lab.priorart.challenger import (
     PRIOR_ART_QUERY_SCHEMA,
     QUERY_INSTRUCTION,
-    PriorArtBudgetError,
     PriorArtChallenger,
     PriorArtRejectedError,
 )
@@ -58,6 +57,9 @@ from autonomous_research_lab.priorart.directive import PriorArtDirective
 from autonomous_research_lab.priorart.plan import (
     MAX_ALTERNATIVES_PER_GROUP,
     MAX_CONCEPT_GROUPS,
+)
+from autonomous_research_lab.priorart.preflight import (
+    PriorArtPreflightError,
 )
 from autonomous_research_lab.priorart.records import (
     DIMENSIONS,
@@ -650,44 +652,27 @@ def test_an_undecidable_metadata_screen_does_not_block(
     assert coverage.metadata_ambiguous == 0
 
 
-def test_cited_works_screen_first_and_truncation_costs_the_fresh_tail(
-    tmp_path: Path,
-) -> None:
+def test_cited_works_screen_before_fresh_ones(tmp_path: Path) -> None:
     # The Task 5D.1 live defect, corrected: cited works sorted last and
-    # were exactly the sources the screening cap truncated.
-    extra = _source(
-        "W_c",
-        "Sparse Attention Benchmarks",
-        "We benchmark sparse attention variants on language tasks.",
+    # were exactly the sources the screening cap truncated. They now
+    # head the pool — and a directive whose own retrieval could
+    # truncate at all is refused by the preflight before any call, so
+    # the ordering is defense in depth, not the only guard.
+    challenger, provider, _, _, _, record_id = _challenger(
+        tmp_path, HAPPY_REPLIES
     )
-    retrievals = (_retrieved(SRC_A, SRC_B, extra), *RETRIEVALS[1:])
-    screening_reply = json.dumps(
-        {
-            "screens": [
-                _screen_entry(CITED.id, "related"),
-                _screen_entry(SRC_A.id, "potential_overlap"),
-                _screen_entry(SRC_B.id, "unrelated"),
-            ]
-        }
-    )
-    challenger, _, _, _, _, record_id = _challenger(
-        tmp_path,
-        (QUERY_REPLY, screening_reply, COMPARISON_REPLY),
-        literature_outcomes=retrievals,
-    )
-    result = challenger.run(
-        _directive(
-            ideation_run_record_id=record_id, max_screened_per_candidate=3
+    challenger.run(_directive(ideation_run_record_id=record_id))
+    screening_request = provider.calls[1]
+    assert str(screening_request.metadata.get("stage")) == "screening"
+    (message,) = screening_request.messages
+    assert message.content.index(CITED.id) < message.content.index(SRC_A.id)
+    with pytest.raises(PriorArtPreflightError, match="mechanically"):
+        challenger.run(
+            _directive(
+                ideation_run_record_id=record_id,
+                max_screened_per_candidate=3,
+            )
         )
-    )
-    (assessment,) = result.assessments
-    screened_ids = {record.source_id for record in result.screenings}
-    assert CITED.id in screened_ids
-    assert extra.id not in screened_ids
-    assert assessment.coverage.screening_truncated == 1
-    assert PriorArtReasonCode.SCREENING_TRUNCATED in {
-        reason.code for reason in assessment.reasons
-    }
 
 
 def test_cited_prior_art_joins_the_pool_deduplicated(
@@ -811,25 +796,65 @@ def test_a_persistent_schema_violation_reraises_the_typed_error(
     assert store.runs() == ()
 
 
-def test_the_model_call_budget_fails_closed(tmp_path: Path) -> None:
-    challenger, provider, ledger, store, _, record_id = _challenger(
-        tmp_path, (QUERY_REPLY,)
+def test_an_incoherent_budget_is_refused_before_any_call(
+    tmp_path: Path,
+) -> None:
+    # A directive that cannot cover its own worst case never reaches
+    # the provider or the network: the refusal names the arithmetic,
+    # and only the directive record — an input, not an outcome — is
+    # durable.
+    challenger, provider, ledger, store, scripted, record_id = _challenger(
+        tmp_path, ()
     )
-    with pytest.raises(PriorArtBudgetError, match="budget"):
+    with pytest.raises(PriorArtPreflightError, match="worst-case calls"):
+        challenger.run(
+            _directive(ideation_run_record_id=record_id, max_model_calls=1)
+        )
+    assert provider.calls == ()
+    assert scripted.queries == ()
+    assert ledger.drain().calls == 0
+    assert store.runs() == ()
+    assert tuple((store.root / "executions").glob("*.json")) == ()
+
+
+def test_the_preflight_collects_every_violation(tmp_path: Path) -> None:
+    challenger, _, _, _, _, record_id = _challenger(tmp_path, ())
+    with pytest.raises(PriorArtPreflightError) as caught:
         challenger.run(
             _directive(
-                ideation_run_record_id=record_id, max_model_calls=1
+                ideation_run_record_id=record_id,
+                max_screened_per_candidate=10,
+                max_model_calls=6,
             )
         )
-    # The query stage spent the single allowed call; the screening call
-    # never reached the provider.
-    assert len(provider.calls) == 1
-    assert ledger.drain().calls == 1
-    assert store.runs() == ()
-    # The executed retrievals are durable beside the aborted run.
-    assert (
-        len(tuple((store.root / "executions").glob("*.json"))) == 6
+    message = str(caught.value)
+    assert "mechanically truncate" in message
+    assert "worst-case calls" in message
+
+
+def test_a_preflighted_run_stays_inside_its_budget(tmp_path: Path) -> None:
+    # The preflight reserves the exact worst case — every gated stage
+    # burning its corrective call — so a run it admits completes
+    # without ever reaching the runtime budget guard.
+    replies = (
+        "not json",
+        QUERY_REPLY,
+        "not json",
+        SCREENING_REPLY,
+        "not json",
+        COMPARISON_REPLY,
     )
+    challenger, provider, _, store, _, record_id = _challenger(
+        tmp_path, replies
+    )
+    result = challenger.run(
+        _directive(ideation_run_record_id=record_id, max_model_calls=12)
+    )
+    assert len(provider.calls) == 6
+    assert result.run_record.model_calls == 6
+    assert len(store.rejected()) == 3
+    (assessment,) = result.assessments
+    assert assessment.verdict is PriorArtVerdict.DISTINGUISHED
 
 
 def test_a_billed_schema_violation_stays_on_the_run_record(

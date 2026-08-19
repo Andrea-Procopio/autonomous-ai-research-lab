@@ -49,16 +49,25 @@ class PriorArtDirective:
     every other family searches arbitrarily far back."""
 
     results_per_query: int = 5
-    max_screened_per_candidate: int = 20
+    max_screened_per_candidate: int = 35
+    """Must cover the worst-case pool the directive itself can
+    retrieve: six families at ``results_per_query`` plus the
+    candidate's cited injection. The preflight refuses a directive
+    whose own successful retrieval would mechanically truncate — the
+    Task 5D.1 live shape (23 pooled, 20 screenable, 3 truncated, the
+    truncation then reported as a scientific deficiency)."""
+
     max_compared_works: int = 4
     """Comparison is the largest structured reply the challenger asks
     for; the cap keeps one candidate's comparison call inside the proven
     output envelope."""
 
-    max_model_calls: int = 24
-    """Three gated stages per candidate (query proposal, screening
-    batches, comparison) at one call plus at most one corrective call
-    each, across a small portfolio."""
+    max_model_calls: int = 36
+    """The worst case the preflight reserves: per candidate, one query
+    proposal, ``ceil(35/12) + 1`` screening batches (abstract-level and
+    metadata-only apart), and one comparison — six gated stages — each
+    with at most one corrective call, across a three-candidate
+    portfolio: 3 x 6 x 2 = 36."""
 
     id: str = field(default="")
 

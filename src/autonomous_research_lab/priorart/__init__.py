@@ -75,6 +75,11 @@ from .plan import (
     canonical_groups,
     render_query,
 )
+from .preflight import (
+    PriorArtCallPlan,
+    PriorArtPreflightError,
+    check_budget_coherence,
+)
 from .records import (
     CLAIM_KINDS,
     DIMENSIONS,
@@ -126,12 +131,14 @@ __all__ = [
     "OverlapHypothesis",
     "PriorArtAssessment",
     "PriorArtBudgetError",
+    "PriorArtCallPlan",
     "PriorArtChallenger",
     "PriorArtConflictError",
     "PriorArtContractError",
     "PriorArtCoverage",
     "PriorArtDirective",
     "PriorArtIntegrityError",
+    "PriorArtPreflightError",
     "PriorArtQueryExecution",
     "PriorArtQueryFamily",
     "PriorArtReason",
@@ -148,6 +155,7 @@ __all__ = [
     "WorkComparison",
     "assess_prior_art",
     "canonical_groups",
+    "check_budget_coherence",
     "check_comparisons",
     "check_metadata_screening",
     "check_prior_art_queries",
