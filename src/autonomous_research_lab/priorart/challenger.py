@@ -70,7 +70,13 @@ from .gates import (
     check_prior_art_queries,
     check_similarity_screening,
 )
-from .plan import RENDERER_VERSION, canonical_groups, render_query
+from .plan import (
+    MAX_ALTERNATIVES_PER_GROUP,
+    MAX_CONCEPT_GROUPS,
+    RENDERER_VERSION,
+    canonical_groups,
+    render_query,
+)
 from .records import (
     DIMENSIONS,
     ComparisonDimension,
@@ -141,8 +147,9 @@ PRIOR_ART_QUERY_SCHEMA: Final = OutputSchema(
                         "groups": {
                             "type": "array",
                             "description": (
-                                "Concept groups, conjoined: a result "
-                                "must match every group. Keep to 2-3."
+                                f"Concept groups, conjoined: a result "
+                                f"must match every group. Keep to 2; "
+                                f"{MAX_CONCEPT_GROUPS} is the hard cap."
                             ),
                             "items": {
                                 "type": "object",
@@ -150,14 +157,16 @@ PRIOR_ART_QUERY_SCHEMA: Final = OutputSchema(
                                     "alternatives": {
                                         "type": "array",
                                         "description": (
-                                            "Alternative terms or "
-                                            "phrases for this ONE "
-                                            "concept; a result needs "
-                                            "any one of them. Plain "
-                                            "words only — no quotes, "
-                                            "parentheses, or operator "
-                                            "words; trusted code "
-                                            "renders the Boolean."
+                                            f"Alternative terms or "
+                                            f"phrases for this ONE "
+                                            f"concept; a result needs "
+                                            f"any one of them. At most "
+                                            f"{MAX_ALTERNATIVES_PER_GROUP} "
+                                            f"per group. Plain words "
+                                            f"only — no quotes, "
+                                            f"parentheses, or operator "
+                                            f"words; trusted code "
+                                            f"renders the Boolean."
                                         ),
                                         "items": {"type": "string"},
                                     }
@@ -367,13 +376,14 @@ QUERY_INSTRUCTION: Final = (
     "approaches; and recent work. A plan is a list of concept groups "
     "with strict Boolean meaning: a result must match EVERY group, and "
     "within a group any ONE alternative suffices. So use few groups - "
-    "one or two, three at most - and put synonyms, rephrasings, and "
-    "older terminology in the SAME group as alternatives, never as "
-    "extra groups: every extra group narrows the search, and a search "
-    "conjoining many terms returns nothing. A multi-word alternative "
-    "is matched as an exact phrase, so prefer short established "
-    "phrases; at least one alternative must come from the candidate's "
-    "own record. Plain terms only: no dates, no quotes, no "
+    f"one or two, {MAX_CONCEPT_GROUPS} at most - and put synonyms, "
+    "rephrasings, and older terminology in the SAME group as "
+    f"alternatives, at most {MAX_ALTERNATIVES_PER_GROUP} per group, "
+    "never as extra groups: every extra group narrows the search, and "
+    "a search conjoining many terms returns nothing. A multi-word "
+    "alternative is matched as an exact phrase, so prefer short "
+    "established phrases; at least one alternative must come from the "
+    "candidate's own record. Plain terms only: no dates, no quotes, no "
     "parentheses, no AND/OR/NOT - trusted code renders the Boolean "
     "expression, sets every date range, and executes every search."
     + _TEXT_NOTE

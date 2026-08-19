@@ -48,11 +48,17 @@ from autonomous_research_lab.priorart.assessment import (
     PriorArtVerdict,
 )
 from autonomous_research_lab.priorart.challenger import (
+    PRIOR_ART_QUERY_SCHEMA,
+    QUERY_INSTRUCTION,
     PriorArtBudgetError,
     PriorArtChallenger,
     PriorArtRejectedError,
 )
 from autonomous_research_lab.priorart.directive import PriorArtDirective
+from autonomous_research_lab.priorart.plan import (
+    MAX_ALTERNATIVES_PER_GROUP,
+    MAX_CONCEPT_GROUPS,
+)
 from autonomous_research_lab.priorart.records import (
     DIMENSIONS,
     PriorArtQueryFamily,
@@ -930,6 +936,21 @@ def test_the_candidate_records_are_untouched(tmp_path: Path) -> None:
     before = _digest()
     challenger.run(_directive(ideation_run_record_id=record_id))
     assert _digest() == before
+
+
+def test_the_query_instruction_states_the_plan_bounds() -> None:
+    # The Task 5D.1 live evidence: all three corrective calls were
+    # budget_violation rejections for over-cap alternatives — roughly a
+    # fifth of the spent budget lost to a cap the gate enforced but the
+    # instruction never stated.
+    assert f"{MAX_CONCEPT_GROUPS} at most" in QUERY_INSTRUCTION
+    assert (
+        f"at most {MAX_ALTERNATIVES_PER_GROUP} per group"
+        in QUERY_INSTRUCTION
+    )
+    schema = str(PRIOR_ART_QUERY_SCHEMA.json_schema)
+    assert f"At most {MAX_ALTERNATIVES_PER_GROUP} " in schema
+    assert f"{MAX_CONCEPT_GROUPS} is the hard cap" in schema
 
 
 def test_requests_are_deterministic_across_runs(tmp_path: Path) -> None:
