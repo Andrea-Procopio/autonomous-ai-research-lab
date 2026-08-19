@@ -826,6 +826,36 @@ def test_the_model_call_budget_fails_closed(tmp_path: Path) -> None:
     )
 
 
+def test_a_billed_schema_violation_stays_on_the_run_record(
+    tmp_path: Path,
+) -> None:
+    # The Muse adapter attaches accounting to a schema violation before
+    # raising; the run record must fold that spend exactly as the
+    # ledger does — a billed corrective loop may not undercount.
+    billed = StructuredOutputError(
+        "the reply violated the schema", schema="prior_art_queries"
+    ).with_accounting(
+        CallAccounting(
+            usage=ProviderUsage(
+                calls=1, input_tokens=321, output_tokens=17, model="model-x"
+            ),
+            latency_seconds=0.5,
+        )
+    )
+    challenger, provider, ledger, _, _, record_id = _challenger(
+        tmp_path, (ScriptedReply(error=billed), *HAPPY_REPLIES)
+    )
+    result = challenger.run(_directive(ideation_run_record_id=record_id))
+    assert len(provider.calls) == 4
+    drained = ledger.drain()
+    assert result.run_record.model_calls == 4
+    assert result.run_record.input_tokens == drained.input_tokens
+    assert result.run_record.output_tokens == drained.output_tokens
+    # The failed call's billed tokens are part of both totals.
+    assert result.run_record.input_tokens >= 321
+    assert result.run_record.output_tokens >= 17
+
+
 def test_provider_failure_accounts_once_and_accepts_nothing(
     tmp_path: Path,
 ) -> None:

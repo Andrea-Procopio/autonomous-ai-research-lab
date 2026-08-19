@@ -1019,7 +1019,9 @@ class PriorArtChallenger:
     def _invoke(self, request: ModelRequest, spend: _Spend) -> ModelResponse:
         """One provider call: budget checked before, accounting reaching
         the ledger exactly once — the response on success, the attached
-        cost on failure — before any error propagates."""
+        cost on failure — before any error propagates. The run's own
+        spend folds failed-call usage too: a billed schema violation
+        stays on the run record exactly as it stays on the ledger."""
         if spend.calls >= spend.limit:
             raise PriorArtBudgetError(
                 f"the directive's model-call budget ({spend.limit}) is "
@@ -1029,7 +1031,10 @@ class PriorArtChallenger:
         try:
             response = self._provider.invoke(request)
         except ModelProviderError as error:
-            self._ledger.record_failure(error)
+            if self._ledger.record_failure(error):
+                assert error.accounting is not None
+                spend.input_tokens += error.accounting.usage.input_tokens
+                spend.output_tokens += error.accounting.usage.output_tokens
             raise
         self._ledger.record(response)
         spend.input_tokens += response.usage.input_tokens
