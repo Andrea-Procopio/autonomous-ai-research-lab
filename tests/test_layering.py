@@ -47,6 +47,7 @@ LITERATURE = SRC / "literature"
 MAPPING = SRC / "mapping"
 IDEATION = SRC / "ideation"
 PRIORART = SRC / "priorart"
+SELECTION = SRC / "selection"
 PROVIDERS = SRC / "runtime" / "providers.py"
 PROVIDER_MODULES = (PROVIDERS, SRC / "runtime" / "muse.py")
 
@@ -414,6 +415,7 @@ def test_mapping_is_imported_only_by_its_analysis_stages() -> None:
             MAPPING in path.parents
             or IDEATION in path.parents
             or PRIORART in path.parents
+            or SELECTION in path.parents
         ):
             continue
         tree = ast.parse(path.read_text(), filename=str(path))
@@ -539,7 +541,11 @@ def test_ideation_has_exactly_one_consumer_in_the_package() -> None:
     governed commit."""
     violations: list[str] = []
     for path in sorted(SRC.rglob("*.py")):
-        if IDEATION in path.parents or PRIORART in path.parents:
+        if (
+            IDEATION in path.parents
+            or PRIORART in path.parents
+            or SELECTION in path.parents
+        ):
             continue
         tree = ast.parse(path.read_text(), filename=str(path))
         for node in ast.walk(tree):
@@ -672,7 +678,7 @@ def test_nothing_in_the_package_imports_priorart() -> None:
     proposal path through the governed commit."""
     violations: list[str] = []
     for path in sorted(SRC.rglob("*.py")):
-        if PRIORART in path.parents:
+        if PRIORART in path.parents or SELECTION in path.parents:
             continue
         tree = ast.parse(path.read_text(), filename=str(path))
         for node in ast.walk(tree):
