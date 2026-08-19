@@ -63,6 +63,11 @@ from .records import (
     SimilarityLabel,
     WorkComparison,
 )
+from .store import (
+    PriorArtConflictError,
+    PriorArtIntegrityError,
+    PriorArtStore,
+)
 
 __all__ = [
     "CLAIM_KINDS",
@@ -78,14 +83,17 @@ __all__ = [
     "MappingRejection",
     "MissingCandidatePortfolioError",
     "PriorArtAssessment",
+    "PriorArtConflictError",
     "PriorArtCoverage",
     "PriorArtDirective",
+    "PriorArtIntegrityError",
     "PriorArtQueryExecution",
     "PriorArtQueryFamily",
     "PriorArtReason",
     "PriorArtReasonCode",
     "PriorArtRunRecord",
     "PriorArtScreeningRecord",
+    "PriorArtStore",
     "PriorArtThresholds",
     "PriorArtVerdict",
     "SimilarityDecision",
