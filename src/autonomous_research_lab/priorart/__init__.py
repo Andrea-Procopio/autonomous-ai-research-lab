@@ -58,6 +58,7 @@ from .directive import (
 )
 from .gates import (
     check_comparisons,
+    check_metadata_screening,
     check_prior_art_queries,
     check_similarity_screening,
 )
@@ -77,6 +78,7 @@ from .records import (
     DIMENSIONS,
     ComparisonDimension,
     DimensionComparison,
+    OverlapHypothesis,
     PriorArtCoverage,
     PriorArtQueryExecution,
     PriorArtQueryFamily,
@@ -117,6 +119,7 @@ __all__ = [
     "DimensionComparison",
     "MappingRejection",
     "MissingCandidatePortfolioError",
+    "OverlapHypothesis",
     "PriorArtAssessment",
     "PriorArtBudgetError",
     "PriorArtChallenger",
@@ -142,6 +145,7 @@ __all__ = [
     "assess_prior_art",
     "canonical_groups",
     "check_comparisons",
+    "check_metadata_screening",
     "check_prior_art_queries",
     "check_similarity_screening",
     "render_query",

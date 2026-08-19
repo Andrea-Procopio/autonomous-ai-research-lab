@@ -21,6 +21,7 @@ from autonomous_research_lab.priorart.records import (
     DIMENSIONS,
     ComparisonDimension,
     DimensionComparison,
+    OverlapHypothesis,
     PriorArtCoverage,
     PriorArtQueryExecution,
     PriorArtQueryFamily,
@@ -288,17 +289,76 @@ def test_plan_provenance_binds_plan_and_renderer() -> None:
 # -- screening ----------------------------------------------------------------
 
 
+def _hypothesis(**overrides: object) -> OverlapHypothesis:
+    defaults: dict[str, object] = {
+        "candidate_claim": "reweights attention heads directly",
+        "source_text": "attention head reweighting",
+        "support_location": SupportLocation.TITLE,
+        "dimension": ComparisonDimension.MECHANISM,
+        "rationale": "the title names the candidate's exact mechanism",
+    }
+    defaults.update(overrides)
+    return OverlapHypothesis(**defaults)  # type: ignore[arg-type]
+
+
+def _screening(**overrides: object) -> PriorArtScreeningRecord:
+    defaults: dict[str, object] = {
+        "run_id": "pac_1",
+        "candidate_id": "idea_1",
+        "source_id": "lit_1",
+        "known_prior_art": False,
+        "decision": SimilarityDecision.RELATED,
+        "reason": "also intervenes on attention heads",
+        "provenance": _provenance(),
+    }
+    defaults.update(overrides)
+    return PriorArtScreeningRecord(**defaults)  # type: ignore[arg-type]
+
+
 def test_a_screening_judgment_requires_a_reason() -> None:
     with pytest.raises(ValueError, match="reason"):
-        PriorArtScreeningRecord(
-            run_id="pac_1",
-            candidate_id="idea_1",
-            source_id="lit_1",
-            known_prior_art=False,
-            decision=SimilarityDecision.RELATED,
-            reason="  ",
-            provenance=_provenance(),
-        )
+        _screening(reason="  ")
+
+
+def test_an_overlap_hypothesis_requires_its_texts() -> None:
+    for label in ("candidate_claim", "source_text", "rationale"):
+        with pytest.raises(ValueError, match=label):
+            _hypothesis(**{label: "   "})
+
+
+def test_an_overlap_hypothesis_binds_to_a_potential_overlap() -> None:
+    # A hypothesis attests a potential overlap; any other decision
+    # contradicts it and the record is unconstructible.
+    attested = _screening(
+        decision=SimilarityDecision.POTENTIAL_OVERLAP,
+        overlap_hypothesis=_hypothesis(),
+    )
+    assert attested.overlap_hypothesis == _hypothesis()
+    for decision in (
+        SimilarityDecision.RELATED,
+        SimilarityDecision.UNRELATED,
+        SimilarityDecision.UNDECIDABLE,
+    ):
+        with pytest.raises(ValueError, match="contradicts"):
+            _screening(decision=decision, overlap_hypothesis=_hypothesis())
+
+
+def test_screening_identity_appends_the_hypothesis_only_when_present() -> None:
+    # The hypothesis joins the identity only when present, so a
+    # pre-5D.2 record keeps deriving its original id.
+    legacy = _screening()
+    assert legacy.id == _screening().id
+    assert legacy.id.startswith("pscr_")
+    attested = _screening(
+        decision=SimilarityDecision.POTENTIAL_OVERLAP,
+        overlap_hypothesis=_hypothesis(),
+    )
+    bare = _screening(decision=SimilarityDecision.POTENTIAL_OVERLAP)
+    assert attested.id != bare.id
+    assert attested.id != _screening(
+        decision=SimilarityDecision.POTENTIAL_OVERLAP,
+        overlap_hypothesis=_hypothesis(rationale="a different rationale"),
+    ).id
 
 
 # -- comparisons --------------------------------------------------------------

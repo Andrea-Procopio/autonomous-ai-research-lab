@@ -74,6 +74,7 @@ from .plan import (
 from .records import (
     DIMENSIONS,
     PriorArtQueryFamily,
+    SimilarityDecision,
     SimilarityLabel,
 )
 
@@ -458,6 +459,170 @@ def check_similarity_screening(
     return tuple(rejections)
 
 
+def check_metadata_screening(
+    payload: Mapping[str, object],
+    *,
+    sources: Mapping[str, LiteratureSource],
+    candidate_haystack: str,
+    candidate_tokens: frozenset[str],
+    known_ids: frozenset[str],
+) -> tuple[MappingRejection, ...]:
+    """The metadata-only screening gate: the abstract-level discipline
+    plus the material-ambiguity bar. A ``potential_overlap`` decision on
+    a source with no abstract must carry an attested overlap hypothesis
+    — the candidate claim at risk, re-found verbatim in the candidate's
+    rendered record, and the source text supporting the concern,
+    re-found verbatim in the named accessible part — or it cannot be
+    recorded. A hypothesis on any other decision contradicts its own
+    label. Generic topical similarity therefore has no route to a
+    blocking screen: without a re-findable quote on each end, the only
+    recordable decisions are related, unrelated, and undecidable."""
+    rejections: list[MappingRejection] = []
+    decided: set[str] = set()
+    haystack = _normalized(candidate_haystack)
+    for index, item in enumerate(_sequence(payload["screens"])):
+        assert isinstance(item, Mapping)
+        where = f"screens[{index}]"
+        source_id = str(item["source_id"])
+        if source_id not in sources:
+            rejections.append(
+                MappingRejection(
+                    "unknown_source",
+                    f"{where} screens {source_id!r}, which was not among "
+                    f"the rendered sources; screen only the listed ids",
+                )
+            )
+            continue
+        if source_id in decided:
+            rejections.append(
+                MappingRejection(
+                    "duplicate_finding",
+                    f"{where} screens {source_id} a second time",
+                )
+            )
+            continue
+        decided.add(source_id)
+        source = sources[source_id]
+        attested = accessible_text_of(source)
+        reason = str(item["reason"])
+        _check_source_described_text(
+            reason, f"{where}.reason", attested, rejections
+        )
+        _check_grounded_numbers(
+            reason,
+            _number_tokens(attested) | candidate_tokens,
+            known_ids,
+            f"{where}.reason",
+            rejections,
+        )
+        decision = str(item["decision"])
+        hypothesis = item.get("overlap_hypothesis")
+        if hypothesis is None:
+            if decision == SimilarityDecision.POTENTIAL_OVERLAP.value:
+                rejections.append(
+                    MappingRejection(
+                        "missing_support",
+                        f"{where} screens a metadata-only source as a "
+                        f"potential overlap without an attested "
+                        f"hypothesis; name the candidate claim at risk "
+                        f"and quote the source text supporting the "
+                        f"concern, or choose another decision",
+                    )
+                )
+            continue
+        if decision != SimilarityDecision.POTENTIAL_OVERLAP.value:
+            rejections.append(
+                MappingRejection(
+                    "similarity_contradiction",
+                    f"{where} attaches an overlap hypothesis to a "
+                    f"{decision} decision; a hypothesis attests a "
+                    f"potential overlap and contradicts any other label",
+                )
+            )
+        assert isinstance(hypothesis, Mapping)
+        _check_overlap_hypothesis(
+            hypothesis,
+            f"{where}.overlap_hypothesis",
+            source=source,
+            candidate_haystack=haystack,
+            candidate_tokens=candidate_tokens,
+            known_ids=known_ids,
+            rejections=rejections,
+        )
+    for source_id in sources:
+        if source_id not in decided:
+            rejections.append(
+                MappingRejection(
+                    "missing_decision",
+                    f"source {source_id} was rendered but never screened; "
+                    f"every listed source gets exactly one decision",
+                )
+            )
+    return tuple(rejections)
+
+
+def _check_overlap_hypothesis(
+    entry: Mapping[str, object],
+    where: str,
+    *,
+    source: LiteratureSource,
+    candidate_haystack: str,
+    candidate_tokens: frozenset[str],
+    known_ids: frozenset[str],
+    rejections: list[MappingRejection],
+) -> None:
+    """Both ends of the hypothesis held to recorded text:
+    ``candidate_claim`` re-found in the normalized candidate record,
+    ``source_text`` re-found in the named accessible part of the source,
+    and the rationale — the model's own claim about the candidate —
+    held to the strict candidate-describing rules."""
+    claim = str(entry["candidate_claim"])
+    if not claim.strip():
+        rejections.append(
+            MappingRejection(
+                "empty_finding", f"{where}.candidate_claim is empty"
+            )
+        )
+    else:
+        check_text_integrity(claim, f"{where}.candidate_claim", rejections)
+        if _normalized(claim) not in candidate_haystack:
+            rejections.append(
+                MappingRejection(
+                    "missing_support",
+                    f"{where}.candidate_claim quotes {claim!r}, which does "
+                    f"not appear in the candidate's own record; name the "
+                    f"claim at risk in the candidate's words",
+                )
+            )
+    text = str(entry["source_text"])
+    if not text.strip():
+        rejections.append(
+            MappingRejection(
+                "missing_support",
+                f"{where} carries no source text; quote the accessible "
+                f"text the concern rests on",
+            )
+        )
+    else:
+        check_text_integrity(text, f"{where}.source_text", rejections)
+        _check_quote_location(
+            str(entry["support_location"]),
+            text,
+            where,
+            source=source,
+            rejections=rejections,
+        )
+    rationale = str(entry["rationale"])
+    _check_prior_art_text(rationale, f"{where}.rationale", rejections)
+    _check_grounded_numbers(
+        rationale,
+        _number_tokens(accessible_text_of(source)) | candidate_tokens,
+        known_ids,
+        f"{where}.rationale",
+        rejections,
+    )
+
+
 def check_comparisons(
     payload: Mapping[str, object],
     *,
@@ -680,6 +845,23 @@ def _check_support(
         )
         return
     check_text_integrity(snippet, f"{where}.support_snippet", rejections)
+    _check_quote_location(
+        location, snippet, where, source=source, rejections=rejections
+    )
+
+
+def _check_quote_location(
+    location: str,
+    snippet: str,
+    where: str,
+    *,
+    source: LiteratureSource,
+    rejections: list[MappingRejection],
+) -> None:
+    """The shared re-finding rule: the quote must appear verbatim
+    (whitespace-normalized, case-insensitive) in the part of the source
+    the location names, and the named part must actually have been
+    retrieved."""
     if location == "title":
         haystack = source.title or ""
     elif location == "abstract":

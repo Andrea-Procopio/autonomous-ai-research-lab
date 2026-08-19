@@ -41,6 +41,7 @@ CLAIM_KINDS: Final = {
     "query.text": "search_proposal",
     "screen.decision": "artifact_grounded_judgment",
     "screen.reason": "artifact_grounded_judgment",
+    "screen.overlap_hypothesis": "artifact_grounded_judgment",
     "comparison.candidate_position": "artifact_grounded_judgment",
     "comparison.prior_work_position": "artifact_grounded_judgment",
     "comparison.overlap_features": "artifact_grounded_judgment",
@@ -134,6 +135,37 @@ class SimilarityDecision(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
+class OverlapHypothesis:
+    """A specific, attested account of why one metadata-only source may
+    anticipate the candidate's core contribution — the structural bar
+    generic topical similarity cannot clear. Both text ends are held to
+    recorded text by the gate: ``candidate_claim`` is re-found verbatim
+    in the candidate's own rendered record, ``source_text`` in the named
+    accessible part of the source. Without an accepted hypothesis a
+    metadata-only source cannot be screened as a potential overlap at
+    all, so only material ambiguity — never bare undecidability — can
+    block a DISTINGUISHED verdict."""
+
+    candidate_claim: str
+    source_text: str
+    support_location: SupportLocation
+    dimension: ComparisonDimension
+    rationale: str
+    """Why the attested overlap could reach the candidate's core
+    contribution rather than only its background — the model's own
+    claim, held to the strict candidate-describing text rules."""
+
+    def __post_init__(self) -> None:
+        for label, value in (
+            ("candidate_claim", self.candidate_claim),
+            ("source_text", self.source_text),
+            ("rationale", self.rationale),
+        ):
+            if not value.strip():
+                raise ValueError(f"an overlap hypothesis requires {label}")
+
+
+@dataclass(frozen=True, slots=True)
 class PriorArtScreeningRecord:
     """One screening judgment for one source against one candidate, with
     the provenance of the batch call that produced it. Every decision is
@@ -149,26 +181,47 @@ class PriorArtScreeningRecord:
     decision: SimilarityDecision
     reason: str
     provenance: CallProvenance
+    overlap_hypothesis: OverlapHypothesis | None = None
+    """The attested material-overlap account a metadata-only
+    potential-overlap screen must carry. Absent on every pre-5D.2
+    record and on abstract-level screens, whose potential overlaps go
+    to comparison instead; it joins the identity only when present, so
+    the old records still verify."""
+
     id: str = field(default="")
 
     def __post_init__(self) -> None:
         if not self.reason.strip():
             raise ValueError("a screening judgment requires a reason")
-        if not self.id:
-            object.__setattr__(
-                self,
-                "id",
-                content_id(
-                    "pscr",
-                    self.run_id,
-                    self.candidate_id,
-                    self.source_id,
-                    self.known_prior_art,
-                    self.decision,
-                    self.reason,
-                    self.provenance.response_id,
-                ),
+        if (
+            self.overlap_hypothesis is not None
+            and self.decision is not SimilarityDecision.POTENTIAL_OVERLAP
+        ):
+            raise ValueError(
+                "an overlap hypothesis attests a potential overlap; a "
+                f"{self.decision.value} decision contradicts it"
             )
+        if not self.id:
+            parts: tuple[object, ...] = (
+                self.run_id,
+                self.candidate_id,
+                self.source_id,
+                self.known_prior_art,
+                self.decision,
+                self.reason,
+                self.provenance.response_id,
+            )
+            if self.overlap_hypothesis is not None:
+                hypothesis = self.overlap_hypothesis
+                parts = (
+                    *parts,
+                    hypothesis.candidate_claim,
+                    hypothesis.source_text,
+                    hypothesis.support_location,
+                    hypothesis.dimension,
+                    hypothesis.rationale,
+                )
+            object.__setattr__(self, "id", content_id("pscr", *parts))
 
 
 class ComparisonDimension(StrEnum):

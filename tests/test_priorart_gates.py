@@ -13,6 +13,7 @@ from autonomous_research_lab.literature.retrieval import (
 from autonomous_research_lab.mapping.gates import MappingRejection
 from autonomous_research_lab.priorart.gates import (
     check_comparisons,
+    check_metadata_screening,
     check_prior_art_queries,
     check_similarity_screening,
 )
@@ -473,6 +474,191 @@ def test_ungrounded_numbers_in_reasons_are_rejected() -> None:
         known_ids=frozenset(ACCESSIBLE),
     )
     assert _rules(rejections) == {"ungrounded_number"}
+
+
+# -- the metadata screening gate ----------------------------------------------
+
+METADATA_TITLE = "Attention Head Reweighting for In-Context Learning"
+
+
+def _metadata_source(**overrides: object) -> LiteratureSource:
+    defaults: dict[str, object] = {
+        "provider_id": "W7",
+        "title": METADATA_TITLE,
+        "abstract": None,
+        "access_level": AccessLevel.METADATA,
+    }
+    defaults.update(overrides)
+    return _source(**defaults)
+
+
+def _hypothesis_entry(**overrides: object) -> dict[str, object]:
+    entry: dict[str, object] = {
+        "candidate_claim": "reweights attention heads",
+        "source_text": "attention head reweighting",
+        "support_location": "title",
+        "dimension": "mechanism",
+        "rationale": (
+            "the title names the mechanism the candidate proposes as its "
+            "core contribution"
+        ),
+    }
+    entry.update(overrides)
+    return entry
+
+
+def _metadata_screen(
+    source_id: str = "lit_m1",
+    decision: str = "undecidable",
+    reason: str = "a title about attention heads; no abstract to compare",
+    **extra: object,
+) -> dict[str, object]:
+    entry: dict[str, object] = {
+        "source_id": source_id,
+        "decision": decision,
+        "reason": reason,
+    }
+    entry.update(extra)
+    return entry
+
+
+METADATA_SOURCES = {"lit_m1": _metadata_source()}
+
+
+def _check_metadata(
+    *entries: Mapping[str, object],
+    sources: Mapping[str, LiteratureSource] = METADATA_SOURCES,
+) -> tuple[MappingRejection, ...]:
+    return check_metadata_screening(
+        {"screens": list(entries)},
+        sources=sources,
+        candidate_haystack=CANDIDATE_HAYSTACK,
+        candidate_tokens=frozenset(),
+        known_ids=frozenset(sources),
+    )
+
+
+def test_a_metadata_screen_without_a_hypothesis_passes() -> None:
+    # Undecidable and related are honest title-only judgments; neither
+    # needs — or may carry — an overlap hypothesis.
+    assert _check_metadata(_metadata_screen()) == ()
+    assert (
+        _check_metadata(
+            _metadata_screen(
+                decision="related",
+                reason="nearby work on attention heads",
+            )
+        )
+        == ()
+    )
+
+
+def test_a_metadata_potential_overlap_requires_an_attested_hypothesis() -> (
+    None
+):
+    bare = _check_metadata(_metadata_screen(decision="potential_overlap"))
+    assert _rules(bare) == {"missing_support"}
+    assert "hypothesis" in bare[0].detail
+    attested = _check_metadata(
+        _metadata_screen(
+            decision="potential_overlap",
+            overlap_hypothesis=_hypothesis_entry(),
+        )
+    )
+    assert attested == ()
+
+
+def test_a_hypothesis_on_a_non_overlap_decision_is_a_contradiction() -> None:
+    rejections = _check_metadata(
+        _metadata_screen(overlap_hypothesis=_hypothesis_entry())
+    )
+    assert "similarity_contradiction" in _rules(rejections)
+
+
+def test_an_unattested_source_text_is_rejected() -> None:
+    rejections = _check_metadata(
+        _metadata_screen(
+            decision="potential_overlap",
+            overlap_hypothesis=_hypothesis_entry(
+                source_text="adaptive gating of attention"
+            ),
+        )
+    )
+    assert "unsupported_claim" in _rules(rejections)
+
+
+def test_an_unattested_candidate_claim_is_rejected() -> None:
+    rejections = _check_metadata(
+        _metadata_screen(
+            decision="potential_overlap",
+            overlap_hypothesis=_hypothesis_entry(
+                candidate_claim="improves protein folding"
+            ),
+        )
+    )
+    assert "missing_support" in _rules(rejections)
+
+
+def test_a_hypothesis_may_not_read_text_never_retrieved() -> None:
+    for location in ("abstract", "full_text"):
+        rejections = _check_metadata(
+            _metadata_screen(
+                decision="potential_overlap",
+                overlap_hypothesis=_hypothesis_entry(
+                    support_location=location
+                ),
+            )
+        )
+        assert "access_level_mismatch" in _rules(rejections), location
+
+
+def test_a_hypothesis_requires_both_of_its_texts() -> None:
+    empty_claim = _check_metadata(
+        _metadata_screen(
+            decision="potential_overlap",
+            overlap_hypothesis=_hypothesis_entry(candidate_claim="  "),
+        )
+    )
+    assert "empty_finding" in _rules(empty_claim)
+    empty_text = _check_metadata(
+        _metadata_screen(
+            decision="potential_overlap",
+            overlap_hypothesis=_hypothesis_entry(source_text="  "),
+        )
+    )
+    assert "missing_support" in _rules(empty_text)
+
+
+def test_a_hypothesis_rationale_keeps_the_strict_text_rules() -> None:
+    novelty = _check_metadata(
+        _metadata_screen(
+            decision="potential_overlap",
+            overlap_hypothesis=_hypothesis_entry(
+                rationale="the candidate is not novel against this title"
+            ),
+        )
+    )
+    assert "novelty_claim" in _rules(novelty)
+    ungrounded = _check_metadata(
+        _metadata_screen(
+            decision="potential_overlap",
+            overlap_hypothesis=_hypothesis_entry(
+                rationale="reports a 42 point gain on the same task"
+            ),
+        )
+    )
+    assert "ungrounded_number" in _rules(ungrounded)
+
+
+def test_the_metadata_universe_is_closed() -> None:
+    unknown = _check_metadata(
+        _metadata_screen(), _metadata_screen(source_id="lit_m9")
+    )
+    assert _rules(unknown) == {"unknown_source"}
+    duplicated = _check_metadata(_metadata_screen(), _metadata_screen())
+    assert "duplicate_finding" in _rules(duplicated)
+    missing = _check_metadata()
+    assert _rules(missing) == {"missing_decision"}
 
 
 # -- the comparison gate ------------------------------------------------------

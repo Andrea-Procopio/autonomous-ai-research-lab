@@ -41,6 +41,7 @@ from .directive import PriorArtDirective
 from .records import (
     ComparisonDimension,
     DimensionComparison,
+    OverlapHypothesis,
     PriorArtCoverage,
     PriorArtQueryExecution,
     PriorArtQueryFamily,
@@ -460,7 +461,7 @@ def _group_lists(payload: Mapping[str, object]) -> list[object]:
 
 
 def _screening_payload(record: PriorArtScreeningRecord) -> dict[str, object]:
-    return {
+    payload: dict[str, object] = {
         "id": record.id,
         "run_id": record.run_id,
         "candidate_id": record.candidate_id,
@@ -470,11 +471,25 @@ def _screening_payload(record: PriorArtScreeningRecord) -> dict[str, object]:
         "reason": record.reason,
         "provenance": _provenance_payload(record.provenance),
     }
+    # Pre-5D.2 records carried no hypothesis; the key appears only when
+    # the field does, so the old files stay byte-identical and
+    # re-derivable.
+    if record.overlap_hypothesis is not None:
+        hypothesis = record.overlap_hypothesis
+        payload["overlap_hypothesis"] = {
+            "candidate_claim": hypothesis.candidate_claim,
+            "source_text": hypothesis.source_text,
+            "support_location": hypothesis.support_location.value,
+            "dimension": hypothesis.dimension.value,
+            "rationale": hypothesis.rationale,
+        }
+    return payload
 
 
 def _screening_from(
     payload: Mapping[str, object],
 ) -> PriorArtScreeningRecord:
+    hypothesis = payload.get("overlap_hypothesis")
     return PriorArtScreeningRecord(
         run_id=str(payload["run_id"]),
         candidate_id=str(payload["candidate_id"]),
@@ -483,6 +498,20 @@ def _screening_from(
         decision=SimilarityDecision(str(payload["decision"])),
         reason=str(payload["reason"]),
         provenance=_provenance_from(payload["provenance"]),
+        overlap_hypothesis=(
+            _hypothesis_from(hypothesis) if hypothesis is not None else None
+        ),
+    )
+
+
+def _hypothesis_from(payload: object) -> OverlapHypothesis:
+    assert isinstance(payload, Mapping)
+    return OverlapHypothesis(
+        candidate_claim=str(payload["candidate_claim"]),
+        source_text=str(payload["source_text"]),
+        support_location=SupportLocation(str(payload["support_location"])),
+        dimension=ComparisonDimension(str(payload["dimension"])),
+        rationale=str(payload["rationale"]),
     )
 
 

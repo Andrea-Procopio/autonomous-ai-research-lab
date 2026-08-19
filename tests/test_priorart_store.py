@@ -23,7 +23,9 @@ from autonomous_research_lab.priorart.assessment import (
 from autonomous_research_lab.priorart.directive import PriorArtDirective
 from autonomous_research_lab.priorart.records import (
     DIMENSIONS,
+    ComparisonDimension,
     DimensionComparison,
+    OverlapHypothesis,
     PriorArtCoverage,
     PriorArtQueryExecution,
     PriorArtQueryFamily,
@@ -318,6 +320,52 @@ def test_rejected_payloads_are_preserved_as_data(tmp_path: Path) -> None:
     ]
     assert rejected["repair"] == 1
     assert rejected["payload"] == {"comparisons": [{"source_id": "lit_9"}]}
+
+
+def test_an_attested_screening_round_trips(tmp_path: Path) -> None:
+    store = PriorArtStore(tmp_path / "priorart")
+    attested = PriorArtScreeningRecord(
+        run_id=RUN,
+        candidate_id="idea_1",
+        source_id="lit_1",
+        known_prior_art=False,
+        decision=SimilarityDecision.POTENTIAL_OVERLAP,
+        reason="the title names the candidate's exact mechanism",
+        provenance=_provenance(),
+        overlap_hypothesis=OverlapHypothesis(
+            candidate_claim="reweights attention heads directly",
+            source_text="attention head reweighting",
+            support_location=SupportLocation.TITLE,
+            dimension=ComparisonDimension.MECHANISM,
+            rationale="the title claims the proposed core mechanism",
+        ),
+    )
+    store.record_screening(attested)
+    fresh = PriorArtStore(tmp_path / "priorart")
+    reloaded = fresh.get_screening(attested.id)
+    assert reloaded == attested
+    assert reloaded is not None
+    assert reloaded.overlap_hypothesis is not None
+    assert (
+        reloaded.overlap_hypothesis.dimension
+        is ComparisonDimension.MECHANISM
+    )
+
+
+def test_a_pre_5d2_screening_still_loads_and_verifies(
+    tmp_path: Path,
+) -> None:
+    # A screening built without a hypothesis serializes exactly like the
+    # preserved Task 5D/5D.1 artifacts: no hypothesis key at all. It
+    # must load, verify, and re-record as a no-op forever.
+    store = PriorArtStore(tmp_path / "priorart")
+    legacy = store.record_screening(_screening())
+    path = tmp_path / "priorart" / "screenings" / f"{legacy.id}.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert "overlap_hypothesis" not in payload
+    fresh = PriorArtStore(tmp_path / "priorart")
+    assert fresh.get_screening(legacy.id) == legacy
+    assert fresh.record_screening(_screening()) == legacy
 
 
 def test_a_pre_5d1_execution_still_loads_and_verifies(
