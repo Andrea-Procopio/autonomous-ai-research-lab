@@ -203,13 +203,13 @@ class PriorArtStore:
 
     # -- assessments -----------------------------------------------------------
 
-    def record_assessment(
+    def record_prior_art_assessment(
         self, record: PriorArtAssessment
     ) -> PriorArtAssessment:
         for existing_id in self._ids(_ASSESSMENTS):
             if existing_id == record.id:
                 continue
-            existing = self.get_assessment(existing_id)
+            existing = self.get_prior_art_assessment(existing_id)
             assert existing is not None
             if (
                 existing.run_id == record.run_id
@@ -223,7 +223,7 @@ class PriorArtStore:
         self._write_once(_ASSESSMENTS, record.id, _assessment_payload(record))
         return record
 
-    def get_assessment(self, record_id: str) -> PriorArtAssessment | None:
+    def get_prior_art_assessment(self, record_id: str) -> PriorArtAssessment | None:
         payload = self._load(_ASSESSMENTS, record_id)
         if payload is None:
             return None
@@ -231,10 +231,10 @@ class PriorArtStore:
         self._verify(_ASSESSMENTS, record_id, record.id)
         return record
 
-    def assessments(self) -> tuple[PriorArtAssessment, ...]:
+    def prior_art_assessments(self) -> tuple[PriorArtAssessment, ...]:
         loaded = []
         for record_id in self._ids(_ASSESSMENTS):
-            record = self.get_assessment(record_id)
+            record = self.get_prior_art_assessment(record_id)
             assert record is not None
             loaded.append(record)
         return tuple(loaded)
@@ -242,7 +242,7 @@ class PriorArtStore:
     def assessment_for_candidate(
         self, run_id: str, candidate_id: str
     ) -> PriorArtAssessment | None:
-        for record in self.assessments():
+        for record in self.prior_art_assessments():
             if (
                 record.run_id == run_id
                 and record.candidate_id == candidate_id

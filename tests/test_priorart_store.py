@@ -189,7 +189,7 @@ def test_every_record_kind_reloads_identically(tmp_path: Path) -> None:
     execution = store.record_query_execution(_execution())
     screening = store.record_screening(_screening())
     comparison = store.record_comparison(_comparison())
-    assessment = store.record_assessment(_assessment())
+    assessment = store.record_prior_art_assessment(_assessment())
     run = store.record_run(_run_record())
 
     fresh = PriorArtStore(tmp_path / "priorart")
@@ -197,9 +197,9 @@ def test_every_record_kind_reloads_identically(tmp_path: Path) -> None:
     assert fresh.get_query_execution(execution.id) == execution
     assert fresh.get_screening(screening.id) == screening
     assert fresh.get_comparison(comparison.id) == comparison
-    assert fresh.get_assessment(assessment.id) == assessment
+    assert fresh.get_prior_art_assessment(assessment.id) == assessment
     assert fresh.get_run(run.id) == run
-    assert fresh.assessments() == (assessment,)
+    assert fresh.prior_art_assessments() == (assessment,)
     assert fresh.runs() == (run,)
 
 
@@ -223,7 +223,7 @@ def test_records_are_write_once_and_verify_on_repeat(
 
 def test_a_tampered_record_fails_on_load(tmp_path: Path) -> None:
     store = PriorArtStore(tmp_path / "priorart")
-    assessment = store.record_assessment(_assessment())
+    assessment = store.record_prior_art_assessment(_assessment())
     path = (
         tmp_path / "priorart" / "assessments" / f"{assessment.id}.json"
     )
@@ -233,14 +233,14 @@ def test_a_tampered_record_fails_on_load(tmp_path: Path) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True))
     fresh = PriorArtStore(tmp_path / "priorart")
     with pytest.raises(PriorArtIntegrityError, match="no longer matches"):
-        fresh.get_assessment(assessment.id)
+        fresh.get_prior_art_assessment(assessment.id)
 
 
 def test_one_assessment_per_candidate_per_run_is_enforced(
     tmp_path: Path,
 ) -> None:
     store = PriorArtStore(tmp_path / "priorart")
-    store.record_assessment(_assessment())
+    store.record_prior_art_assessment(_assessment())
     second = PriorArtAssessment(
         run_id=RUN,
         candidate_id="idea_1",
@@ -253,7 +253,7 @@ def test_one_assessment_per_candidate_per_run_is_enforced(
         coverage=_coverage(),
     )
     with pytest.raises(PriorArtConflictError, match="second verdict"):
-        store.record_assessment(second)
+        store.record_prior_art_assessment(second)
     # The same candidate in another run is a legitimate new assessment.
     other_run = PriorArtAssessment(
         run_id="pac_2",
@@ -266,7 +266,7 @@ def test_one_assessment_per_candidate_per_run_is_enforced(
         thresholds=PriorArtThresholds(),
         coverage=_coverage(),
     )
-    store.record_assessment(other_run)
+    store.record_prior_art_assessment(other_run)
     assert store.assessment_for_candidate(RUN, "idea_1") == _assessment()
     assert store.assessment_for_candidate("pac_2", "idea_1") == other_run
     assert store.assessment_for_candidate("pac_3", "idea_1") is None
@@ -323,6 +323,6 @@ def test_rejected_payloads_are_preserved_as_data(tmp_path: Path) -> None:
 def test_absent_kinds_read_as_empty(tmp_path: Path) -> None:
     store = PriorArtStore(tmp_path / "priorart")
     assert store.get_directive("pdir_missing") is None
-    assert store.assessments() == ()
+    assert store.prior_art_assessments() == ()
     assert store.runs() == ()
     assert store.rejected() == ()
