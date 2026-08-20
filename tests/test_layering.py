@@ -36,10 +36,18 @@
    ``priorart``, and the provider seam — never ``literature``: it runs
    no retrieval and sees sources only through the records upstream
    stages froze. It cannot reach scientific state, evidence, or
-   execution, and nothing in the package depends on it. A selection is
-   a preference among survivors, never a scientific proposition. The
+   execution, and exactly one other package depends on it. A selection
+   is a preference among survivors, never a scientific proposition.
+9. ``admission`` is that consumer — the governed bridge from one
+   SELECTED selection into the initial ``ResearchState``. It reads
+   ``core`` (including, uniquely among these stages, the state it
+   constructs), ``ideation``, ``mapping``, ``priorart``, ``selection``,
+   ``persistence``, and the provider seam — never ``literature``. It
+   builds the genesis state in one constructor call, never calls a
+   state mutator, and nothing in the package depends on it. The
    analysis chain is a DAG with one invariant: retrieved papers and
-   everything derived from them have no path into scientific state.
+   everything derived from them have no path into scientific state
+   except through admission's governed door.
 """
 
 from __future__ import annotations
@@ -794,10 +802,11 @@ def test_selection_imports_no_vendor_sdk() -> None:
         )
 
 
-def test_nothing_in_the_package_imports_selection() -> None:
-    """Selection is the new leaf: a selected candidate reaches
-    scientific state only when a later task deliberately builds the
-    proposal path through the governed commit."""
+def test_selection_has_exactly_one_consumer_in_the_package() -> None:
+    """Only ``admission`` — the governed bridge into the initial
+    research state — may import selection: a selection record is a
+    validated model preference, and admission is the one task that may
+    act on it."""
     violations: list[str] = []
     for path in sorted(SRC.rglob("*.py")):
         if SELECTION in path.parents or ADMISSION in path.parents:
@@ -819,12 +828,11 @@ def test_nothing_in_the_package_imports_selection() -> None:
     assert violations == []
 
 
-def test_priorart_has_exactly_one_consumer_in_the_package() -> None:
-    """Only ``selection`` — the choice among the challenge's survivors,
-    itself barred from scientific state — may import priorart: a
-    prior-art assessment reaches scientific state only when a later
-    task deliberately builds the proposal path through the governed
-    commit."""
+def test_priorart_is_imported_only_by_its_deliberate_stages() -> None:
+    """Only ``selection`` — the choice among the challenge's survivors —
+    and ``admission`` — which re-verifies the challenged portfolio
+    behind its own door — may import priorart. A prior-art assessment
+    reaches scientific state only through that chain."""
     violations: list[str] = []
     for path in sorted(SRC.rglob("*.py")):
         if (
@@ -863,4 +871,151 @@ def test_roles_do_not_import_the_transition_layer() -> None:
                     node.level >= 2 and "orchestration" in module
                 ):
                     violations.append(f"{path.name}: imports {module}")
+    assert violations == []
+
+
+def test_admission_depends_only_on_its_declared_inputs() -> None:
+    """The admitter reads ``core`` (including, uniquely, the state it
+    constructs), ``ideation`` (the candidate), ``mapping`` (the shared
+    gate vocabulary), ``priorart`` and ``selection`` (the lineage it
+    verifies), ``persistence`` (the snapshot store), and the provider
+    seam — pointedly not ``literature``: admission runs no retrieval.
+    An admission module that needed roles, orchestration, evidence, or
+    execution would be doing science, not translation."""
+    allowed_absolute = (
+        f"{PACKAGE}.core",
+        f"{PACKAGE}.ideation",
+        f"{PACKAGE}.mapping",
+        f"{PACKAGE}.priorart",
+        f"{PACKAGE}.selection",
+        f"{PACKAGE}.admission",
+        f"{PACKAGE}.persistence",
+        f"{PACKAGE}.runtime.providers",
+        f"{PACKAGE}.runtime.metrics",
+    )
+    allowed_relative = (
+        "core",
+        "ideation",
+        "mapping",
+        "priorart",
+        "selection",
+        "persistence",
+        "runtime.providers",
+        "runtime.metrics",
+    )
+    violations: list[str] = []
+    for path in sorted(ADMISSION.rglob("*.py")):
+        tree = ast.parse(path.read_text(), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+                if node.level == 0 and module.startswith(f"{PACKAGE}."):
+                    if not module.startswith(allowed_absolute):
+                        violations.append(f"{path.name}: imports {module}")
+                elif node.level == 2 and not module.startswith(
+                    allowed_relative
+                ):
+                    violations.append(
+                        f"{path.name}: relative import of {module}"
+                    )
+                elif node.level > 2:
+                    violations.append(
+                        f"{path.name}: relative import above package"
+                    )
+            elif isinstance(node, ast.Import):
+                violations.extend(
+                    f"{path.name}: imports {alias.name}"
+                    for alias in node.names
+                    if alias.name.startswith(f"{PACKAGE}.")
+                    and not alias.name.startswith(allowed_absolute)
+                )
+    assert violations == []
+
+
+def test_admission_constructs_the_state_but_never_mutates_one() -> None:
+    """Admission is the one analysis-side package allowed to construct
+    a ``ResearchState`` — and only to construct it: the genesis state is
+    built in a single constructor call, and no admission module may call
+    a state mutator. Evolution after genesis belongs to orchestration's
+    commit layer, exactly as it does for roles."""
+    violations: list[str] = []
+    for path in sorted(ADMISSION.rglob("*.py")):
+        tree = ast.parse(path.read_text(), filename=str(path))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr in STATE_MUTATORS
+            ):
+                violations.append(
+                    f"{path.name}:{node.lineno}: calls .{node.func.attr}(...)"
+                )
+    assert violations == []
+
+
+def test_admission_cannot_reach_evidence_or_execution() -> None:
+    """The construct-only exception is narrow: admission may reach the
+    state it builds, but never the proposal, transition, evidence, or
+    execution machinery, and never ``Evidence`` or ``ExperimentResult``
+    by name — a result can only come from a process that ran."""
+    forbidden_names = {"Evidence", "ExperimentResult"}
+    violations: list[str] = []
+    for path in sorted(ADMISSION.rglob("*.py")):
+        tree = ast.parse(path.read_text(), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+                if any(
+                    fragment in module
+                    for fragment in (
+                        "proposals",
+                        "transitions",
+                        "evidence",
+                        "execution",
+                    )
+                ):
+                    violations.append(f"{path.name}: imports {module}")
+            elif isinstance(node, ast.Name) and node.id in forbidden_names:
+                violations.append(
+                    f"{path.name}:{node.lineno}: references {node.id}"
+                )
+    assert violations == []
+
+
+def test_admission_imports_no_vendor_sdk() -> None:
+    """The admitter is provider-neutral: it speaks to the generic seam,
+    and no Muse-specific (or any vendor-specific) logic may appear
+    here."""
+    for path in sorted(ADMISSION.rglob("*.py")):
+        roots = {module.split(".")[0] for module in _imported_modules(path)}
+        assert roots & VENDOR_SDKS == set(), f"{path.name} imports a vendor SDK"
+        modules = set(_imported_modules(path))
+        assert not any("muse" in module for module in modules), (
+            f"{path.name} imports the Muse adapter; the admitter knows "
+            f"only the generic provider seam"
+        )
+
+
+def test_nothing_in_the_package_imports_admission() -> None:
+    """Admission is the new leaf: the admitted state leaves it through
+    the persistence store and the orchestration loop, never through an
+    import of the package itself."""
+    violations: list[str] = []
+    for path in sorted(SRC.rglob("*.py")):
+        if ADMISSION in path.parents:
+            continue
+        tree = ast.parse(path.read_text(), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+                if "admission" in module.split("."):
+                    violations.append(
+                        f"{path.relative_to(SRC)}: imports {module}"
+                    )
+            elif isinstance(node, ast.Import):
+                violations.extend(
+                    f"{path.relative_to(SRC)}: imports {alias.name}"
+                    for alias in node.names
+                    if "admission" in alias.name.split(".")
+                )
     assert violations == []
