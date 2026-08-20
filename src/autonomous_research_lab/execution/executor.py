@@ -11,6 +11,14 @@ configured jobs carry distinct ids, and each job may be submitted exactly
 once. This is what keeps every execution a distinct record with its own
 provenance.
 
+The id may be *derived* rather than minted, and that is not a departure
+from occurrence identity: :func:`derive_job_id` derives it from the
+attempt, which is itself an occurrence. What it buys is recomputability.
+A caller that writes the id down before submitting can ask afterwards —
+from a different process, with nothing in memory — whether that exact
+job was ever submitted, which is the difference between recovering an
+interrupted run and paying for it twice.
+
 The :class:`Executor` interface is deliberately three methods, shaped for
 asynchronous, long-running, remote work even though the only implementation
 today is local and synchronous: ``submit`` returns a handle rather than a
@@ -29,12 +37,25 @@ from pathlib import PurePath
 from typing import Final
 
 from ..core.experiment import ExperimentResult
-from ..core.ids import occurrence_id
+from ..core.ids import content_id, occurrence_id
 from ..core.types import ConfigValue, freeze_mapping
 
 DEFAULT_TIMEOUT_SECONDS: Final = 3600.0
 """Every job has a finite timeout. A job that genuinely needs longer states
 so explicitly; "run forever" is not an option the contract offers."""
+
+
+def derive_job_id(attempt_id: str) -> str:
+    """The id the job of ``attempt_id`` will have, computed before it runs.
+
+    One attempt submits at most one job through this route, so the
+    attempt alone determines the id. A retry is a new attempt — the
+    domain says so — and therefore a new job id, which is exactly why
+    recovery may collect a job but must never resubmit one.
+    """
+    if not attempt_id.strip():
+        raise ValueError("a derived job id needs the attempt it belongs to")
+    return content_id("job", attempt_id)
 
 
 class JobStatus(StrEnum):

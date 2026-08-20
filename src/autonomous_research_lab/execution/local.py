@@ -38,6 +38,15 @@ Execution is synchronous: ``submit`` runs the job to completion before
 returning its id. That is a property of this backend, not of the interface --
 callers still have to poll ``status`` and call ``collect``, so they remain
 correct when a genuinely asynchronous backend replaces it.
+
+Every job also leaves a durable record of itself, ``job.json``, in its run
+directory: written before the process starts and rewritten once it ends.
+That is what makes a job findable by a process that did not submit it. A
+run interrupted mid-step is resumed by a fresh executor that can still
+answer ``status`` and ``collect`` for the job the dead process launched --
+and, just as importantly, still refuses to submit that job id a second
+time. Without it the in-memory maps die with the process and an expensive
+completed job becomes indistinguishable from one that never ran.
 """
 
 from __future__ import annotations
@@ -58,10 +67,12 @@ from typing import Final
 
 from ..core.budget import ResourceCost
 from ..core.experiment import Environment, ExperimentResult, ExperimentStatus
+from ..core.types import ConfigValue
 from .executor import (
     DuplicateJobError,
     Executor,
     ExperimentJob,
+    JobNotFinishedError,
     JobStatus,
     UnknownJobError,
 )
@@ -71,6 +82,7 @@ CONFIG_FILENAME = "config.json"
 STDOUT_FILENAME = "stdout.log"
 STDERR_FILENAME = "stderr.log"
 MANIFEST_FILENAME = "manifest.json"
+JOB_RECORD_FILENAME = "job.json"
 WORKSPACE_DIRNAME = "workspace"
 HOME_DIRNAME = "home"
 
@@ -106,6 +118,14 @@ class MalformedMetricsError(RuntimeError):
     """Raised when an experiment's ``metrics.json`` is not a flat map of numbers."""
 
 
+class MalformedJobRecordError(RuntimeError):
+    """Raised when a job's durable record cannot be read.
+
+    Loud rather than treated as absence: a record that exists but does not
+    parse means a job may have run, and reporting the job as unknown would
+    invite resubmitting it."""
+
+
 class LocalExecutor(Executor):
     def __init__(self, run_root: Path | str) -> None:
         self._run_root = Path(run_root)
@@ -114,7 +134,12 @@ class LocalExecutor(Executor):
         self._status: dict[str, JobStatus] = {}
 
     def submit(self, job: ExperimentJob) -> str:
-        if job.id in self._status:
+        # Both records are consulted: the in-memory one for this process,
+        # the durable one for a job some earlier process launched. A
+        # derived job id makes that second case reachable, and resubmitting
+        # it would be the double-charge this whole mechanism exists to
+        # prevent.
+        if job.id in self._status or self._record_path(job.id).is_file():
             raise DuplicateJobError(
                 f"job {job.id} was already submitted; a retry is a new event — "
                 f"construct a new job"
@@ -122,6 +147,9 @@ class LocalExecutor(Executor):
         self._status[job.id] = JobStatus.RUNNING
         run_dir = self._run_root / job.id
         run_dir.mkdir(parents=True, exist_ok=True)
+        # Written before the process starts: a job nobody wrote down first
+        # is a job no later process can find.
+        self._write_record(job, JobStatus.RUNNING, None)
 
         if job.working_dir is not None:
             working_dir = job.working_dir
@@ -208,19 +236,224 @@ class LocalExecutor(Executor):
             failure_reason=failure_reason,
         )
         self._results[job.id] = result
+        self._write_record(job, job_status, result)
         return job.id
 
     def status(self, job_id: str) -> JobStatus:
-        try:
+        if job_id in self._status:
             return self._status[job_id]
-        except KeyError as exc:
-            raise UnknownJobError(job_id) from exc
+        return self._durable(job_id)[0]
 
     def collect(self, job_id: str) -> ExperimentResult:
+        found = self._results.get(job_id)
+        if found is not None:
+            return found
+        status, result = self._durable(job_id)
+        if result is None:
+            raise JobNotFinishedError(
+                f"job {job_id} is recorded as {status}; the process that "
+                f"submitted it left no result to collect"
+            )
+        return result
+
+    # -- the durable record ----------------------------------------------------
+
+    def _record_path(self, job_id: str) -> Path:
+        return self._run_root / job_id / JOB_RECORD_FILENAME
+
+    def _write_record(
+        self,
+        job: ExperimentJob,
+        status: JobStatus,
+        result: ExperimentResult | None,
+    ) -> None:
+        """Publish what is known about this job so far.
+
+        Rewritten rather than appended: unlike a ledger this is not a
+        history, it is the executor's current answer about one job, and
+        the run directory beside it already holds the evidence.
+        """
+        path = self._record_path(job.id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        scratch = path.with_suffix(".tmp")
+        scratch.write_text(
+            json.dumps(
+                _record_payload(job, status, result), indent=2, sort_keys=True
+            ),
+            encoding="utf-8",
+        )
+        scratch.replace(path)
+
+    def _durable(self, job_id: str) -> tuple[JobStatus, ExperimentResult | None]:
+        path = self._record_path(job_id)
+        if not path.is_file():
+            raise UnknownJobError(job_id)
         try:
-            return self._results[job_id]
-        except KeyError as exc:
-            raise UnknownJobError(job_id) from exc
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise MalformedJobRecordError(
+                f"the durable record of job {job_id} is not valid JSON: {exc}"
+            ) from exc
+        if not isinstance(payload, dict):
+            raise MalformedJobRecordError(
+                f"the durable record of job {job_id} is not an object"
+            )
+        try:
+            return _record_from(payload)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise MalformedJobRecordError(
+                f"the durable record of job {job_id} cannot be read: {exc}"
+            ) from exc
+
+
+def _record_payload(
+    job: ExperimentJob, status: JobStatus, result: ExperimentResult | None
+) -> dict[str, object]:
+    """What one job was and how it ended.
+
+    The job's ``env`` is deliberately absent. It is the one field a caller
+    may fill with a secret, and a record written to disk is exactly where
+    a secret must not be; the run directory records what ran, not what it
+    was given to authenticate with.
+    """
+    payload: dict[str, object] = {
+        "job_id": job.id,
+        "spec_id": job.spec_id,
+        "status": str(status),
+        "command": list(job.command),
+        "config": dict(job.config),
+        "seed": job.seed,
+    }
+    if result is None:
+        return payload
+    payload["result"] = {
+        "status": str(result.status),
+        "environment": {
+            "python_version": result.environment.python_version,
+            "platform": result.environment.platform,
+            "git_commit": result.environment.git_commit,
+            "git_dirty": result.environment.git_dirty,
+        },
+        "metrics": dict(result.metrics),
+        "artifacts": list(result.artifacts),
+        "logs": list(result.logs),
+        "runtime_seconds": result.runtime_seconds,
+        "cost": {
+            "wall_clock_seconds": result.cost.wall_clock_seconds,
+            "gpu_hours": result.cost.gpu_hours,
+            "usd": result.cost.usd,
+            "model_tokens": result.cost.model_tokens,
+        },
+        "exit_code": result.exit_code,
+        "failure_reason": result.failure_reason,
+    }
+    return payload
+
+
+def _record_from(
+    payload: Mapping[str, object],
+) -> tuple[JobStatus, ExperimentResult | None]:
+    status = JobStatus(_text(payload, "status"))
+    body = payload.get("result")
+    if body is None:
+        return status, None
+    if not isinstance(body, dict):
+        raise TypeError("result must be an object")
+    environment = body["environment"]
+    cost = body["cost"]
+    if not isinstance(environment, dict) or not isinstance(cost, dict):
+        raise TypeError("environment and cost must be objects")
+    return status, ExperimentResult(
+        spec_id=_text(payload, "spec_id"),
+        job_id=_text(payload, "job_id"),
+        status=ExperimentStatus(_text(body, "status")),
+        command=tuple(_strings(payload, "command")),
+        environment=Environment(
+            python_version=_text(environment, "python_version"),
+            platform=_text(environment, "platform"),
+            git_commit=_optional_text(environment, "git_commit"),
+            git_dirty=_optional_bool(environment, "git_dirty"),
+        ),
+        metrics=_numbers(body, "metrics"),
+        config=_config(payload, "config"),
+        seed=_optional_int(payload, "seed"),
+        artifacts=tuple(_strings(body, "artifacts")),
+        logs=tuple(_strings(body, "logs")),
+        runtime_seconds=_number_at(body, "runtime_seconds"),
+        cost=ResourceCost(
+            wall_clock_seconds=_number_at(cost, "wall_clock_seconds"),
+            gpu_hours=_number_at(cost, "gpu_hours"),
+            usd=_number_at(cost, "usd"),
+            model_tokens=int(_number_at(cost, "model_tokens")),
+        ),
+        exit_code=_optional_int(body, "exit_code"),
+        failure_reason=_optional_text(body, "failure_reason"),
+    )
+
+
+def _text(payload: Mapping[str, object], key: str) -> str:
+    value = payload[key]
+    if not isinstance(value, str):
+        raise TypeError(f"{key} must be a string")
+    return value
+
+
+def _optional_text(payload: Mapping[str, object], key: str) -> str | None:
+    value = payload.get(key)
+    if value is None or isinstance(value, str):
+        return value
+    raise TypeError(f"{key} must be a string or null")
+
+
+def _optional_bool(payload: Mapping[str, object], key: str) -> bool | None:
+    value = payload.get(key)
+    if value is None or isinstance(value, bool):
+        return value
+    raise TypeError(f"{key} must be a boolean or null")
+
+
+def _optional_int(payload: Mapping[str, object], key: str) -> int | None:
+    value = payload.get(key)
+    if value is None or (isinstance(value, int) and not isinstance(value, bool)):
+        return value
+    raise TypeError(f"{key} must be an integer or null")
+
+
+def _number_at(payload: Mapping[str, object], key: str) -> float:
+    value = payload[key]
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError(f"{key} must be a number")
+    return float(value)
+
+
+def _strings(payload: Mapping[str, object], key: str) -> list[str]:
+    values = payload[key]
+    if not isinstance(values, list) or any(
+        not isinstance(item, str) for item in values
+    ):
+        raise TypeError(f"{key} must be a list of strings")
+    return [str(item) for item in values]
+
+
+def _numbers(payload: Mapping[str, object], key: str) -> dict[str, float]:
+    values = payload[key]
+    if not isinstance(values, dict):
+        raise TypeError(f"{key} must be an object of numbers")
+    return {str(name): _number_at(values, name) for name in values}
+
+
+def _config(
+    payload: Mapping[str, object], key: str
+) -> dict[str, ConfigValue]:
+    values = payload[key]
+    if not isinstance(values, dict):
+        raise TypeError(f"{key} must be an object")
+    read: dict[str, ConfigValue] = {}
+    for name, value in values.items():
+        if value is not None and not isinstance(value, (str, int, float, bool)):
+            raise TypeError(f"config value {name} is not a scalar")
+        read[str(name)] = value
+    return read
 
 
 def _read_metrics(path: Path) -> Mapping[str, float]:
@@ -330,12 +563,15 @@ def _collect_artifacts(run_dir: Path) -> tuple[str, ...]:
     """Every file the run left inside its directory. Symlinks resolving
     outside the run directory are excluded: what they point at was not
     produced by this run, and hashing it would launder foreign content into
-    the run's manifest."""
+    the run's manifest. The executor's own files are excluded for a
+    different reason: the job record is rewritten when the run ends, so
+    hashing it would guarantee a manifest that no longer matches."""
     reserved = {
         STDOUT_FILENAME,
         STDERR_FILENAME,
         CONFIG_FILENAME,
         MANIFEST_FILENAME,
+        JOB_RECORD_FILENAME,
     }
     return tuple(
         sorted(

@@ -363,11 +363,13 @@ def test_a_failing_preflight_prevents_execution_but_keeps_the_record(
             entrypoint: str,
             config: object,
             seed: int | None,
+            job_id: str = "",
         ) -> ExperimentJob:
             return ExperimentJob(
                 spec_id=spec_id,
                 command=("no-such-binary-anywhere", str(source_dir / entrypoint)),
                 seed=seed,
+                id=job_id,
             )
 
     provider = FakeModelProvider((_reply(),))
