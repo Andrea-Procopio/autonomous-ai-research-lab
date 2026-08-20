@@ -29,6 +29,18 @@ operator resumes when they have dealt with the cause.
 
 from __future__ import annotations
 
+from .config import (
+    AdmissionSettings,
+    ConfigError,
+    ExperimentationSettings,
+    FundingSettings,
+    IdeationSettings,
+    PriorArtSettings,
+    RunConfig,
+    SelectionSettings,
+    load_config,
+    parse_config,
+)
 from .events import (
     StageEvent,
     StageLog,
@@ -58,13 +70,21 @@ __all__ = [
     "CHAIN_ORDER",
     "TERMINAL_STATUSES",
     "ZERO_SPEND",
+    "AdmissionSettings",
     "ChainFacts",
+    "ConfigError",
+    "ExperimentationSettings",
     "Fact",
+    "FundingSettings",
+    "IdeationSettings",
     "Investigation",
     "InvestigationConflictError",
     "InvestigationIntegrityError",
     "InvestigationStore",
     "MissingFactError",
+    "PriorArtSettings",
+    "RunConfig",
+    "SelectionSettings",
     "StageEvent",
     "StageLog",
     "StageLogConflictError",
@@ -73,4 +93,6 @@ __all__ = [
     "StageName",
     "StageSpend",
     "StageStatus",
+    "load_config",
+    "parse_config",
 ]
