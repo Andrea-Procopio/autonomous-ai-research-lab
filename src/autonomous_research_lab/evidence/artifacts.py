@@ -39,7 +39,7 @@ import os
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import Final
+from typing import Final, Protocol
 
 from ..core.experiment import ExperimentResult
 from ..core.ids import content_id, occurrence_id
@@ -180,6 +180,20 @@ class ArtifactManifest:
     @property
     def total_bytes(self) -> int:
         return sum(entry.size_bytes for entry in self.entries)
+
+
+class ArtifactStore(Protocol):
+    """What an evidence store needs from artifact storage. A protocol so
+    the policy is injected rather than assumed: a stricter ceiling, a
+    stricter refusal, or one day a remote object store."""
+
+    def ingest(self, result: ExperimentResult) -> ArtifactManifest: ...
+
+    def get(self, result_id: str) -> ArtifactManifest | None: ...
+
+    def manifests(self) -> tuple[ArtifactManifest, ...]: ...
+
+    def blob_path(self, digest: str) -> Path: ...
 
 
 class FileArtifactStore:
