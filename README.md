@@ -166,7 +166,11 @@ turns exactly one validated selection into a bare initial state of
 propositions — no result, evidence, or judgment is expressible there.
 Funding that seed is a separate operator act with its own record and
 its own ledger: it buys the chance to find something out, never a
-finding. Orchestration is not model-driven: a fixed-priority director
+finding. Money is held before an attempt spends it and settled
+afterwards, so a process killed mid-step leaves a visible claim on the
+budget rather than a silence, and what it actually cost is recorded in
+full — past its authorization and past the balance if that is what
+happened. Orchestration is not model-driven: a fixed-priority director
 dispatches work, and every model decision passes a deterministic gate
 before it takes effect.
 
@@ -194,8 +198,8 @@ Expect interfaces to change.
 | `priorart` | Whether it was already done: the prior-art challenge over the candidate portfolio, with a deterministic fail-closed verdict per candidate. Depends on `core`, `literature`, `mapping`, `ideation`, and the provider seam; its consumers are `selection` and `admission`. |
 | `selection` | Which candidate to pursue, if any: gated two-stage selection over the `DISTINGUISHED` survivors of one named prior-art run, with attested disqualifiers and three honest outcomes. Score-free and write-once. Depends on `core`, `ideation`, `mapping`, `priorart`, and the provider seam; its one consumer is `admission`. |
 | `admission` | The governed bridge into research state: one named `SELECTED` run verified through its whole lineage, one gated model call encoding the recorded predictions sign-only, deterministic copies for everything else, and an all-or-nothing state snapshot beside a write-once record. Depends on `core` (uniquely including the state it constructs), `ideation`, `mapping`, `priorart`, `selection`, `persistence`, and the provider seam; nothing imports it. |
-| `program` | A funded run: the bridge from one admitted state to something the runtime may spend against. One named admission, one authorized grant, a funded successor state, an append-only budget ledger that is idempotent by charge id and safe under concurrent debits, and the cold verification of a whole run root. Depends on `core`, `admission`, `persistence`, and `evidence`; nothing imports it. |
-| `control` | The composition root: one command that walks the seven stages of the chain from a config with no ids in it, recording what happened to each in an append-only event log so an interrupted run resumes without repeating or double-paying for anything. The one package that may import every stage, and the one nothing imports. |
+| `program` | A funded run: the bridge from one admitted state to something the runtime may spend against. One named admission, one authorized grant, a funded successor state, an append-only budget ledger that holds money before an attempt spends it and settles it afterwards, an attempt journal recording how far each attempt got in making itself durable, and the cold verification of a whole run root. Depends on `core`, `admission`, `persistence`, and `evidence`; nothing imports it. |
+| `control` | The composition root: one command that walks the seven stages of the chain from a config with no ids in it, recording what happened to each in an append-only event log so an interrupted run resumes without repeating or double-paying for anything — and, since Task 6D, finishing a step a killed process left half done rather than abandoning it. The one package that may import every stage, and the one nothing imports. |
 | `persistence` | Saves every state to disk so a run can be inspected or replayed later. |
 | `runtime` | Bookkeeping around the loop: open work, validation and verification, cost tracking, metrics, the model-provider seam (with the Muse adapter), and the write-once stores for implementation and planning provenance. |
 | `search` | Policies for choosing the next action among candidates. |
@@ -298,6 +302,24 @@ through the ordinary executor in real subprocesses and the ledger bills
 one debit per attempt. The second and third commands are the point: the
 walk stops where it was told, and a later process picks it up from the
 durable record with no memory of the first.
+
+### examples/torn_step.py
+
+```bash
+python -m examples.torn_step --run-root /tmp/torn --kill-after      # list
+python -m examples.torn_step --run-root /tmp/torn --kill-after 10   # die
+python -m examples.torn_step --run-root /tmp/torn                   # finish it
+```
+
+Two processes, nothing shared but files. The first walks the canary to a
+funded run, starts one step, and is killed outright — `os._exit`, no
+unwinding, no cleanup — the instant its tenth durable write lands. The
+second knows nothing about the first except what is on disk: it reads
+the attempt journal, answers whatever was left open, and prints the
+ledger, the journal and the verifier side by side. A step makes sixteen
+durable writes, and dying after any of them ends the same way — the run
+owes nothing, each attempt is charged exactly once, and it verifies from
+cold.
 
 ### examples/live_task6c.py
 
