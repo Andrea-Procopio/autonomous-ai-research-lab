@@ -847,6 +847,63 @@ without writing metrics is recorded as a failure, because treating a
 silent run as success is exactly how empty experiments become reported
 findings.
 
+### Facts that outlive their process (Task 6B)
+
+Two implementations of that contract. `InMemoryEvidenceStore` is the
+reference and the explicit ablation. `FileEvidenceStore` is what a real
+run uses, and it closes a gap that made the persistence story only half
+true: state snapshots survived a process while the facts they cite did
+not.
+
+**Order is the substance of it.** `record_result` stores the artifact
+bytes, then the manifest, then the fact — so a state can only ever
+reference a result whose outputs are already durable, and a refused
+artifact leaves no result behind. The artifact store is injected rather
+than assumed, so the policy belongs to the caller.
+
+**Artifacts are content-addressed** (`evidence/artifacts.py`). Blobs sit
+under their own sha256, so identical bytes are kept once however many
+results produced them and re-ingesting a result is a no-op. Each blob is
+published by hard-linking a scratch file into place, the same way a
+ledger entry is, so a crash mid-write leaves an ignorable scratch file
+rather than a truncated body under a name that promises its own hash.
+One manifest per result records run-relative path, digest, size, media
+type, and whether the file was an artifact or a log. Ingest refuses more
+than it accepts: a path resolving outside the run directory was not
+produced by this run; a file that no longer hashes to what the run's own
+`manifest.json` recorded is a post-hoc edit, and storing the newer bytes
+would launder it; a file past the ceiling fails by name. Nothing is
+written unless every file passes.
+
+**Why these records carry their own digest.** Every other file store
+here catches tampering by recomputing the record's content id on load.
+That proves nothing about these two. `ExperimentResult.id` derives from
+its job id alone — a result is an *event*, and two identical runs are
+two results — so an edited metric still re-derives the same id.
+`Evidence.id` covers its result, kind, and observation, but not its
+metrics or its spec: one result read two ways is two readings. Both are
+right as domain identity and useless as integrity checks, so each stored
+record carries a `payload_digest` over its own canonical JSON,
+recomputed on load. The distinction is worth stating because the
+alternative — quietly reusing a check that checks nothing — is the exact
+shape of failure this repository exists to make hard.
+
+**Verifying a run from cold** (`program/integrity.py`,
+`examples/verify_run.py`). One deterministic pass over a run root by a
+process that wrote none of it: snapshots re-hash to their filenames,
+payloads survive their digests, every state reference resolves, every
+manifest entry has a blob that still hashes to it, the evidence chain
+holds on each leaf state, and a funded run's ledger replays. It reports
+typed issues and never raises for a broken run — a verifier that stopped
+at the first fault would make a broken run take as many passes as it has
+problems. It lives in `program` rather than `evidence` because of what
+it reaches: snapshots from `persistence`, facts from `evidence`, the
+ledger from `program` itself. `evidence` stays pinned to `core` alone,
+and a structural test says so.
+
+A verified run is one whose records survived. Whether its science is
+right is a different question, and the assessments answer it.
+
 ## Claims and assessment
 
 A `Claim` carries no status. Its factual support is the set of
@@ -877,8 +934,15 @@ database:
 <run_root>/
 ├── states/
 │   └── <state_id>.json      content-addressed ResearchState snapshots
+├── results/
+│   └── <result_id>.json     one execution record, digest-verified
+├── evidence/
+│   └── <evidence_id>.json   one factual reading, digest-verified
+├── artifacts/
+│   └── <result_id>.json     what one result left behind
+├── blobs/<aa>/<sha256>       those bytes, stored once
 ├── trajectory.jsonl          one DecisionRecord per line
-└── runs/                     executor run directories (logs, metrics, artifacts)
+└── runs/                     executor run directories (expendable once ingested)
 ```
 
 `FileStateStore` (in `persistence/`) serializes states
@@ -1934,6 +1998,11 @@ never by rewriting a snapshot, spend is an append-only ledger fact
 keyed by a charge id rather than a field rewrite, and a ledger that
 disagrees with the state it bills for fails closed instead of being
 reconciled.
+A fact outlives the process that recorded it: results, evidence, and
+the artifact bytes they point at are durable before any state may
+reference them, each stored record carries its own payload digest
+because these domain ids deliberately do not cover their content, and a
+whole run can be verified from cold by a process that wrote none of it.
 Every important research decision is reconstructible later.
 ```
 
@@ -1941,7 +2010,10 @@ Every important research decision is reconstructible later.
 
 ```
 core          scientific vocabulary                    (no internal dependencies)
-evidence      what happened, append-only + the chain validator
+evidence      what happened, append-only + the chain validator;
+              file-backed results and evidence under their own payload
+              digests, and content-addressed storage for the artifact
+              bytes they point at   (depends on core only)
 execution     how to make things happen, anywhere; deterministic
               failure classification; job bindings and the
               disposable-container launcher for generated code
@@ -1987,10 +2059,11 @@ admission     the governed bridge into research state: one named
               it constructs — ideation, mapping, priorart, selection,
               persistence, and the provider seam; nothing imports it)
 program       a funded run: one named admission, one authorized
-              grant, a funded successor state, and an append-only
-              budget ledger that is idempotent by charge id and safe
-              under concurrent debits  (depends on core, admission,
-              and persistence; nothing imports it)
+              grant, a funded successor state, an append-only budget
+              ledger that is idempotent by charge id and safe under
+              concurrent debits, and the cold verification of a whole
+              run root  (depends on core, admission, persistence, and
+              evidence; nothing imports it)
 search        which move to take
 roles         who does the work, under what contract; the model-backed
               engineer and planner
