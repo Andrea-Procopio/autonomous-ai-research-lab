@@ -56,6 +56,7 @@ MAPPING = SRC / "mapping"
 IDEATION = SRC / "ideation"
 PRIORART = SRC / "priorart"
 SELECTION = SRC / "selection"
+ADMISSION = SRC / "admission"
 PROVIDERS = SRC / "runtime" / "providers.py"
 PROVIDER_MODULES = (PROVIDERS, SRC / "runtime" / "muse.py")
 
@@ -413,11 +414,11 @@ def test_mapping_imports_no_vendor_sdk() -> None:
 def test_mapping_is_imported_only_by_its_analysis_stages() -> None:
     """Only ``ideation`` — the deliberate idea-generation stage Task 5C
     built — ``priorart`` — the challenge stage that shares its gate
-    vocabulary and grounding surface — and ``selection`` — the choice
-    stage that reuses the same vocabulary — may import mapping, all
-    barred from scientific state. No orchestration, role, runtime, or
-    evidence module may depend on it: a field map must have no path
-    into scientific state."""
+    vocabulary and grounding surface — ``selection`` — the choice
+    stage that reuses the same vocabulary — and ``admission`` — the
+    governed bridge that reuses it again — may import mapping. No
+    orchestration, role, runtime, or evidence module may depend on it:
+    a field map must have no path into scientific state."""
     violations: list[str] = []
     for path in sorted(SRC.rglob("*.py")):
         if (
@@ -425,6 +426,7 @@ def test_mapping_is_imported_only_by_its_analysis_stages() -> None:
             or IDEATION in path.parents
             or PRIORART in path.parents
             or SELECTION in path.parents
+            or ADMISSION in path.parents
         ):
             continue
         tree = ast.parse(path.read_text(), filename=str(path))
