@@ -38,6 +38,7 @@ from autonomous_research_lab.control.controller import Controller
 from autonomous_research_lab.control.lab import RuntimeRequest
 from autonomous_research_lab.control.recovery import recover
 from autonomous_research_lab.control.stage import Fact, StageName
+from autonomous_research_lab.core.attempt import SettlementBasis
 from autonomous_research_lab.core.evidence import Evidence
 from autonomous_research_lab.core.experiment import ExperimentResult
 from autonomous_research_lab.core.state import ResearchState
@@ -53,6 +54,8 @@ from autonomous_research_lab.program.store import ProgramStore
 from autonomous_research_lab.runtime.providers import ModelProvider
 from examples.canary_chain import walk
 from examples.canary_lab import CanaryLab
+
+_GUESSED = SettlementBasis.CONSERVATIVE_MAX
 
 KILLED = 9
 """The exit code a killed process leaves. Chosen to be unmistakable: no
@@ -296,7 +299,22 @@ def resume(root: Path) -> int:
 
     print("journal")
     for event in journal.events():
-        print(f"  {event.sequence:>3}  {event.phase:<16} {event.attempt_id}")
+        basis = (
+            "" if event.basis is SettlementBasis.NONE else f"  [{event.basis}]"
+        )
+        print(
+            f"  {event.sequence:>3}  {event.phase:<16} "
+            f"{event.attempt_id}{basis}"
+        )
+    unknown = [e for e in journal.events() if e.basis is _GUESSED]
+    if unknown:
+        print()
+        print(
+            "  the actual cost of the following is unknown; each was "
+            "charged its authorization:"
+        )
+        for event in unknown:
+            print(f"    {event.attempt_id}  settled {event.settled}")
     print()
 
     continued = FileStateStore(root).load(report.state_id)

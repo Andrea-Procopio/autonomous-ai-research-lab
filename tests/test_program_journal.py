@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from autonomous_research_lab.core.attempt import AttemptPhase
+from autonomous_research_lab.core.attempt import AttemptPhase, SettlementBasis
 from autonomous_research_lab.core.budget import ResourceCost
 from autonomous_research_lab.program.journal import (
     AttemptEvent,
@@ -82,7 +82,8 @@ class TestRecording:
             attempt_id="att_1",
             phase=AttemptPhase.COMPLETED,
             reserved=HELD,
-            actual=ResourceCost(usd=4.0),
+            settled=ResourceCost(usd=4.0),
+            basis=SettlementBasis.MEASURED,
         )
 
         assert journal.open_attempts() == ()
@@ -250,7 +251,8 @@ class TestTheLifecycleOnlyMovesForward:
                 attempt_id="att_1",
                 phase=AttemptPhase.ABANDONED,
                 reserved=HELD,
-                actual=ResourceCost(usd=4.0),
+                settled=ResourceCost(usd=4.0),
+                basis=SettlementBasis.MEASURED,
             )
 
     def test_a_released_attempt_cannot_claim_a_cost(
@@ -262,7 +264,7 @@ class TestTheLifecycleOnlyMovesForward:
                 sequence=1,
                 attempt_id="att_1",
                 phase=AttemptPhase.RELEASED,
-                actual=ResourceCost(usd=1.0),
+                settled=ResourceCost(usd=1.0),
                 previous_event_id="aevt_0",
             )
 
@@ -325,7 +327,7 @@ class TestWhatEachPhasePromises:
                 sequence=1,
                 attempt_id="att_1",
                 phase=AttemptPhase.OUTPUTS_DURABLE,
-                actual=ResourceCost(usd=1.0),
+                settled=ResourceCost(usd=1.0),
                 previous_event_id="aevt_0",
             )
 
@@ -342,7 +344,8 @@ class TestBreach:
             attempt_id="att_1",
             phase=AttemptPhase.COMPLETED,
             reserved=HELD,
-            actual=actual,
+            settled=actual,
+            basis=SettlementBasis.MEASURED,
         )
 
     def test_staying_inside_the_authorization_is_not_a_breach(
@@ -364,7 +367,7 @@ class TestBreach:
 
         breaches = journal.breaches()
         assert [e.attempt_id for e in breaches] == ["att_1"]
-        assert breaches[0].actual.model_tokens == 99_000
+        assert breaches[0].settled.model_tokens == 99_000
         assert breaches[0].reserved.model_tokens == 1000
 
 

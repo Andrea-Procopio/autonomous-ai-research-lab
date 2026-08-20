@@ -12,7 +12,7 @@ import json
 import shutil
 from pathlib import Path
 
-from autonomous_research_lab.core.attempt import AttemptPhase
+from autonomous_research_lab.core.attempt import AttemptPhase, SettlementBasis
 from autonomous_research_lab.core.budget import ResearchBudget, ResourceCost
 from autonomous_research_lab.core.evidence import Evidence, EvidenceKind
 from autonomous_research_lab.core.experiment import (
@@ -497,7 +497,8 @@ class TestAttemptLinks:
             attempt_id="att_1",
             phase=AttemptPhase.COMPLETED,
             reserved=HELD,
-            actual=ResourceCost(usd=1.0),
+            settled=ResourceCost(usd=1.0),
+            basis=SettlementBasis.MEASURED,
         )
 
     def links(self, root: Path) -> tuple[IntegrityIssue, ...]:
@@ -545,7 +546,8 @@ class TestAttemptLinks:
             attempt_id="att_unheld",
             phase=AttemptPhase.ABANDONED,
             reserved=HELD,
-            actual=HELD,
+            settled=HELD,
+            basis=SettlementBasis.CONSERVATIVE_MAX,
         )
 
         details = [issue.detail for issue in self.links(tmp_path)]

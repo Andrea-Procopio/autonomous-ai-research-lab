@@ -73,6 +73,7 @@ from ..core.attempt import (
     ActionOutcome,
     AttemptPhase,
     AttemptStatus,
+    SettlementBasis,
 )
 from ..core.budget import NO_COST, ResearchBudget, ResourceCost
 from ..core.claim import EvidenceRelation
@@ -1814,7 +1815,10 @@ class ResearchRuntime:
                 attempt_id=charge_id,
                 phase=AttemptPhase.COMPLETED,
                 reserved=estimated,
-                actual=charged,
+                settled=charged,
+                # A live step knows what came off the budget, because it
+                # is the one that took it off.
+                basis=SettlementBasis.MEASURED,
             )
         return state, note, exhausted
 

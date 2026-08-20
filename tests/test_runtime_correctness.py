@@ -12,7 +12,11 @@ from pathlib import Path
 import pytest
 
 from autonomous_research_lab.core.actions import ResearchAction, ResearchActionType
-from autonomous_research_lab.core.attempt import AttemptPhase, AttemptStatus
+from autonomous_research_lab.core.attempt import (
+    AttemptPhase,
+    AttemptStatus,
+    SettlementBasis,
+)
 from autonomous_research_lab.core.budget import (
     NO_COST,
     ResearchBudget,
@@ -947,6 +951,7 @@ class RecordingJournal:
     def __init__(self) -> None:
         self.phases: list[tuple[str, AttemptPhase]] = []
         self.costs: dict[str, tuple[ResourceCost, ResourceCost]] = {}
+        self.bases: dict[str, SettlementBasis] = {}
 
     def record(
         self,
@@ -958,20 +963,23 @@ class RecordingJournal:
         bundle_id: str = "",
         produced: object = (),
         reserved: ResourceCost = NO_COST,
-        actual: ResourceCost = NO_COST,
+        settled: ResourceCost = NO_COST,
+        basis: SettlementBasis = SettlementBasis.NONE,
         detail: str = "",
     ) -> object:
         del state_id, job_id, bundle_id, produced, detail
         self.phases.append((attempt_id, phase))
         if phase is AttemptPhase.COMPLETED:
-            self.costs[attempt_id] = (reserved, actual)
+            self.costs[attempt_id] = (reserved, settled)
+            self.bases[attempt_id] = basis
         return None
 
     def breaches(self) -> list[str]:
         return [
             attempt_id
-            for attempt_id, (reserved, actual) in self.costs.items()
-            if actual.exceeds(reserved)
+            for attempt_id, (reserved, settled) in self.costs.items()
+            if self.bases[attempt_id] is SettlementBasis.MEASURED
+            and settled.exceeds(reserved)
         ]
 
 
@@ -1001,9 +1009,10 @@ def test_a_breach_is_two_numbers_on_the_journal_and_a_halt(
     (attempt,) = report.state.attempts
     assert report.halt_reason == "budget breached: the run spent past its grant"
     assert journal.breaches() == [attempt.id]
-    reserved, actual = journal.costs[attempt.id]
-    assert actual.wall_clock_seconds == 10_000.0
-    assert actual.exceeds(reserved)
+    reserved, settled = journal.costs[attempt.id]
+    assert settled.wall_clock_seconds == 10_000.0
+    assert settled.exceeds(reserved)
+    assert journal.bases[attempt.id] is SettlementBasis.MEASURED
 
 
 def test_an_attempt_within_its_authorization_is_no_breach(

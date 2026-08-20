@@ -199,12 +199,22 @@ human in the loop, producing results that survive scrutiny.
   figure is charged, the balance may go negative, and the run stops. A
   step makes sixteen durable writes and the suite kills it after every
   one of them, plus four cross-process kills with nothing shared but
-  files. Still open: a job submitted inside the bounded repair loop is
+  files. A conservative charge is recorded as one: the closing event
+  carries `CONSERVATIVE_MAX` rather than claiming a measurement nobody
+  took, which also keeps a crash from reading as a budget breach.
+  **Blocking PR4:** a job submitted inside the bounded repair loop is
   covered by its attempt's reservation but is not individually
   journalled, so a crash there abandons the attempt rather than
-  reattaching to the rerun.
+  reattaching to the rerun. The accounting is sound and the execution
+  recovery is not, which is tolerable for a deterministic executor and
+  not for a GPU one.
 - **Real experiment execution.** ML training runs under the existing
   executor contract: checkpoints, longer timeouts, GPU accounting.
+  Blocked on the repair-loop gap above: either every repair-loop job
+  gets its own journalled attempt, or repairs are disabled for jobs
+  above a cost threshold. Abandoning an unreattachable GPU job and
+  charging it in full is safe accounting and inadequate execution
+  recovery.
 - **Scientific debugging and experiment verification.** Done in its
   Phase 1 form: the five-way failure taxonomy (engineering /
   implementation / methodological / analytical / verified), a

@@ -17,6 +17,11 @@ Three separate concepts:
     status: a succeeded attempt whose result is still only in memory has
     not survived anything yet.
 
+``SettlementBasis``
+    Where the figure an attempt was charged came from. A measurement and
+    a defensible guess are both legitimate charges and they are not the
+    same fact, so the record says which it is holding.
+
 The lifecycle::
 
     (action proposed/selected)
@@ -39,6 +44,36 @@ from enum import StrEnum
 from .actions import ResearchAction
 from .budget import NO_COST, ResourceCost
 from .ids import occurrence_id
+
+
+class SettlementBasis(StrEnum):
+    """Where the amount an attempt was charged came from.
+
+    A charge is a number and a claim about that number. ``MEASURED``
+    claims the work reported this cost. ``CONSERVATIVE_MAX`` claims
+    something weaker and more important: *nobody knows what this cost*,
+    and the authorized maximum was charged because it is the only figure
+    the run can defend.
+
+    The two are kept apart because conflating them would make the record
+    safe and untrue. An attempt a crash left unaccounted for did not
+    "cost its reservation" — it cost an unknown amount, and the ledger
+    moved by the reservation. Writing the second down as if it were the
+    first turns a deliberate over-charge into a measurement nobody took,
+    and every later reading of the run inherits the error.
+    """
+
+    NONE = "none"
+    """Nothing was settled by this event."""
+
+    MEASURED = "measured"
+    """The work reported what it cost, and this is that figure."""
+
+    CONSERVATIVE_MAX = "conservative_max"
+    """The actual cost is unknown. The authorized maximum was charged
+    instead: it cannot understate what was authorized, and erring toward
+    recording more is the only safe direction when the truth is
+    unavailable."""
 
 
 class AttemptPhase(StrEnum):
@@ -89,8 +124,9 @@ class AttemptPhase(StrEnum):
 
     COMPLETED = "completed"
     """The debit is settled and nothing is owed. Carries what was
-    reserved and what it actually cost, so a breach is two numbers on one
-    row rather than a flag that could contradict them."""
+    reserved, what was settled, and where that figure came from, so a
+    breach is two numbers on one row rather than a flag that could
+    contradict them."""
 
     RELEASED = "released"
     """Abandoned before it cost anything, its reservation given back.
@@ -101,7 +137,9 @@ class AttemptPhase(StrEnum):
     ABANDONED = "abandoned"
     """Abandoned after it had already cost something. The debit is
     settled and no successor was produced: the work was bought, and the
-    reasoning that would have turned it into a state change is gone."""
+    reasoning that would have turned it into a state change is gone.
+    What it cost is usually unknown, which is what
+    :class:`SettlementBasis` is for."""
 
     @property
     def is_terminal(self) -> bool:

@@ -43,9 +43,16 @@ last phase                    what is true
 terminal                      nothing is owed
 ============================  =============================================
 
-A budget breach is not a phase. It is the closing event whose ``actual``
-exceeds its ``reserved``, which is two numbers already on the record
-rather than a third field that could disagree with them.
+A budget breach is not a phase. It is the closing event whose measured
+``settled`` exceeds its ``reserved``, which is two numbers already on
+the record rather than a third field that could disagree with them.
+
+*Measured* is load-bearing there. An attempt a crash left unaccounted
+for is charged its authorization, because that is the only figure the
+run can defend — but it did not *cost* that, and the closing event says
+so by carrying ``CONSERVATIVE_MAX`` rather than a basis it has no right
+to claim. The ledger stays safe either way; this is what keeps it
+truthful as well.
 
 One writer per run is assumed, as everywhere else in the repository. The
 exclusive create still makes a collision loud rather than silent.
@@ -60,7 +67,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final
 
-from ..core.attempt import AttemptPhase
+from ..core.attempt import AttemptPhase, SettlementBasis
 from ..core.budget import NO_COST, ResourceCost
 from ..core.ids import content_id, occurrence_id
 
@@ -139,10 +146,17 @@ class AttemptEvent:
     """The authorized maximum held for this attempt. Recorded on
     ``STARTED``, before the reservation is posted."""
 
-    actual: ResourceCost = NO_COST
-    """What the attempt really cost, recorded on ``COMMITTED``. Kept
-    apart from ``reserved`` because the gap between them is the whole
-    point: an attempt that overran is recorded as having overrun."""
+    settled: ResourceCost = NO_COST
+    """What the attempt was charged, recorded on the event that closes
+    it. Kept apart from ``reserved`` because the gap between them is the
+    whole point: an attempt that overran is recorded as having
+    overrun."""
+
+    basis: SettlementBasis = SettlementBasis.NONE
+    """Where ``settled`` came from — a measurement, or the authorized
+    maximum charged because nobody knows what the attempt cost. Without
+    this the two are indistinguishable on the record, and a deliberate
+    over-charge would read as a figure someone took."""
 
     detail: str = ""
     previous_event_id: str = ""
@@ -216,13 +230,20 @@ class AttemptEvent:
             raise ValueError(
                 "a committed attempt names the successor it produced"
             )
-        if self.phase not in _SETTLING and not self.actual.is_zero:
+        if self.phase not in _SETTLING and not self.settled.is_zero:
             # ``RELEASED`` is caught here too, and that is the point: an
             # attempt that bought nothing cannot report a cost.
             raise ValueError(
                 "only the event that closes an attempt by settling it says "
                 "what it cost; a cost recorded anywhere else is a second "
                 "answer"
+            )
+        if (self.phase in _SETTLING) != (
+            self.basis is not SettlementBasis.NONE
+        ):
+            raise ValueError(
+                f"a settling event states where its figure came from and "
+                f"nothing else may; {self.phase} carries {self.basis}"
             )
 
     def _derived_id(self) -> str:
@@ -240,19 +261,30 @@ class AttemptEvent:
             self.reserved.gpu_hours,
             self.reserved.usd,
             self.reserved.model_tokens,
-            self.actual.wall_clock_seconds,
-            self.actual.gpu_hours,
-            self.actual.usd,
-            self.actual.model_tokens,
+            self.settled.wall_clock_seconds,
+            self.settled.gpu_hours,
+            self.settled.usd,
+            self.settled.model_tokens,
+            str(self.basis),
             self.detail,
             self.previous_event_id,
         )
 
     @property
+    def actual_cost_known(self) -> bool:
+        """Whether ``settled`` is what the attempt cost, or only what it
+        was charged."""
+        return self.basis is SettlementBasis.MEASURED
+
+    @property
     def breached(self) -> bool:
         """Whether this event records an attempt that cost more than it
-        was authorized to."""
-        return self.phase in _SETTLING and self.actual.exceeds(self.reserved)
+        was authorized to.
+
+        Only a measurement can breach. A conservative charge is the
+        authorization by construction, and calling that an overrun would
+        turn every crash into a budget incident."""
+        return self.actual_cost_known and self.settled.exceeds(self.reserved)
 
 
 class RunJournal:
@@ -359,7 +391,8 @@ class RunJournal:
         bundle_id: str = "",
         produced: Iterable[tuple[str, str]] = (),
         reserved: ResourceCost = NO_COST,
-        actual: ResourceCost = NO_COST,
+        settled: ResourceCost = NO_COST,
+        basis: SettlementBasis = SettlementBasis.NONE,
         detail: str = "",
     ) -> AttemptEvent:
         """Publish one phase at the end of the journal.
@@ -387,7 +420,8 @@ class RunJournal:
                     bundle_id=bundle_id,
                     produced=pairs,
                     reserved=reserved,
-                    actual=actual,
+                    settled=settled,
+                    basis=basis,
                 )
             _require_forward(mine, phase, attempt_id)
             event = AttemptEvent(
@@ -400,7 +434,8 @@ class RunJournal:
                 bundle_id=bundle_id,
                 produced=pairs,
                 reserved=reserved,
-                actual=actual,
+                settled=settled,
+                basis=basis,
                 detail=detail,
                 previous_event_id=events[-1].id if events else "",
             )
@@ -510,7 +545,8 @@ def _require_same_phase(
     bundle_id: str,
     produced: tuple[tuple[str, str], ...],
     reserved: ResourceCost,
-    actual: ResourceCost,
+    settled: ResourceCost,
+    basis: SettlementBasis,
 ) -> AttemptEvent:
     """One phase per attempt, recording one set of facts."""
     same = (
@@ -519,7 +555,8 @@ def _require_same_phase(
         and existing.bundle_id == bundle_id
         and existing.produced == produced
         and existing.reserved == reserved
-        and existing.actual == actual
+        and existing.settled == settled
+        and existing.basis is basis
     )
     if not same:
         raise JournalConflictError(
@@ -544,7 +581,8 @@ def _event_payload(event: AttemptEvent) -> dict[str, object]:
         "bundle_id": event.bundle_id,
         "produced": dict(event.produced),
         "reserved": _amounts(event.reserved),
-        "actual": _amounts(event.actual),
+        "settled": _amounts(event.settled),
+        "basis": str(event.basis),
         "detail": event.detail,
         "previous_event_id": event.previous_event_id,
     }
@@ -564,7 +602,8 @@ def _event_from(payload: Mapping[str, object]) -> AttemptEvent:
         bundle_id=_text(payload, "bundle_id"),
         produced=tuple(sorted(_pairs(produced))),
         reserved=_cost(payload, "reserved"),
-        actual=_cost(payload, "actual"),
+        settled=_cost(payload, "settled"),
+        basis=SettlementBasis(_text(payload, "basis")),
         detail=_text(payload, "detail"),
         previous_event_id=_text(payload, "previous_event_id"),
     )

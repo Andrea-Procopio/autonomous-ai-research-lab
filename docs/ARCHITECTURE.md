@@ -2186,6 +2186,21 @@ usually was spent — a model call, a job, or both — and releasing money
 that may well be gone is precisely the failure this record exists to
 prevent. The authorized maximum is the only number the run can defend.
 
+**And it is recorded as what it is.** A charge is a number and a claim
+about that number, so the closing event carries a `SettlementBasis`
+alongside the figure: `MEASURED` when the work reported this cost,
+`CONSERVATIVE_MAX` when it did not and the authorization was charged in
+its place. The second says, on the record, that the actual cost is
+*unknown*.
+
+Without that field the ledger would stay safe and the history would
+become false. Every later reading of the run would inherit a figure
+nobody took, and — concretely — a conservative charge would count as a
+budget breach, because `settled` equals `reserved` and a naive
+comparison cannot tell a deliberate over-charge from an overrun. Only a
+measurement can breach; that is one line in `AttemptEvent.breached` and
+it is the line that keeps a crash from reading as a budget incident.
+
 Then one reconciliation, always: the state's budget is brought back to
 the ledger's balance. A process can die between settling a debit and
 persisting the state that paid it, and the two records then differ by
@@ -2244,11 +2259,17 @@ crash between `STARTED` and the reservation left an attempt the ledger
 had never heard of, and a crash between a settlement and the snapshot
 that paid it left the two records differing by exactly that debit.
 
-**Known limit.** A job submitted inside the bounded repair loop is
-covered by its attempt's reservation but is not individually journalled,
-so a crash there abandons the attempt — charging the authorization —
-rather than reattaching to the rerun. Nothing is hidden and nothing is
-paid twice; the expensive work is simply not recovered.
+**Known limit, blocking PR4.** A job submitted inside the bounded repair
+loop is covered by its attempt's reservation but is not individually
+journalled, so a crash there abandons the attempt — charging the
+authorization — rather than reattaching to the rerun. The *accounting*
+is sound: nothing is hidden, nothing is paid twice, and the charge is
+marked `CONSERVATIVE_MAX`. The *execution recovery* is not. Under the
+current deterministic executor a lost rerun costs seconds; under PR4 it
+would cost a GPU job, and abandoning one of those is a real loss however
+honestly it is billed. Before PR4 lands, either every repair-loop job
+gets its own journalled attempt, or repairs are disabled for jobs above
+a cost threshold. See `docs/KNOWN_ISSUES.md`.
 
 ## Architectural invariants
 
@@ -2301,9 +2322,10 @@ whole run can be verified from cold by a process that wrote none of it.
 Money is held before it is spent and settled afterwards, so an attempt
 interrupted between the two leaves a claim on the budget rather than a
 silence; what an attempt actually cost is recorded in full, past its
-authorization and past the balance if that is what happened; and an
-attempt nobody can account for is charged what it was authorized rather
-than released.
+authorization and past the balance if that is what happened; an attempt
+nobody can account for is charged what it was authorized rather than
+released; and a charge nobody measured is recorded as a charge nobody
+measured.
 Every important research decision is reconstructible later.
 ```
 

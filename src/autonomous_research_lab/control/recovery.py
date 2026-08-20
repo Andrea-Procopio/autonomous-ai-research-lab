@@ -28,6 +28,14 @@ is the one thing this record exists to prevent. The authorized maximum is
 the only number the run can defend, and erring toward recording more is
 the direction to err in.
 
+That charge is recorded as what it is. The closing event carries
+``CONSERVATIVE_MAX``, which says in the record that the actual cost is
+*unknown* and the authorized maximum was charged in its place. Writing
+the reservation down as a measurement would leave the ledger safe and
+the history false — every later reading of the run would inherit a
+figure nobody took — and a conservative charge would count as a budget
+breach, turning every crash into an overrun that never happened.
+
 Two things recovery never does. It never resubmits a job: job ids are
 derived from attempt ids, the executor refuses a second submission of
 one, and a retry is a new attempt by definition. And it never deletes a
@@ -46,7 +54,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Final
 
-from ..core.attempt import AttemptPhase
+from ..core.attempt import AttemptPhase, SettlementBasis
 from ..core.budget import NO_COST, ResearchBudget, ResourceCost
 from ..core.state import recording_lineage
 from ..evidence.store import EvidenceStore
@@ -80,12 +88,21 @@ class Recovery:
     state the attempt began at."""
 
     settled: ResourceCost
+    basis: SettlementBasis
+    """Where ``settled`` came from. ``CONSERVATIVE_MAX`` means the run
+    charged what it was allowed to spend because what it did spend is
+    not knowable from anything on disk."""
+
     breached: bool
     detail: str
 
     @property
     def finished(self) -> bool:
         return self.resolution is AttemptPhase.COMPLETED
+
+    @property
+    def actual_cost_known(self) -> bool:
+        return self.basis is SettlementBasis.MEASURED
 
 
 @dataclass(frozen=True, slots=True)
@@ -257,7 +274,10 @@ def _finish(
         attempt_id=attempt_id,
         phase=AttemptPhase.COMPLETED,
         reserved=began.reserved,
-        actual=cost,
+        settled=cost,
+        # The bundle recorded what the step cost, so this is a
+        # measurement even though nobody was there to watch it.
+        basis=SettlementBasis.MEASURED,
         detail=f"recovered from {last.phase}",
     )
     return Recovery(
@@ -266,6 +286,7 @@ def _finish(
         resolution=AttemptPhase.COMPLETED,
         state_id=successor_id,
         settled=cost,
+        basis=SettlementBasis.MEASURED,
         breached=settlement.breached,
         detail=(
             f"{attempt_id} was interrupted at {last.phase}; its bundle was "
@@ -308,6 +329,7 @@ def _abandon(
             resolution=AttemptPhase.RELEASED,
             state_id=resume_from,
             settled=ResourceCost(),
+            basis=SettlementBasis.NONE,
             breached=False,
             detail=(
                 f"{attempt_id} was interrupted at {last.phase} before "
@@ -318,13 +340,16 @@ def _abandon(
     settlement = ledger.settle(
         cost,
         charge_id=attempt_id,
-        reason=f"attempt {attempt_id} (authorization charged in full)",
+        reason=f"attempt {attempt_id} (actual cost unknown; max charged)",
     )
     journal.record(
         attempt_id=attempt_id,
         phase=AttemptPhase.ABANDONED,
         reserved=began.reserved,
-        actual=cost,
+        settled=cost,
+        # Not a measurement. Nothing on disk says what this attempt
+        # cost, and the record must not imply that anything does.
+        basis=SettlementBasis.CONSERVATIVE_MAX,
         detail=f"interrupted at {last.phase} with no durable bundle",
     )
     return Recovery(
@@ -333,11 +358,12 @@ def _abandon(
         resolution=AttemptPhase.ABANDONED,
         state_id=resume_from,
         settled=cost,
+        basis=SettlementBasis.CONSERVATIVE_MAX,
         breached=settlement.breached,
         detail=(
             f"{attempt_id} was interrupted at {last.phase} with no bundle "
-            f"on disk; its authorization was charged in full and it "
-            f"produced nothing"
+            f"on disk; what it cost is unknown, so its authorization was "
+            f"charged in full and it produced nothing"
         ),
     )
 

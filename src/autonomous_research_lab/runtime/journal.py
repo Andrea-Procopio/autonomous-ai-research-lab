@@ -30,7 +30,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Protocol
 
-from ..core.attempt import AttemptPhase
+from ..core.attempt import AttemptPhase, SettlementBasis
 from ..core.budget import NO_COST, ResourceCost
 from ..core.experiment import ExperimentResult
 from ..execution.executor import ExperimentJob
@@ -50,7 +50,8 @@ class AttemptJournal(Protocol):
         bundle_id: str = "",
         produced: Iterable[tuple[str, str]] = (),
         reserved: ResourceCost = NO_COST,
-        actual: ResourceCost = NO_COST,
+        settled: ResourceCost = NO_COST,
+        basis: SettlementBasis = SettlementBasis.NONE,
         detail: str = "",
     ) -> object:
         """Write down that ``attempt_id`` reached ``phase``.

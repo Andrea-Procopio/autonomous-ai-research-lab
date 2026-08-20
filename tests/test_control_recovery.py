@@ -19,6 +19,7 @@ from autonomous_research_lab.core.attempt import (
     ActionOutcome,
     AttemptPhase,
     AttemptStatus,
+    SettlementBasis,
 )
 from autonomous_research_lab.core.budget import ResearchBudget, ResourceCost
 from autonomous_research_lab.core.commit import CommitBundle
@@ -139,6 +140,48 @@ class TestAnAttemptWithNoBundle:
         assert crash.ledger.balance().usd == 90.0
         assert crash.ledger.reservations() == ()
 
+    def test_the_charge_is_not_recorded_as_a_measurement(
+        self, tmp_path: Path
+    ) -> None:
+        """The ledger moved by the reservation, and nobody knows what the
+        attempt cost. Recording the first as if it were the second would
+        leave the accounting safe and the history false."""
+        crash = Crash(tmp_path)
+        crash.started()
+
+        (recovery,) = crash.run().recoveries
+
+        assert recovery.basis is SettlementBasis.CONSERVATIVE_MAX
+        assert not recovery.actual_cost_known
+        assert "unknown" in recovery.detail
+
+    def test_a_conservative_charge_is_not_a_breach(
+        self, tmp_path: Path
+    ) -> None:
+        """Only a measurement can overrun. A charge that *is* the
+        authorization cannot exceed it, and calling it a breach would
+        turn every crash into a budget incident."""
+        crash = Crash(tmp_path)
+        crash.started()
+
+        (recovery,) = crash.run().recoveries
+
+        assert not recovery.breached
+        assert crash.journal.breaches() == ()
+
+    def test_the_ledger_says_why_it_charged_what_it_did(
+        self, tmp_path: Path
+    ) -> None:
+        crash = Crash(tmp_path)
+        crash.started()
+
+        crash.run()
+
+        (debit,) = [
+            e for e in crash.ledger.entries() if e.kind is EntryKind.DEBIT
+        ]
+        assert "actual cost unknown" in debit.reason
+
     def test_the_state_is_charged_the_same_amount(
         self, tmp_path: Path
     ) -> None:
@@ -173,7 +216,10 @@ class TestAnAttemptWithNoBundle:
         last = crash.journal.last_for(crash.attempt.id)
         assert last is not None
         assert last.phase is AttemptPhase.ABANDONED
-        assert last.actual == HELD
+        assert last.settled == HELD
+        # ...and the record does not claim that is what it cost.
+        assert last.basis is SettlementBasis.CONSERVATIVE_MAX
+        assert not last.actual_cost_known
 
     def test_no_successor_is_invented(self, tmp_path: Path) -> None:
         """The work was bought; the reasoning that would have used it is
@@ -207,13 +253,16 @@ class TestADurableBundle:
     def test_it_settles_what_the_bundle_says_it_cost(
         self, tmp_path: Path
     ) -> None:
-        """Not the reservation: here the run knows the real number."""
+        """Not the reservation: here the run knows the real number, and
+        the record says so."""
         crash = Crash(tmp_path)
         crash.bundle_durable()
 
         report = crash.run()
 
         assert report.recoveries[0].settled == SPENT
+        assert report.recoveries[0].basis is SettlementBasis.MEASURED
+        assert report.recoveries[0].actual_cost_known
         assert crash.ledger.balance().usd == 96.0
         recovered = crash.states.load(report.state_id)
         assert recovered.budget == crash.ledger.balance()
