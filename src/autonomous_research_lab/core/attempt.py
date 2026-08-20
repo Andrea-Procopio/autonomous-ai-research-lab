@@ -12,6 +12,11 @@ Three separate concepts:
 ``ActionOutcome``
     How one attempt ended: terminal status, what it produced, what it cost.
 
+``AttemptPhase``
+    How far one attempt got in making itself durable. Orthogonal to
+    status: a succeeded attempt whose result is still only in memory has
+    not survived anything yet.
+
 The lifecycle::
 
     (action proposed/selected)
@@ -34,6 +39,62 @@ from enum import StrEnum
 from .actions import ResearchAction
 from .budget import NO_COST, ResourceCost
 from .ids import occurrence_id
+
+
+class AttemptPhase(StrEnum):
+    """How far an attempt got in writing itself down.
+
+    ``AttemptStatus`` says whether the science worked. This says whether
+    the record of it would survive the process dying, which is a
+    different question with a different answer at every moment in
+    between::
+
+        STARTED -> SUBMITTED -> OUTPUTS_DURABLE -> BUNDLE_DURABLE
+                -> COMMITTED -> COMPLETED
+
+    Phases may be skipped — an attempt that runs no job never reaches
+    ``SUBMITTED`` — but they never go backwards, and every attempt
+    begins at ``STARTED``.
+
+    The first two are written *before* the thing they name, and the rest
+    *after*. That asymmetry is deliberate. An intent recorded early can
+    be checked afterwards, because the job id is derived rather than
+    minted, so "was this ever submitted?" has an answer; a side effect
+    nobody wrote down first is undiscoverable. A durability claim is the
+    other way round: it is only true once the bytes are there.
+    """
+
+    STARTED = "started"
+    """A reservation is about to be posted and the attempt is about to
+    run. Carries the state it begins from, the amount to be held, and
+    the job id it will use if it runs one."""
+
+    SUBMITTED = "submitted"
+    """The job is about to be handed to the executor. Recovery reattaches
+    to exactly this job id, or finds it was never submitted."""
+
+    OUTPUTS_DURABLE = "outputs_durable"
+    """The result and its evidence are in the store. The work is bought
+    and paid for; from here on nothing needs re-running."""
+
+    BUNDLE_DURABLE = "bundle_durable"
+    """The commit bundle is written. Applying it again produces the same
+    successor, so from here recovery can finish without the runtime."""
+
+    COMMITTED = "committed"
+    """The debit is settled and the successor state is persisted.
+    Carries what was reserved and what it actually cost."""
+
+    COMPLETED = "completed"
+    """Nothing is owed. The attempt is closed."""
+
+    RELEASED = "released"
+    """The attempt was abandoned before it cost anything, and its
+    reservation was given back. The other way an attempt ends."""
+
+    @property
+    def is_terminal(self) -> bool:
+        return self in {AttemptPhase.COMPLETED, AttemptPhase.RELEASED}
 
 
 class AttemptStatus(StrEnum):

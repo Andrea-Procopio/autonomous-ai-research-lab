@@ -50,6 +50,13 @@ from .integrity import (
     IntegrityReport,
     verify_run,
 )
+from .journal import (
+    AttemptEvent,
+    JournalConflictError,
+    JournalContentionError,
+    JournalIntegrityError,
+    RunJournal,
+)
 from .ledger import (
     BudgetLedger,
     LedgerConflictError,
@@ -79,6 +86,7 @@ __all__ = [
     "MAX_REASON_CHARS",
     "MAX_USD",
     "MAX_WALL_CLOCK_SECONDS",
+    "AttemptEvent",
     "BudgetEntry",
     "BudgetLedger",
     "EntryKind",
@@ -86,6 +94,9 @@ __all__ = [
     "IntegrityIssue",
     "IntegrityIssueKind",
     "IntegrityReport",
+    "JournalConflictError",
+    "JournalContentionError",
+    "JournalIntegrityError",
     "LedgerConflictError",
     "LedgerContentionError",
     "LedgerIntegrityError",
@@ -96,6 +107,7 @@ __all__ = [
     "ResearchRun",
     "RunDirective",
     "RunInputs",
+    "RunJournal",
     "RunPlan",
     "RunPreflightError",
     "RunRefusedError",

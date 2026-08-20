@@ -37,6 +37,7 @@ from ..core.state import ResearchState
 from ..persistence import FileStateStore
 from .authorization import FundingAuthorization
 from .directive import RunDirective
+from .journal import RunJournal
 from .ledger import BudgetLedger
 from .records import ResearchRun
 
@@ -255,6 +256,9 @@ class ProgramStore:
 
     def ledger_for(self, run_id: str) -> BudgetLedger:
         return BudgetLedger(self._root, run_id)
+
+    def journal_for(self, run_id: str) -> RunJournal:
+        return RunJournal(self._root, run_id)
 
 
 # -- payloads ------------------------------------------------------------------
