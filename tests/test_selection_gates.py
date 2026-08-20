@@ -497,6 +497,22 @@ def test_a_rationale_may_describe_a_candidate_in_its_own_words() -> None:
     assert rules == set()
 
 
+def test_a_schema_frozen_payload_reads_the_same_as_a_plain_one() -> None:
+    """OutputSchema.parse deep-freezes arrays into tuples; the gate must
+    read the frozen shape identically to a hand-built one — a frozen
+    array silently reading as empty would fail every review as
+    missing."""
+    import json
+
+    from autonomous_research_lab.selection.selector import (
+        COMPARATIVE_REVIEW_SCHEMA,
+    )
+
+    plain = _payload()
+    frozen = COMPARATIVE_REVIEW_SCHEMA.parse(json.dumps(plain))
+    assert _review_rules(frozen) == _review_rules(plain) == set()
+
+
 def test_the_gate_never_raises_on_taste() -> None:
     # Weird-but-lawful prose passes both gates: no rule is about style.
     entry = _review_entry(

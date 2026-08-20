@@ -26,7 +26,7 @@ trusted code from validated disqualifiers, never authored by the model.
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Final
 
 from ..ideation.gates import check_novelty_language
@@ -114,8 +114,12 @@ def _checked_text(
 
 
 def _entries(payload: Mapping[str, object], key: str) -> list[object]:
-    value = payload.get(key, [])
-    return list(value) if isinstance(value, list) else []
+    # A validated payload arrives deep-frozen (arrays as tuples); a
+    # hand-built one arrives as plain lists. Both are sequences.
+    value = payload.get(key, ())
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        return list(value)
+    return []
 
 
 def _text(entry: Mapping[str, object], key: str) -> str:
