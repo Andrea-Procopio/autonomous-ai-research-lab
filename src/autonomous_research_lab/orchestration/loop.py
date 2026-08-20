@@ -111,6 +111,7 @@ from ..runtime.providers import (
     ProviderAuthenticationError,
     ProviderConfigurationError,
 )
+from ..runtime.spend import SpendLedger
 from ..runtime.validation import (
     ValidationCheck,
     ValidationReport,
@@ -270,6 +271,14 @@ class ResearchRuntime:
     """Provider-usage reporter, when a provider adapter exists. Drained once
     per step into the metrics record; ``None`` means actual model usage is
     honestly recorded as zero."""
+
+    ledger: SpendLedger | None = None
+    """The durable record of what this run spends, already bound to its
+    run. Every charge posts one debit, keyed by the attempt that incurred
+    it, and the ledger's balance must agree with the state's budget
+    afterwards or the step fails loudly. ``None`` leaves spend on the
+    state snapshots alone — the pre-existing behavior, kept as the
+    explicit ablation."""
 
     debugger: ExperimentDebugger | None = None
     """The bounded repair loop for failed executions. ``None`` (and
@@ -632,8 +641,8 @@ class ResearchRuntime:
                     )
 
         state = state.apply(action)
-        state, overrun_note, exhausted = _reconcile_cost(
-            state, outcome.actual_cost, estimated
+        state, overrun_note, exhausted = self._bill(
+            state, outcome.actual_cost, estimated, charge_id=attempt.id
         )
         if overrun_note is not None:
             step_notes.append(overrun_note)
@@ -1301,8 +1310,8 @@ class ResearchRuntime:
         estimated = (
             spec.estimated_cost if not spec.estimated_cost.is_zero else result.cost
         )
-        state, overrun_note, exhausted = _reconcile_cost(
-            state, result.cost, estimated
+        state, overrun_note, exhausted = self._bill(
+            state, result.cost, estimated, charge_id=attempt.id
         )
         if overrun_note is not None:
             step_notes.append(overrun_note)
@@ -1628,6 +1637,37 @@ class ResearchRuntime:
             halt_reason=halt_reason,
         )
 
+    def _bill(
+        self,
+        state: ResearchState,
+        actual: ResourceCost,
+        estimated: ResourceCost,
+        *,
+        charge_id: str,
+    ) -> tuple[ResearchState, str | None, bool]:
+        """Charge the state, then put the same movement on the durable
+        ledger.
+
+        Two details decide correctness. The ledger receives what was
+        *charged*, not what the work actually cost: an overrun clamps to
+        the remaining budget, and posting the unclamped figure would
+        desynchronise the two records at exactly the moment the run
+        halts. And the balance is checked against the state afterwards,
+        so a divergence raises here instead of travelling on as a halt
+        reason — a bookkeeping failure is not a research outcome.
+        """
+        before = state.budget
+        state, note, exhausted = _reconcile_cost(state, actual, estimated)
+        if self.ledger is None:
+            return state, note, exhausted
+        charged = _charged_between(before, state.budget)
+        if not charged.is_zero:
+            self.ledger.debit(
+                charged, charge_id=charge_id, reason=f"attempt {charge_id}"
+            )
+        self.ledger.require_balance(state.budget)
+        return state, note, exhausted
+
     def _persist(self, state: ResearchState) -> None:
         if self.states is not None:
             self.states.persist(state)
@@ -1767,6 +1807,20 @@ def _reconcile_cost(
         "remainder drained and the program halted"
     )
     return state.charge(charged), note, True
+
+
+def _charged_between(
+    before: ResearchBudget, after: ResearchBudget
+) -> ResourceCost:
+    """What actually came off the budget. Derived from the two balances
+    rather than taken from the caller, so a clamped overrun bills the
+    clamped amount by construction."""
+    return ResourceCost(
+        wall_clock_seconds=before.wall_clock_seconds - after.wall_clock_seconds,
+        gpu_hours=before.gpu_hours - after.gpu_hours,
+        usd=before.usd - after.usd,
+        model_tokens=before.model_tokens - after.model_tokens,
+    )
 
 
 def _fits(cost: ResourceCost, cap: ResourceCost) -> bool:

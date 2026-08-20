@@ -39,6 +39,7 @@ from autonomous_research_lab.roles.base import (
 from autonomous_research_lab.runtime.config import RuntimeConfig
 from autonomous_research_lab.runtime.frontier import build_frontier
 from autonomous_research_lab.runtime.metrics import ProviderUsage, StepMetrics
+from autonomous_research_lab.runtime.spend import SpendLedger
 
 QUESTION = ResearchQuestion(text="Is the stream fair?")
 HYPOTHESIS = Hypothesis(statement="The stream is biased.", question_id=QUESTION.id)
@@ -215,6 +216,7 @@ def _runtime(
     *,
     config: RuntimeConfig | None = None,
     usage: object | None = None,
+    ledger: SpendLedger | None = None,
 ) -> tuple[ResearchRuntime, InMemoryEvidenceStore, ListSink]:
     store = InMemoryEvidenceStore()
     sink = ListSink()
@@ -228,6 +230,7 @@ def _runtime(
         store=store,
         metrics=sink,
         usage=usage,  # type: ignore[arg-type]
+        ledger=ledger,
     )
     return runtime, store, sink
 
@@ -733,3 +736,124 @@ def test_failed_result_with_broken_provenance_is_rejected_but_costed(
     assert attempt.outcome is not None
     assert attempt.outcome.actual_cost == actual
     assert sink.records[-1].experiment_seconds > 0.0
+
+
+# -- the durable spend ledger ------------------------------------------------
+# The loop charges the budget it carries on the state. When a durable
+# ledger is wired, the same movement is posted there, keyed by the attempt
+# that incurred it, and the two records must agree afterwards.
+
+
+class RecordingLedger:
+    """A ``SpendLedger`` that keeps its postings in memory. The durable
+    implementation lives in ``program``, which the runtime deliberately
+    cannot import; this pins the contract the loop relies on."""
+
+    def __init__(self, balance: ResearchBudget) -> None:
+        self.balance = balance
+        self.postings: list[tuple[str, ResourceCost]] = []
+
+    def debit(
+        self, cost: ResourceCost, *, charge_id: str, reason: str
+    ) -> object:
+        for posted_id, posted_cost in self.postings:
+            if posted_id == charge_id:
+                assert posted_cost == cost, "one charge id, one movement"
+                return None
+        self.postings.append((charge_id, cost))
+        self.balance = self.balance.spend(cost)
+        return None
+
+    def require_balance(self, expected: ResearchBudget) -> None:
+        if self.balance != expected:
+            raise AssertionError(
+                f"ledger holds {self.balance}, state holds {expected}"
+            )
+
+
+def test_a_step_posts_one_debit_for_what_it_charged(tmp_path: Path) -> None:
+    spec, prediction = _spec_and_prediction()
+    engineer = StubEngineer(LocalExecutor(tmp_path / "runs"))
+    state = _prepared_state(spec, prediction)
+    ledger = RecordingLedger(state.budget)
+    runtime, _, _ = _runtime(tmp_path, engineer, SpyCritic(), ledger=ledger)
+
+    report = runtime.step(state)
+
+    (attempt,) = report.state.attempts
+    assert [charge_id for charge_id, _ in ledger.postings] == [attempt.id]
+    charged = ledger.postings[0][1]
+    assert charged.wall_clock_seconds == (
+        state.budget.wall_clock_seconds - report.state.budget.wall_clock_seconds
+    )
+    assert ledger.balance == report.state.budget
+
+
+def test_an_overrun_posts_what_was_charged_not_what_it_cost(
+    tmp_path: Path,
+) -> None:
+    """The clamp is the point: an actual cost beyond the remaining budget
+    drains the remainder, so posting the unclamped figure would leave the
+    ledger and the state disagreeing at exactly the moment the run
+    halts."""
+    spec, prediction = _spec_and_prediction(threshold=0.45)
+    engineer = StubEngineer(
+        LocalExecutor(tmp_path / "runs"),
+        value=0.5,
+        cost_override=ResourceCost(wall_clock_seconds=10_000.0),
+    )
+    state = _prepared_state(
+        spec,
+        prediction,
+        budget=ResearchBudget(wall_clock_seconds=400.0, model_tokens=100),
+    )
+    ledger = RecordingLedger(state.budget)
+    runtime, _, _ = _runtime(tmp_path, engineer, SpyCritic(), ledger=ledger)
+
+    report = runtime.step(state)
+
+    assert report.halt_reason == "budget exhausted after cost overrun"
+    (_, charged) = ledger.postings[0]
+    assert charged.wall_clock_seconds == 400.0  # the clamp, not the 10,000
+    assert ledger.balance == report.state.budget
+    assert report.state.budget.wall_clock_seconds == 0.0
+
+
+def test_a_ledger_that_disagrees_with_the_state_stops_the_step(
+    tmp_path: Path,
+) -> None:
+    """A bookkeeping divergence is not a research outcome: it raises out
+    of the step rather than becoming a halt reason the director reads."""
+    spec, prediction = _spec_and_prediction()
+    engineer = StubEngineer(LocalExecutor(tmp_path / "runs"))
+    state = _prepared_state(spec, prediction)
+    # Deep enough to afford the charge, so what fails is the comparison
+    # afterwards and not the debit itself.
+    ledger = RecordingLedger(
+        ResearchBudget(wall_clock_seconds=9_999.0, usd=99.0, model_tokens=999_999)
+    )
+    runtime, _, _ = _runtime(tmp_path, engineer, SpyCritic(), ledger=ledger)
+
+    with pytest.raises(AssertionError, match="ledger holds"):
+        runtime.step(state)
+
+
+def test_without_a_ledger_the_loop_bills_the_state_as_before(
+    tmp_path: Path,
+) -> None:
+    """``ledger=None`` is the ablation, and the default: the step charges
+    the state exactly as it always has. Every other test in this file
+    runs unledgered, so they are the rest of this assertion."""
+    spec, prediction = _spec_and_prediction()
+    state = _prepared_state(spec, prediction)
+    engineer = StubEngineer(LocalExecutor(tmp_path / "runs"))
+    runtime, _, _ = _runtime(tmp_path, engineer, SpyCritic())
+
+    report = runtime.step(state)
+
+    assert runtime.ledger is None
+    assert report.state.results
+    assert (
+        report.state.budget.wall_clock_seconds
+        < state.budget.wall_clock_seconds
+    )
