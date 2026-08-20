@@ -12,8 +12,9 @@ from pathlib import Path
 import pytest
 
 from autonomous_research_lab.core.actions import ResearchAction, ResearchActionType
-from autonomous_research_lab.core.attempt import AttemptStatus
+from autonomous_research_lab.core.attempt import AttemptPhase, AttemptStatus
 from autonomous_research_lab.core.budget import (
+    NO_COST,
     ResearchBudget,
     ResourceCost,
     Settlement,
@@ -35,6 +36,7 @@ from autonomous_research_lab.orchestration import loop as runtime_loop
 from autonomous_research_lab.orchestration.director import RuleBasedFrontierDirector
 from autonomous_research_lab.orchestration.loop import ResearchRuntime, StepReport
 from autonomous_research_lab.persistence import FileStateStore
+from autonomous_research_lab.persistence.commit_store import CommitBundleStore
 from autonomous_research_lab.roles.base import (
     ResearchRole,
     RoleInvocation,
@@ -222,9 +224,11 @@ def _runtime(
     config: RuntimeConfig | None = None,
     usage: object | None = None,
     ledger: SpendLedger | None = None,
+    journal: object | None = None,
 ) -> tuple[ResearchRuntime, InMemoryEvidenceStore, ListSink]:
     store = InMemoryEvidenceStore()
     sink = ListSink()
+    recoverable = journal is not None
     runtime = ResearchRuntime(
         config=config or RuntimeConfig(),
         director=RuleBasedFrontierDirector(),
@@ -236,6 +240,9 @@ def _runtime(
         metrics=sink,
         usage=usage,  # type: ignore[arg-type]
         ledger=ledger,
+        journal=journal,  # type: ignore[arg-type]
+        bundles=CommitBundleStore(tmp_path / "program") if recoverable else None,
+        states=FileStateStore(tmp_path / "states") if recoverable else None,
     )
     return runtime, store, sink
 
@@ -469,8 +476,9 @@ def test_an_unaffordable_action_never_invokes_its_role(tmp_path: Path) -> None:
 
 def test_budget_overrun_bills_the_work_and_halts(tmp_path: Path) -> None:
     """An actual cost beyond the remaining budget cannot leave committed
-    work unbilled: the remainder is drained, the overrun is recorded, and
-    the program halts."""
+    work unbilled, and cannot be billed at less than it cost: the whole
+    figure is charged, the balance goes negative, and the program
+    halts."""
     spec, prediction = _spec_and_prediction(threshold=0.45)
     engineer = StubEngineer(
         LocalExecutor(tmp_path / "runs"),
@@ -487,10 +495,11 @@ def test_budget_overrun_bills_the_work_and_halts(tmp_path: Path) -> None:
 
     report = runtime.step(state)
 
-    assert report.halt_reason == "budget exhausted after cost overrun"
+    assert report.halt_reason == "budget breached: the run spent past its grant"
     assert report.state.results  # the work really committed...
-    assert report.state.budget.wall_clock_seconds == 0.0  # ...and was billed
-    assert any("budget overrun" in note for note in report.notes)
+    # ...and was billed in full: 400 held, 10,000 spent.
+    assert report.state.budget.wall_clock_seconds == -9_600.0
+    assert any("budget breach" in note for note in report.notes)
 
 
 class FakeUsageSource:
@@ -564,8 +573,8 @@ def test_budget_overrun_from_rejected_work_is_billed_and_halts(
     tmp_path: Path,
 ) -> None:
     """Gate-rejected work whose actual cost exceeds the remaining budget
-    drains the budget, records the overrun, and halts — exactly like
-    committed work. Rejection is not a discount."""
+    is charged in full and halts the run — exactly like committed work.
+    Rejection is not a discount."""
     spec, prediction = _spec_and_prediction()
     engineer = StubEngineer(
         LocalExecutor(tmp_path / "runs"),
@@ -582,9 +591,9 @@ def test_budget_overrun_from_rejected_work_is_billed_and_halts(
 
     report = runtime.step(state)
 
-    assert report.halt_reason == "budget exhausted after cost overrun"
-    assert report.state.budget.wall_clock_seconds == 0.0  # drained, billed
-    assert any("budget overrun" in note for note in report.notes)
+    assert report.halt_reason == "budget breached: the run spent past its grant"
+    assert report.state.budget.wall_clock_seconds == -9_600.0  # billed whole
+    assert any("budget breach" in note for note in report.notes)
     assert report.state.results == ()  # and still nothing scientific
     assert store.results() == ()
 
@@ -858,13 +867,15 @@ def test_a_step_posts_one_debit_for_what_it_charged(tmp_path: Path) -> None:
     assert ledger.balance == report.state.budget
 
 
-def test_an_overrun_posts_what_was_charged_not_what_it_cost(
+def test_an_overrun_posts_the_whole_figure_to_the_ledger(
     tmp_path: Path,
 ) -> None:
-    """The clamp is the point: an actual cost beyond the remaining budget
-    drains the remainder, so posting the unclamped figure would leave the
-    ledger and the state disagreeing at exactly the moment the run
-    halts."""
+    """The ledger records what was spent, not what could be afforded.
+
+    Charging the affordable share would keep the two records agreeing by
+    making both of them wrong, and the money above the budget would
+    appear nowhere at all — which is exactly the failure a budget exists
+    to make visible."""
     spec, prediction = _spec_and_prediction(threshold=0.45)
     engineer = StubEngineer(
         LocalExecutor(tmp_path / "runs"),
@@ -881,11 +892,13 @@ def test_an_overrun_posts_what_was_charged_not_what_it_cost(
 
     report = runtime.step(state)
 
-    assert report.halt_reason == "budget exhausted after cost overrun"
+    assert report.halt_reason == "budget breached: the run spent past its grant"
     (_, charged) = ledger.postings[0]
-    assert charged.wall_clock_seconds == 400.0  # the clamp, not the 10,000
+    assert charged.wall_clock_seconds == 10_000.0  # the whole overrun
     assert ledger.balance == report.state.budget
-    assert report.state.budget.wall_clock_seconds == 0.0
+    assert report.state.budget.wall_clock_seconds == -9_600.0
+    # and the breach is visible as two numbers that disagree
+    assert charged.exceeds(ledger.held[report.state.attempts[0].id])
 
 
 def test_a_ledger_that_disagrees_with_the_state_stops_the_step(
@@ -926,3 +939,89 @@ def test_without_a_ledger_the_loop_bills_the_state_as_before(
         report.state.budget.wall_clock_seconds
         < state.budget.wall_clock_seconds
     )
+
+
+class RecordingJournal:
+    """An ``AttemptJournal`` that keeps its phases in memory."""
+
+    def __init__(self) -> None:
+        self.phases: list[tuple[str, AttemptPhase]] = []
+        self.costs: dict[str, tuple[ResourceCost, ResourceCost]] = {}
+
+    def record(
+        self,
+        *,
+        attempt_id: str,
+        phase: AttemptPhase,
+        state_id: str = "",
+        job_id: str = "",
+        bundle_id: str = "",
+        produced: object = (),
+        reserved: ResourceCost = NO_COST,
+        actual: ResourceCost = NO_COST,
+        detail: str = "",
+    ) -> object:
+        del state_id, job_id, bundle_id, produced, detail
+        self.phases.append((attempt_id, phase))
+        if phase is AttemptPhase.COMPLETED:
+            self.costs[attempt_id] = (reserved, actual)
+        return None
+
+    def breaches(self) -> list[str]:
+        return [
+            attempt_id
+            for attempt_id, (reserved, actual) in self.costs.items()
+            if actual.exceeds(reserved)
+        ]
+
+
+def test_a_breach_is_two_numbers_on_the_journal_and_a_halt(
+    tmp_path: Path,
+) -> None:
+    """Never hide expenditure: the run stops, and the record says by how
+    much it went over rather than that it stopped."""
+    spec, prediction = _spec_and_prediction(threshold=0.45)
+    engineer = StubEngineer(
+        LocalExecutor(tmp_path / "runs"),
+        value=0.5,
+        cost_override=ResourceCost(wall_clock_seconds=10_000.0),
+    )
+    journal = RecordingJournal()
+    state = _prepared_state(
+        spec,
+        prediction,
+        budget=ResearchBudget(wall_clock_seconds=400.0, model_tokens=100),
+    )
+    runtime, _, _ = _runtime(
+        tmp_path, engineer, SpyCritic(), journal=journal
+    )
+
+    report = runtime.step(state)
+
+    (attempt,) = report.state.attempts
+    assert report.halt_reason == "budget breached: the run spent past its grant"
+    assert journal.breaches() == [attempt.id]
+    reserved, actual = journal.costs[attempt.id]
+    assert actual.wall_clock_seconds == 10_000.0
+    assert actual.exceeds(reserved)
+
+
+def test_an_attempt_within_its_authorization_is_no_breach(
+    tmp_path: Path,
+) -> None:
+    spec, prediction = _spec_and_prediction()
+    engineer = StubEngineer(LocalExecutor(tmp_path / "runs"))
+    journal = RecordingJournal()
+    runtime, _, _ = _runtime(
+        tmp_path, engineer, SpyCritic(), journal=journal
+    )
+
+    runtime.step(_prepared_state(spec, prediction))
+
+    assert journal.breaches() == []
+    assert [phase for _, phase in journal.phases] == [
+        AttemptPhase.STARTED,
+        AttemptPhase.BUNDLE_DURABLE,
+        AttemptPhase.COMMITTED,
+        AttemptPhase.COMPLETED,
+    ]

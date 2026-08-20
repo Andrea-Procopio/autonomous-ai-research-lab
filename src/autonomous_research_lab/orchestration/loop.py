@@ -338,6 +338,18 @@ class ResearchRuntime:
             self.synthesis_trigger = SynthesisTrigger(
                 every=self.config.synthesis_every
             )
+        if (self.journal is None) != (self.bundles is None):
+            raise ValueError(
+                "a journal without a bundle store records phases nobody "
+                "can act on, and a bundle store without a journal stores "
+                "effects nobody will look for; wire both or neither"
+            )
+        if self.journal is not None and self.states is None:
+            raise ValueError(
+                "a journal names states a recovering process must be able "
+                "to load; without a snapshot store there is nowhere to "
+                "load them from"
+            )
 
     def run(self, state: ResearchState, *, max_steps: int = 32) -> RunOutcome:
         self._persist(state)
@@ -697,7 +709,7 @@ class ResearchRuntime:
                 critic_invoked=critic_invoked, failures=failures,
                 executed_results=executed_results, notes=tuple(step_notes),
                 stats=stats,
-                halt_reason="budget exhausted after cost overrun",
+                halt_reason="budget breached: the run spent past its grant",
             )
 
         synthesis = self._maybe_synthesize(
@@ -1784,11 +1796,10 @@ class ResearchRuntime:
     ) -> tuple[ResearchState, str | None, bool]:
         """Charge the state, settle the hold, and close the attempt.
 
-        Two details decide correctness. The ledger receives what was
-        *charged*, not what the work actually cost: an overrun clamps to
-        the remaining budget, and posting the unclamped figure would
-        desynchronise the two records at exactly the moment the run
-        halts. And the balance is checked against the state afterwards,
+        Two details decide correctness. The ledger receives exactly what
+        came off the state's budget, derived from the two balances rather
+        than taken from the caller, so the two records cannot drift
+        apart. And the balance is checked against the state afterwards,
         so a divergence raises here instead of travelling on as a halt
         reason — a bookkeeping failure is not a research outcome.
         """
@@ -1956,35 +1967,44 @@ def _reconcile_cost(
     actual: ResourceCost,
     estimated: ResourceCost,
 ) -> tuple[ResearchState, str | None, bool]:
-    """Bill the work that just committed; never leave it unbilled.
+    """Bill the work that just committed; never leave it unbilled, and
+    never bill less than it cost.
 
-    Returns ``(state, note, exhausted)``. Affordable costs charge in full;
-    an overrun beyond the invocation's estimate is recorded explicitly; a
-    cost the remaining budget cannot cover drains the budget to its floor,
-    records the overrun, and signals a safe halt.
+    Returns ``(state, note, exhausted)``. The actual cost is charged in
+    full whatever it is. An overrun beyond the invocation's estimate is
+    noted; one beyond the remaining budget is noted, takes the balance
+    below zero, and halts the run.
+
+    Charging the full figure past an empty budget is the point. The
+    earlier version clamped — it charged the largest affordable share and
+    posted that to the ledger — which kept the two records agreeing by
+    making both of them wrong. Money spent above the budget then appeared
+    nowhere at all, which is precisely the failure a budget exists to
+    make visible. A negative remainder is unpleasant to read and it is
+    true, and the run stops either way.
     """
     if state.budget.can_afford(actual):
         note = None
-        if not _fits(actual, estimated):
+        if actual.exceeds(estimated):
             note = (
                 "budget overrun: actual cost exceeded the invocation's "
                 "estimated budget; charged in full"
             )
         return state.charge(actual), note, False
-    charged = _clamp(actual, state.budget)
     note = (
-        "budget overrun: actual cost exceeded the remaining budget; "
-        "remainder drained and the program halted"
+        "budget breach: actual cost exceeded the remaining budget; "
+        "charged in full, the balance is negative, and the program "
+        "halted"
     )
-    return state.charge(charged), note, True
+    return state.charge(actual, allow_overdraw=True), note, True
 
 
 def _charged_between(
     before: ResearchBudget, after: ResearchBudget
 ) -> ResourceCost:
     """What actually came off the budget. Derived from the two balances
-    rather than taken from the caller, so a clamped overrun bills the
-    clamped amount by construction."""
+    rather than taken from the caller, so the ledger and the state cannot
+    disagree about the figure even by a rounding error."""
     return ResourceCost(
         wall_clock_seconds=before.wall_clock_seconds - after.wall_clock_seconds,
         gpu_hours=before.gpu_hours - after.gpu_hours,
@@ -1993,24 +2013,6 @@ def _charged_between(
     )
 
 
-def _fits(cost: ResourceCost, cap: ResourceCost) -> bool:
-    return (
-        cost.wall_clock_seconds <= cap.wall_clock_seconds
-        and cost.gpu_hours <= cap.gpu_hours
-        and cost.usd <= cap.usd
-        and cost.model_tokens <= cap.model_tokens
-    )
-
-
-def _clamp(cost: ResourceCost, budget: ResearchBudget) -> ResourceCost:
-    """The largest affordable share of ``cost`` — what an overrun can still
-    be billed against a nearly-empty budget."""
-    return ResourceCost(
-        wall_clock_seconds=min(cost.wall_clock_seconds, budget.wall_clock_seconds),
-        gpu_hours=min(cost.gpu_hours, budget.gpu_hours),
-        usd=min(cost.usd, budget.usd),
-        model_tokens=min(cost.model_tokens, budget.model_tokens),
-    )
 
 
 # -- helpers -----------------------------------------------------------------
