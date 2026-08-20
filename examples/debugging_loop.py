@@ -41,7 +41,7 @@ from autonomous_research_lab.core.prediction import Comparator, Prediction
 from autonomous_research_lab.core.proposals import Proposal, ResultProposal
 from autonomous_research_lab.core.question import ResearchQuestion
 from autonomous_research_lab.core.state import ResearchState
-from autonomous_research_lab.evidence.store import InMemoryEvidenceStore
+from autonomous_research_lab.evidence.file_store import FileEvidenceStore
 from autonomous_research_lab.execution.executor import ExperimentJob
 from autonomous_research_lab.execution.failure_classifier import FailureDiagnosis
 from autonomous_research_lab.execution.local import LocalExecutor
@@ -284,7 +284,7 @@ def _runtime(
                 preflight=preflight and config.preflight_enabled,
             ),
         },
-        store=InMemoryEvidenceStore(),
+        store=FileEvidenceStore(root),
         debugger=(
             ExperimentDebugger(
                 executor=executor,

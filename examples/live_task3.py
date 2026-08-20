@@ -40,7 +40,7 @@ from autonomous_research_lab.core.hypothesis import Hypothesis
 from autonomous_research_lab.core.prediction import Comparator, Prediction
 from autonomous_research_lab.core.question import ResearchQuestion
 from autonomous_research_lab.core.state import ResearchState
-from autonomous_research_lab.evidence.store import InMemoryEvidenceStore
+from autonomous_research_lab.evidence.file_store import FileEvidenceStore
 from autonomous_research_lab.execution.binding import ContainerBinding
 from autonomous_research_lab.execution.local import LocalExecutor
 from autonomous_research_lab.orchestration.director import RuleBasedFrontierDirector
@@ -246,7 +246,7 @@ def main(argv: list[str] | None = None) -> int:
         config=RuntimeConfig(),
         director=RuleBasedFrontierDirector(),
         roles={RoleName.RESEARCH_ENGINEER: engineer},
-        store=InMemoryEvidenceStore(),
+        store=FileEvidenceStore(root),
         states=FileStateStore(root),
         trajectory=JsonlTrajectoryLogger(root / "trajectory.jsonl"),
         metrics=JsonlRuntimeMetrics(root / "metrics.jsonl"),
