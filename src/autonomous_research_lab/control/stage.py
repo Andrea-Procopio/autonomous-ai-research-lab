@@ -200,3 +200,7 @@ class ChainFacts:
         merged = dict(self.entries)
         merged.update(produced)
         return ChainFacts.of(merged)
+
+
+NO_FACTS: Final = ChainFacts()
+"""Nothing produced yet — where every investigation starts."""

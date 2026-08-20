@@ -320,15 +320,17 @@ def test_literature_imports_no_vendor_sdk() -> None:
 def test_literature_is_imported_only_by_its_analysis_stages() -> None:
     """Only ``mapping`` and ``priorart`` — the deliberate
     literature-analysis stages, both barred from scientific state — may
-    import literature. No orchestration, role, runtime, or evidence
-    module may depend on it: retrieved papers must have no path into
-    scientific state."""
+    *use* literature, and ``control``, which builds the corpus those two
+    read through, may import it. No orchestration, role, runtime, or
+    evidence module may depend on it: retrieved papers must have no path
+    into scientific state."""
     violations: list[str] = []
     for path in sorted(SRC.rglob("*.py")):
         if (
             LITERATURE in path.parents
             or MAPPING in path.parents
             or PRIORART in path.parents
+            or CONTROL in path.parents
         ):
             continue
         tree = ast.parse(path.read_text(), filename=str(path))

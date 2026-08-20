@@ -29,6 +29,14 @@ operator resumes when they have dealt with the cause.
 
 from __future__ import annotations
 
+from .chain import (
+    Stage,
+    StageContext,
+    StageOutcome,
+    StagePlan,
+    Stores,
+    default_chain,
+)
 from .config import (
     AdmissionSettings,
     ConfigError,
@@ -40,6 +48,14 @@ from .config import (
     SelectionSettings,
     load_config,
     parse_config,
+)
+from .controller import (
+    Controller,
+    ControllerError,
+    Outcome,
+    StageLine,
+    StatusReport,
+    WalkResult,
 )
 from .events import (
     StageEvent,
@@ -53,6 +69,14 @@ from .investigation import (
     InvestigationConflictError,
     InvestigationIntegrityError,
     InvestigationStore,
+)
+from .lab import (
+    DefaultLab,
+    ExperimentationUnavailableError,
+    Lab,
+    LabError,
+    RuntimeRequest,
+    load_lab,
 )
 from .stage import (
     CHAIN_ORDER,
@@ -73,7 +97,11 @@ __all__ = [
     "AdmissionSettings",
     "ChainFacts",
     "ConfigError",
+    "Controller",
+    "ControllerError",
+    "DefaultLab",
     "ExperimentationSettings",
+    "ExperimentationUnavailableError",
     "Fact",
     "FundingSettings",
     "IdeationSettings",
@@ -81,18 +109,32 @@ __all__ = [
     "InvestigationConflictError",
     "InvestigationIntegrityError",
     "InvestigationStore",
+    "Lab",
+    "LabError",
     "MissingFactError",
+    "Outcome",
     "PriorArtSettings",
     "RunConfig",
+    "RuntimeRequest",
     "SelectionSettings",
+    "Stage",
+    "StageContext",
     "StageEvent",
+    "StageLine",
     "StageLog",
     "StageLogConflictError",
     "StageLogContentionError",
     "StageLogIntegrityError",
     "StageName",
+    "StageOutcome",
+    "StagePlan",
     "StageSpend",
     "StageStatus",
+    "StatusReport",
+    "Stores",
+    "WalkResult",
+    "default_chain",
     "load_config",
+    "load_lab",
     "parse_config",
 ]
