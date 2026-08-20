@@ -25,6 +25,7 @@ to carry a topic to a funded run and stop.
 from __future__ import annotations
 
 import importlib
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, cast
@@ -103,6 +104,20 @@ class DefaultLab:
         )
 
 
+def _make_the_working_directory_importable() -> None:
+    """Put the working directory on the import path, as ``python -m``
+    does and an installed console script does not.
+
+    An operator naming ``--lab examples.canary_lab:lab`` means the one
+    in front of them. The flag already names code that will be imported
+    and run, so the trust decision was made when it was typed; what this
+    avoids is that decision failing on a technicality.
+    """
+    here = str(Path.cwd())
+    if here not in sys.path:
+        sys.path.insert(0, here)
+
+
 def load_lab(spec: str) -> Lab:
     """Import ``module:factory`` and return the lab it makes.
 
@@ -111,6 +126,7 @@ def load_lab(spec: str) -> Lab:
     here, with the spec in the message, instead of failing later inside
     a stage.
     """
+    _make_the_working_directory_importable()
     module_name, separator, attribute = spec.partition(":")
     if not separator or not module_name.strip() or not attribute.strip():
         raise LabError(

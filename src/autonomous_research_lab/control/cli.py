@@ -218,10 +218,14 @@ def _print_status(report: StatusReport) -> None:
     print()
     print(f"{'stage':<16} {'status':<10} {'calls':>6}  detail")
     for line in report.lines:
-        marker = "" if line.status is not StageStatus.PENDING else "-"
+        calls = (
+            "-"
+            if line.status is StageStatus.PENDING
+            else str(line.spend.model_calls)
+        )
         print(
-            f"{line.stage:<16} {line.status:<10} "
-            f"{line.spend.model_calls or marker:>6}  {line.detail[:60]}"
+            f"{line.stage:<16} {line.status:<10} {calls:>6}  "
+            f"{line.detail[:60]}"
         )
     print()
     print(
