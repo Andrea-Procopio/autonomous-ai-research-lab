@@ -35,6 +35,17 @@ orchestration commit layer.
 """
 
 from ..mapping.gates import MappingRejection
+from .admitter import (
+    OPERATIONALIZATION_INSTRUCTION,
+    AdmissionBudgetError,
+    AdmissionRejectedError,
+    AdmissionRunResult,
+    CandidateAdmitter,
+    build_field_texts,
+    encoded_metric,
+    operationalization_schema,
+    render_admission_context,
+)
 from .directive import (
     MAX_REQUIREMENT_CHARS,
     MODEL_CALLS_CEILING,
@@ -76,6 +87,8 @@ __all__ = [
     "MAX_REQUIREMENT_CHARS",
     "MECHANICAL_READING",
     "MODEL_CALLS_CEILING",
+    "OPERATIONALIZATION_INSTRUCTION",
+    "AdmissionBudgetError",
     "AdmissionCallPlan",
     "AdmissionConflictError",
     "AdmissionDirective",
@@ -84,14 +97,21 @@ __all__ = [
     "AdmissionPreflightError",
     "AdmissionRecord",
     "AdmissionRefusedError",
+    "AdmissionRejectedError",
+    "AdmissionRunResult",
     "AdmissionStore",
+    "CandidateAdmitter",
     "GroundedSupport",
     "MappingRejection",
     "OperationalPrediction",
     "Requirement",
     "RequirementSource",
     "SupportSource",
+    "build_field_texts",
     "check_admission_coherence",
     "check_operationalization",
+    "encoded_metric",
+    "operationalization_schema",
+    "render_admission_context",
     "require_selected_candidate_for_admission",
 ]

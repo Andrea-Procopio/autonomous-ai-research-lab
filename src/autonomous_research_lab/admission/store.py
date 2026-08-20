@@ -200,7 +200,18 @@ class AdmissionStore:
     # -- admitted states -------------------------------------------------------
 
     def persist_state(self, state: ResearchState) -> Path:
-        return self._states.persist(state)
+        """Persist the snapshot, then read it back and require equality
+        before anything may reference it. The read-back is load-bearing:
+        a ``ResearchState``'s content id deliberately excludes its
+        budget, so id verification alone would not catch every divergent
+        byte."""
+        path = self._states.persist(state)
+        if self._states.load(state.id) != state:
+            raise AdmissionIntegrityError(
+                f"snapshot {state.id} did not read back as the state "
+                f"that was written; refusing to reference it"
+            )
+        return path
 
     def get_admitted_state(
         self, record_id: str
@@ -215,7 +226,16 @@ class AdmissionStore:
                 f"no admission record {record_id}; a state is never "
                 f"exposed without its record"
             )
-        return record, self._states.load(record.state_id)
+        state = self._states.load(record.state_id)
+        if not state.budget.is_exhausted:
+            # The state's content id excludes the budget, so a doctored
+            # budget would reload silently; an admitted seed's budget is
+            # zero by construction, which makes the check exact.
+            raise AdmissionIntegrityError(
+                f"admitted state {record.state_id} carries a non-zero "
+                f"budget; an admitted seed never does"
+            )
+        return record, state
 
     # -- rejected attempts -----------------------------------------------------
 
