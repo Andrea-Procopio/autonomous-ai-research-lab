@@ -126,7 +126,13 @@ def load_lab(spec: str) -> Lab:
         raise LabError(
             f"lab module {module_name!r} has no attribute {attribute!r}"
         )
-    lab = factory() if callable(factory) else factory
+    try:
+        lab = factory() if callable(factory) else factory
+    except Exception as exc:
+        raise LabError(
+            f"{spec} is not a lab: calling it raised "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
     missing = [
         method for method in _LAB_METHODS if not callable(getattr(lab, method, None))
     ]
