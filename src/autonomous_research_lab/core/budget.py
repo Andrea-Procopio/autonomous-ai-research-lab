@@ -85,6 +85,23 @@ class ResearchBudget:
             model_tokens=self.model_tokens - cost.model_tokens,
         )
 
+    def plus(self, grant: ResearchBudget) -> ResearchBudget:
+        """Return the budget after adding ``grant``.
+
+        The counterpart to :meth:`spend`. A budget only ever grows by an
+        explicit operator grant, which is why this takes a budget rather
+        than a :class:`ResourceCost`: costs are consumed, grants are
+        authorized. Where the authorization is recorded, and by whom, is
+        not this type's business -- it holds the remainder, nothing else.
+        """
+        return replace(
+            self,
+            wall_clock_seconds=self.wall_clock_seconds + grant.wall_clock_seconds,
+            gpu_hours=self.gpu_hours + grant.gpu_hours,
+            usd=self.usd + grant.usd,
+            model_tokens=self.model_tokens + grant.model_tokens,
+        )
+
     @property
     def is_exhausted(self) -> bool:
         return (

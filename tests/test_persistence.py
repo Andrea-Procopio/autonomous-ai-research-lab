@@ -8,6 +8,7 @@ resurrecting a different state.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -207,6 +208,29 @@ def test_a_divergent_snapshot_is_refused_not_replaced(tmp_path: Path) -> None:
 
     with pytest.raises(SnapshotError, match="never rewritten"):
         store.persist(state)
+
+
+def test_a_budget_replacement_collides_and_a_funded_successor_does_not(
+    tmp_path: Path,
+) -> None:
+    """The state's content id excludes the budget, so replacing the budget
+    of a persisted state produces different bytes under the same id — and
+    the store refuses, correctly. Funding derives a successor instead, and
+    the successor persists beside its parent."""
+    store = FileStateStore(tmp_path)
+    genesis = ResearchState(objective="o", budget=ResearchBudget.zero())
+    store.persist(genesis)
+
+    shortcut = replace(genesis, budget=ResearchBudget(usd=100.0))
+    assert shortcut.id == genesis.id
+    with pytest.raises(SnapshotError, match="never rewritten"):
+        store.persist(shortcut)
+
+    funded = genesis.fund(ResearchBudget(usd=100.0))
+    store.persist(funded)
+
+    assert store.load(funded.id).budget.usd == 100.0
+    assert store.load(genesis.id).budget.is_exhausted
 
 
 def test_persist_leaves_no_scratch_file(tmp_path: Path) -> None:

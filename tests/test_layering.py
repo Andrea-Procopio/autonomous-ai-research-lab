@@ -102,6 +102,7 @@ STATE_MUTATORS = frozenset(
         "resolve_attempt",
         "apply",
         "charge",
+        "fund",
         "_evolve",
     }
 )
