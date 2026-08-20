@@ -44,6 +44,12 @@ from .door import (
     RunRefusedError,
     require_admitted_state_for_run,
 )
+from .integrity import (
+    IntegrityIssue,
+    IntegrityIssueKind,
+    IntegrityReport,
+    verify_run,
+)
 from .ledger import (
     BudgetLedger,
     LedgerConflictError,
@@ -77,6 +83,9 @@ __all__ = [
     "BudgetLedger",
     "EntryKind",
     "FundingAuthorization",
+    "IntegrityIssue",
+    "IntegrityIssueKind",
+    "IntegrityReport",
     "LedgerConflictError",
     "LedgerContentionError",
     "LedgerIntegrityError",
@@ -95,4 +104,5 @@ __all__ = [
     "check_funding_coherence",
     "require_admitted_state_for_run",
     "start_run",
+    "verify_run",
 ]

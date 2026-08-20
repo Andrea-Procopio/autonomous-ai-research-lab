@@ -49,12 +49,18 @@
    everything derived from them have no path into scientific state
    except through admission's governed door.
 10. ``program`` is admission's one consumer — the funded run an
-   admitted state descends into. It reads ``core``, ``admission``, and
-   ``persistence``, and nothing else; of every state mutator it may
-   call only ``fund``, because a funded successor is the last state
-   this side of the loop builds and every evolution after it belongs to
-   orchestration's commit layer. It cannot reach roles, orchestration,
-   evidence, execution, or literature, and nothing imports it.
+   admitted state descends into, and the one place that can say whether
+   a whole run is intact. It reads ``core``, ``admission``,
+   ``persistence``, and ``evidence``, and nothing else; of every state
+   mutator it may call only ``fund``, because a funded successor is the
+   last state this side of the loop builds and every evolution after it
+   belongs to orchestration's commit layer. It cannot reach roles,
+   orchestration, execution, or literature, and nothing imports it.
+11. ``evidence`` stays a foundation, not a consumer: results, evidence
+   records, their artifacts, and the derived chain checker depend on
+   ``core`` alone. Verifying a run needs snapshots and a ledger too,
+   which is exactly why that pass lives one layer up in ``program``
+   rather than here.
 """
 
 from __future__ import annotations
@@ -73,6 +79,7 @@ PRIORART = SRC / "priorart"
 SELECTION = SRC / "selection"
 ADMISSION = SRC / "admission"
 PROGRAM = SRC / "program"
+EVIDENCE = SRC / "evidence"
 PROVIDERS = SRC / "runtime" / "providers.py"
 PROVIDER_MODULES = (PROVIDERS, SRC / "runtime" / "muse.py")
 
@@ -1032,8 +1039,9 @@ def test_admission_has_exactly_one_consumer_in_the_package() -> None:
 
 def test_program_depends_only_on_its_declared_inputs() -> None:
     """The run bridge reads ``core`` (the state it funds), ``admission``
-    (the seed it funds), and ``persistence`` (the snapshot store) — and
-    nothing else. It has no provider seam because it makes no model
+    (the seed it funds), ``persistence`` (the snapshot store), and
+    ``evidence`` (the facts a run accumulates, for the integrity pass) —
+    and nothing else. It has no provider seam because it makes no model
     call: funding is an operator act and a deterministic one. A program
     module that needed roles, orchestration, literature, or the analysis
     stages behind admission would be re-deciding what admission already
@@ -1041,10 +1049,11 @@ def test_program_depends_only_on_its_declared_inputs() -> None:
     allowed_absolute = (
         f"{PACKAGE}.core",
         f"{PACKAGE}.admission",
+        f"{PACKAGE}.evidence",
         f"{PACKAGE}.persistence",
         f"{PACKAGE}.program",
     )
-    allowed_relative = ("core", "admission", "persistence")
+    allowed_relative = ("core", "admission", "evidence", "persistence")
     violations: list[str] = []
     for path in sorted(PROGRAM.rglob("*.py")):
         tree = ast.parse(path.read_text(), filename=str(path))
@@ -1097,9 +1106,10 @@ def test_program_calls_only_the_funding_mutator() -> None:
 
 def test_program_cannot_reach_evidence_or_execution() -> None:
     """A grant buys the chance to find something out; it never records
-    what was found. No module in ``program`` may import the proposal,
-    transition, evidence, or execution machinery, or reference
-    ``Evidence`` or ``ExperimentResult`` by name."""
+    what was found. The integrity pass reads the evidence stores, so the
+    package may import them — but no module here may import the
+    proposal, transition, or execution machinery, and none may name
+    ``Evidence`` or ``ExperimentResult`` as a type it constructs."""
     forbidden_names = {"Evidence", "ExperimentResult"}
     violations: list[str] = []
     for path in sorted(PROGRAM.rglob("*.py")):
@@ -1112,7 +1122,6 @@ def test_program_cannot_reach_evidence_or_execution() -> None:
                     for fragment in (
                         "proposals",
                         "transitions",
-                        "evidence",
                         "execution",
                         "roles",
                         "orchestration",
@@ -1161,5 +1170,38 @@ def test_nothing_in_the_package_imports_program() -> None:
                     f"{path.relative_to(SRC)}: imports {alias.name}"
                     for alias in node.names
                     if "program" in alias.name.split(".")
+                )
+    assert violations == []
+
+
+def test_evidence_depends_on_core_alone() -> None:
+    """Results, evidence records, their artifacts, and the chain checker
+    are the foundation every later layer rests on, so they rest on
+    nothing but the scientific vocabulary. Verifying a whole run needs
+    snapshots and a budget ledger as well, which is exactly why that
+    pass lives in ``program`` and not here."""
+    violations: list[str] = []
+    for path in sorted(EVIDENCE.rglob("*.py")):
+        tree = ast.parse(path.read_text(), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+                if node.level == 0 and module.startswith(f"{PACKAGE}."):
+                    if not module.startswith(f"{PACKAGE}.core"):
+                        violations.append(f"{path.name}: imports {module}")
+                elif node.level == 2 and not module.startswith("core"):
+                    violations.append(
+                        f"{path.name}: relative import of {module}"
+                    )
+                elif node.level > 2:
+                    violations.append(
+                        f"{path.name}: relative import above package"
+                    )
+            elif isinstance(node, ast.Import):
+                violations.extend(
+                    f"{path.name}: imports {alias.name}"
+                    for alias in node.names
+                    if alias.name.startswith(f"{PACKAGE}.")
+                    and not alias.name.startswith(f"{PACKAGE}.core")
                 )
     assert violations == []
