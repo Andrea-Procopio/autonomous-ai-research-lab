@@ -47,10 +47,10 @@ from dataclasses import dataclass
 from typing import Final
 
 from ..core.attempt import AttemptPhase
-from ..core.budget import ResourceCost
+from ..core.budget import NO_COST, ResearchBudget, ResourceCost
 from ..core.state import recording_lineage
 from ..evidence.store import EvidenceStore
-from ..orchestration.transitions import charge_abandoned, resume_bundle
+from ..orchestration.transitions import commit_bundle, reconcile_charge
 from ..persistence.commit_store import CommitBundleStore
 from ..persistence.state_store import FileStateStore
 from ..program.journal import AttemptEvent, RunJournal
@@ -104,20 +104,36 @@ class RecoveryReport:
     boundary. Adopting it is what stops the chain paying for the same
     step twice."""
 
+    settled: ResourceCost = NO_COST
+    """What the state had to be charged to agree with the ledger again.
+
+    The last thing recovery does, and the one thing it always does: a
+    process can die between settling a debit and persisting the state
+    that paid it, and the two records then differ by exactly this. It is
+    the state that moves, never the ledger — the debit is what actually
+    happened."""
+
     @property
     def anything_to_do(self) -> bool:
-        return bool(self.recoveries) or self.adopted is not None
+        return (
+            bool(self.recoveries)
+            or self.adopted is not None
+            or not self.settled.is_zero
+        )
 
     @property
     def breached(self) -> tuple[Recovery, ...]:
         return tuple(r for r in self.recoveries if r.breached)
 
     def summary(self) -> str:
-        if self.recoveries:
-            return "; ".join(r.detail for r in self.recoveries)
+        parts: list[str] = [r.detail for r in self.recoveries]
         if self.adopted is not None:
-            return f"adopted the step a crash hid ({self.adopted})"
-        return "nothing was interrupted"
+            parts.append(f"adopted the step a crash hid ({self.adopted})")
+        if not self.settled.is_zero:
+            parts.append(
+                "charged the state the debit the ledger already carried"
+            )
+        return "; ".join(parts) if parts else "nothing was interrupted"
 
 
 def recover(
@@ -151,13 +167,16 @@ def recover(
         )
         recoveries.append(recovery)
         resume_from = recovery.state_id
-    if recoveries:
-        return RecoveryReport(
-            recoveries=tuple(recoveries), state_id=resume_from
-        )
-    landed = _the_step_that_landed_quietly(states, fallback_state_id)
+    adopted: str | None = None
+    if not recoveries:
+        adopted = _the_step_that_landed_quietly(states, fallback_state_id)
+        resume_from = adopted or fallback_state_id
+    settled, resume_from = _reconciled(states, ledger, resume_from)
     return RecoveryReport(
-        recoveries=(), state_id=landed or fallback_state_id, adopted=landed
+        recoveries=tuple(recoveries),
+        state_id=resume_from,
+        adopted=adopted,
+        settled=settled,
     )
 
 
@@ -191,7 +210,6 @@ def _answer(
         last=last,
         journal=journal,
         ledger=ledger,
-        states=states,
         resume_from=resume_from,
     )
 
@@ -222,7 +240,7 @@ def _finish(
         # last: a snapshot whose parents are missing is the broken
         # lineage the verifier refuses to call intact.
         with recording_lineage() as derived:
-            successor = resume_bundle(origin, bundle, evidence, cost)
+            successor = commit_bundle(origin, bundle, evidence)
         for produced in derived:
             states.persist(produced)
         successor_id = successor.id
@@ -263,22 +281,40 @@ def _abandon(
     last: AttemptEvent,
     journal: RunJournal,
     ledger: BudgetLedger,
-    states: FileStateStore,
     resume_from: str,
 ) -> Recovery:
     """Charge the authorization and close the attempt with nothing to
     show for it.
 
-    The state is charged as well as the ledger, and in that order. They
-    are two records of one number; letting one move without the other is
-    the disagreement the next step would fail closed on, and recovery
-    exists to end disagreements, not start them.
+    Only the ledger moves here. The state is brought into agreement once,
+    at the end, against the ledger's own balance — which is the same
+    correction whether one attempt was abandoned or three, and which also
+    catches the crash that landed between a settlement and the snapshot
+    that recorded it.
     """
+    if not ledger.holds(attempt_id):
+        # The crash landed between writing the phase down and holding the
+        # money. Nothing was authorized, so nothing could have been
+        # spent through this attempt, and this is the one place a release
+        # is provable rather than hopeful.
+        journal.record(
+            attempt_id=attempt_id,
+            phase=AttemptPhase.RELEASED,
+            detail="interrupted before anything was held for it",
+        )
+        return Recovery(
+            attempt_id=attempt_id,
+            left_at=last.phase,
+            resolution=AttemptPhase.RELEASED,
+            state_id=resume_from,
+            settled=ResourceCost(),
+            breached=False,
+            detail=(
+                f"{attempt_id} was interrupted at {last.phase} before "
+                f"anything was held for it; nothing was spent"
+            ),
+        )
     cost = began.reserved
-    with recording_lineage() as derived:
-        charged = charge_abandoned(states.load(resume_from), cost)
-    for produced in derived:
-        states.persist(produced)
     settlement = ledger.settle(
         cost,
         charge_id=attempt_id,
@@ -295,7 +331,7 @@ def _abandon(
         attempt_id=attempt_id,
         left_at=last.phase,
         resolution=AttemptPhase.ABANDONED,
-        state_id=charged.id,
+        state_id=resume_from,
         settled=cost,
         breached=settlement.breached,
         detail=(
@@ -303,6 +339,45 @@ def _abandon(
             f"on disk; its authorization was charged in full and it "
             f"produced nothing"
         ),
+    )
+
+
+def _reconciled(
+    states: FileStateStore, ledger: BudgetLedger, state_id: str
+) -> tuple[ResourceCost, str]:
+    """Bring the state's budget back to the ledger's balance.
+
+    The last thing recovery does, and the one thing it always does. A
+    process can die between settling a debit and persisting the state
+    that paid it, so the two records differ by exactly the debit; the
+    state is what moves, because the debit is what actually happened.
+
+    The correction only ever goes one way. A state holding *less* than
+    the ledger says would mean the ledger lost a movement, and inventing
+    a credit to paper over that is how a bookkeeping failure becomes a
+    bookkeeping fiction — it is left to the verifier to report.
+    """
+    state = states.load(state_id)
+    gap = _gap(state.budget, ledger.balance())
+    if gap.is_zero:
+        return ResourceCost(), state_id
+    with recording_lineage() as derived:
+        charged = reconcile_charge(state, gap)
+    for produced in derived:
+        states.persist(produced)
+    return gap, charged.id
+
+
+def _gap(held: ResearchBudget, balance: ResearchBudget) -> ResourceCost:
+    """How much the state is carrying that the ledger has already spent.
+    Never negative in any dimension."""
+    return ResourceCost(
+        wall_clock_seconds=max(
+            0.0, held.wall_clock_seconds - balance.wall_clock_seconds
+        ),
+        gpu_hours=max(0.0, held.gpu_hours - balance.gpu_hours),
+        usd=max(0.0, held.usd - balance.usd),
+        model_tokens=max(0, held.model_tokens - balance.model_tokens),
     )
 
 

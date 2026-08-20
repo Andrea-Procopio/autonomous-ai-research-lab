@@ -472,9 +472,10 @@ class TestAttemptLinks:
 
     def journalled(
         self, root: Path
-    ) -> tuple[ProgramStore, ResearchRun, RunJournal, BudgetLedger]:
-        """A funded run with one attempt that began, committed and
-        closed — the shape a healthy step leaves behind."""
+    ) -> tuple[ProgramStore, str, RunJournal, BudgetLedger]:
+        """A funded run with one attempt that began — the shape a healthy
+        step leaves behind, plus the id of a state this root really
+        holds."""
         program, run = _fund(root)
         journal = program.journal_for(run.run_id)
         ledger = program.ledger_for(run.run_id)
@@ -486,7 +487,7 @@ class TestAttemptLinks:
             reserved=HELD,
         )
         ledger.reserve(HELD, charge_id="att_1", reason="attempt att_1")
-        return program, run, journal, ledger
+        return program, state.id, journal, ledger
 
     def close(self, journal: RunJournal, ledger: BudgetLedger) -> None:
         ledger.settle(
@@ -532,22 +533,44 @@ class TestAttemptLinks:
         assert "never began" in issue.detail
 
     def test_an_attempt_holding_nothing(self, tmp_path: Path) -> None:
-        _, run, journal, ledger = self.journalled(tmp_path)
+        _, state_id, journal, ledger = self.journalled(tmp_path)
         self.close(journal, ledger)
         journal.record(
             attempt_id="att_unheld",
             phase=AttemptPhase.STARTED,
-            state_id=run.funded_state_id,
+            state_id=state_id,
             reserved=HELD,
         )
         journal.record(
             attempt_id="att_unheld",
-            phase=AttemptPhase.RELEASED,
+            phase=AttemptPhase.ABANDONED,
+            reserved=HELD,
+            actual=HELD,
         )
 
         details = [issue.detail for issue in self.links(tmp_path)]
 
         assert any("nothing was held for it" in detail for detail in details)
+
+    def test_an_attempt_released_before_anything_was_held_is_fine(
+        self, tmp_path: Path
+    ) -> None:
+        """The one attempt with no reservation that is not a hole: a
+        release says nothing was held *and* nothing was bought, which is
+        the whole content of the phase."""
+        _, state_id, journal, ledger = self.journalled(tmp_path)
+        self.close(journal, ledger)
+        journal.record(
+            attempt_id="att_released",
+            phase=AttemptPhase.STARTED,
+            state_id=state_id,
+            reserved=HELD,
+        )
+        journal.record(
+            attempt_id="att_released", phase=AttemptPhase.RELEASED
+        )
+
+        assert self.links(tmp_path) == ()
 
     def test_a_debit_answering_no_reservation(self, tmp_path: Path) -> None:
         _, _, journal, ledger = self.journalled(tmp_path)

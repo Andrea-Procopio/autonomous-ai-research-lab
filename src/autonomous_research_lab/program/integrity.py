@@ -625,7 +625,15 @@ def _check_holds(
                 ),
             )
         )
-    for charge_id in sorted(began - reserved):
+    released = {
+        event.attempt_id
+        for event in events
+        if event.phase is AttemptPhase.RELEASED
+    }
+    # A released attempt held nothing *and* bought nothing, and saying so
+    # is the whole content of the phase. It is the one attempt with no
+    # reservation that is not a hole in the record.
+    for charge_id in sorted(began - reserved - released):
         issues.append(
             IntegrityIssue(
                 kind=IntegrityIssueKind.ATTEMPT_LINK,

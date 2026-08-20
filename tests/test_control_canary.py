@@ -12,6 +12,7 @@ interruption costs time and nothing else.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import subprocess
 import sys
@@ -26,14 +27,12 @@ from autonomous_research_lab.control.stage import (
     StageStatus,
 )
 from autonomous_research_lab.core.attempt import AttemptPhase
-from autonomous_research_lab.core.state import ResearchState
 from autonomous_research_lab.evidence.file_store import FileEvidenceStore
 from autonomous_research_lab.ideation.store import IdeationStore
 from autonomous_research_lab.mapping.store import MappingStore
 from autonomous_research_lab.persistence import FileStateStore
 from autonomous_research_lab.priorart.store import PriorArtStore
 from autonomous_research_lab.program.integrity import (
-    IntegrityIssueKind,
     _reachable_from_roots,
 )
 from autonomous_research_lab.program.records import EntryKind
@@ -41,6 +40,7 @@ from autonomous_research_lab.program.store import ProgramStore
 from autonomous_research_lab.selection.store import SelectionStore
 from examples.canary_chain import CONFIG, verify, walk
 from examples.canary_lab import lab as canary_lab
+from faults import Faults, FaultyLab, SimulatedCrashError
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -330,95 +330,86 @@ class TestAnHonestRefusal:
 
 class TestAStepInterruptedMidFlight:
     """The finest crash the controller has to survive: a process killed
-    inside one step, after some of the states it derived are on disk."""
+    inside one step, partway through the writes it makes."""
 
-    def one_step(self, root: Path) -> list[ResearchState]:
-        """Run one real step into a shadow store, and return the lineage
-        it derived in the order the runtime wrote it.
-
-        A shadow store rather than the run's own, because the point is
-        to choose how much of it lands.
-        """
+    def head_of(self, root: Path) -> str:
         controller = Controller(root)
         (investigation,) = controller.investigations.investigations()
         log = controller.investigations.log_for(
             investigation.investigation_id
         )
-        head = log.facts().require(Fact.STATE_ID)
+        return log.facts().require(Fact.STATE_ID)
+
+    def one_step(self, root: Path, *, after: int | None = None) -> int:
+        """Run one real step against the run's own stores, stopped after
+        the ``after``-th durable write. Returns how many writes it made.
+
+        Against the real stores, not a shadow: what is being tested is
+        what a crash leaves behind, and a crash leaves behind exactly
+        what the process had already written.
+        """
         program = ProgramStore(root / "program")
         (run,) = program.runs()
-        shadow = FileStateStore(root / "shadow")
-        runtime = canary_lab().runtime(
+        faults = Faults(after=after)
+        runtime = FaultyLab(faults, run.run_id).runtime(
             RuntimeRequest(
                 root=root,
                 evidence=FileEvidenceStore(root),
-                states=shadow,
+                states=FileStateStore(root),
                 ledger=program.ledger_for(run.run_id),
                 journal=program.journal_for(run.run_id),
                 bundles=program.bundles(),
             )
         )
-        runtime.step(FileStateStore(root).load(head))
-        derived = {found: shadow.load(found) for found in shadow.state_ids()}
-        children = {
-            state.parent_id: state
-            for state in derived.values()
-            if state.parent_id
-        }
-        ordered: list[ResearchState] = []
-        current = children.get(head)
-        while current is not None:
-            ordered.append(current)
-            current = children.get(current.id)
-        return ordered
+        with contextlib.suppress(SimulatedCrashError):
+            runtime.step(FileStateStore(root).load(self.head_of(root)))
+        return faults.count
 
-    def test_a_torn_write_is_loud_rather_than_resumed(
+    def test_a_torn_write_is_reconciled_rather_than_fatal(
         self, tmp_path: Path
     ) -> None:
-        """A step's states are written after the step returns, so a
-        process killed inside the write leaves a ledger that has been
-        debited and a chain that stops mid-attempt.
+        """A step settles its debit and then goes on writing snapshots,
+        so a process killed in between leaves a ledger that has moved and
+        a chain that has not.
 
-        Nothing here can honestly recover that: the money moved and the
-        state that recorded what it bought did not survive. The reconcile
-        refuses the mid-attempt end — resuming there would leave the
-        attempt open forever — and the next step finds the ledger and the
-        state disagreeing and fails closed, which is the behavior the
-        funded run was built to have. Afterwards the verifier says
-        exactly which part is broken: the accounting, not the lineage.
+        Under Task 6C this was unrecoverable and said so: the next step
+        found the two disagreeing and failed closed. It is recoverable
+        now, and the difference is that the ledger's balance is a fact
+        the state can be brought back to. The money is not given back —
+        nothing about a crash makes it unspent — and the run verifies
+        from cold afterwards.
         """
         walk(tmp_path, stop_after=StageName.FUNDING)
-        derived = self.one_step(tmp_path)
-        assert len(derived) > 2
-        torn = derived[: len(derived) // 2]
-        assert any(
-            not attempt.status.is_terminal for attempt in torn[-1].attempts
-        )
-        states = FileStateStore(tmp_path)
-        for partial in torn:
-            states.persist(partial)
+        self.one_step(tmp_path, after=10)  # after the settlement
+        program = ProgramStore(tmp_path / "program")
+        (run,) = program.runs()
+        spent = program.ledger_for(run.run_id).balance()
 
         result = walk(tmp_path)
 
-        assert result.outcome is Outcome.FAILED
-        assert "refusing to guess" in result.detail
-        assert not [
-            event for event in result.events if "crash hid" in event.detail
-        ]
-        report = verify(tmp_path)
-        assert report.of_kind(IntegrityIssueKind.LEDGER_ISSUE)
-        assert not report.of_kind(IntegrityIssueKind.INCOMPLETE_LINEAGE)
+        assert result.outcome is not Outcome.FAILED
+        ledger = program.ledger_for(run.run_id)
+        assert ledger.balance().usd <= spent.usd  # nothing was given back
+        assert ledger.reservations() == ()
+        assert program.journal_for(run.run_id).open_attempts() == ()
+        assert verify(tmp_path).ok, verify(tmp_path).issues
 
     def test_a_whole_step_whose_event_was_lost_is_adopted(
         self, tmp_path: Path
     ) -> None:
-        """The other half of the same crash: every state landed, the
-        event did not. The step is adopted, not paid for again."""
+        """The other half of the same crash: the step ran to the end and
+        the stage event never landed. The step is adopted, not paid for
+        again."""
         walk(tmp_path, stop_after=StageName.FUNDING)
-        derived = self.one_step(tmp_path)
-        states = FileStateStore(tmp_path)
-        for partial in derived:
-            states.persist(partial)
+        self.one_step(tmp_path)
+        program = ProgramStore(tmp_path / "program")
+        (run,) = program.runs()
+        already = {
+            e.charge_id
+            for e in program.ledger_for(run.run_id).entries()
+            if e.kind is EntryKind.DEBIT
+        }
+        assert already  # the lost step really did pay for itself
 
         result = walk(tmp_path, stop_after=StageName.EXPERIMENTATION)
 
@@ -429,10 +420,14 @@ class TestAStepInterruptedMidFlight:
             and "crash hid" in event.detail
         ]
         assert adopted
-        assert adopted[0].produced == (
-            (str(Fact.STATE_ID), derived[-1].id),
-        )
-        assert verify(tmp_path).ok
+        debits = [
+            e.charge_id
+            for e in program.ledger_for(run.run_id).entries()
+            if e.kind is EntryKind.DEBIT
+        ]
+        assert len(debits) == len(set(debits))  # nobody paid twice
+        assert already <= set(debits)
+        assert verify(tmp_path).ok, verify(tmp_path).issues
 
 
 class TestWhenTheRecordIsLost:
