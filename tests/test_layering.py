@@ -23,15 +23,23 @@
    records — it cannot reach scientific state, evidence, or execution,
    and exactly one other package depends on it. Candidate ideas are
    conjectures carrying their sources, never propositions.
-7. ``priorart`` is that consumer — the adversarial challenge that tries
-   to falsify each candidate's differentiation against fresh bounded
-   retrieval. It reads ``core``, ``literature`` (it runs its own
-   searches), ``mapping`` (the grounding surface and shared gate
+7. ``priorart`` is one such consumer — the adversarial challenge that
+   tries to falsify each candidate's differentiation against fresh
+   bounded retrieval. It reads ``core``, ``literature`` (it runs its
+   own searches), ``mapping`` (the grounding surface and shared gate
    vocabulary), ``ideation`` (the portfolio it challenges), and the
    provider seam; it cannot reach scientific state, evidence, or
-   execution, and nothing in the package depends on it. The analysis
-   chain is a DAG with one invariant: retrieved papers and everything
-   derived from them have no path into scientific state.
+   execution, and exactly one other package depends on it — a challenge
+   verdict is an input to deliberate selection, never to anything else.
+8. ``selection`` is that consumer — the choice among the challenge's
+   survivors. It reads ``core``, ``ideation``, ``mapping``,
+   ``priorart``, and the provider seam — never ``literature``: it runs
+   no retrieval and sees sources only through the records upstream
+   stages froze. It cannot reach scientific state, evidence, or
+   execution, and nothing in the package depends on it. A selection is
+   a preference among survivors, never a scientific proposition. The
+   analysis chain is a DAG with one invariant: retrieved papers and
+   everything derived from them have no path into scientific state.
 """
 
 from __future__ import annotations
@@ -404,11 +412,12 @@ def test_mapping_imports_no_vendor_sdk() -> None:
 
 def test_mapping_is_imported_only_by_its_analysis_stages() -> None:
     """Only ``ideation`` — the deliberate idea-generation stage Task 5C
-    built — and ``priorart`` — the challenge stage that shares its gate
-    vocabulary and grounding surface — may import mapping, both barred
-    from scientific state. No orchestration, role, runtime, or evidence
-    module may depend on it: a field map must have no path into
-    scientific state."""
+    built — ``priorart`` — the challenge stage that shares its gate
+    vocabulary and grounding surface — and ``selection`` — the choice
+    stage that reuses the same vocabulary — may import mapping, all
+    barred from scientific state. No orchestration, role, runtime, or
+    evidence module may depend on it: a field map must have no path
+    into scientific state."""
     violations: list[str] = []
     for path in sorted(SRC.rglob("*.py")):
         if (
@@ -533,11 +542,12 @@ def test_ideation_imports_no_vendor_sdk() -> None:
         )
 
 
-def test_ideation_has_exactly_one_consumer_in_the_package() -> None:
+def test_ideation_is_imported_only_by_its_deliberate_stages() -> None:
     """Only ``priorart`` — the challenge stage that reads the portfolio
-    it tries to falsify, itself barred from scientific state — may
-    import ideation: candidate ideas reach scientific state only when a
-    later task deliberately builds the proposal path through the
+    it tries to falsify — and ``selection`` — the choice among the
+    challenge's survivors — may import ideation, both barred from
+    scientific state: candidate ideas reach scientific state only when
+    a later task deliberately builds the proposal path through the
     governed commit."""
     violations: list[str] = []
     for path in sorted(SRC.rglob("*.py")):
@@ -672,10 +682,146 @@ def test_priorart_imports_no_vendor_sdk() -> None:
         )
 
 
-def test_nothing_in_the_package_imports_priorart() -> None:
-    """Priorart is the new leaf: a prior-art assessment reaches
+def test_selection_depends_only_on_its_declared_inputs() -> None:
+    """The selector reads ``core``, ``ideation`` (the portfolio),
+    ``mapping`` (the shared gate vocabulary), ``priorart`` (the
+    verdicts that define eligibility), and the provider seam
+    (``runtime.providers`` / ``runtime.metrics``) — pointedly not
+    ``literature``: selection runs no retrieval and sees sources only
+    through the records upstream stages froze. A selection module that
+    needed roles, orchestration, evidence, or execution would be doing
+    science, not choice."""
+    allowed_absolute = (
+        f"{PACKAGE}.core",
+        f"{PACKAGE}.ideation",
+        f"{PACKAGE}.mapping",
+        f"{PACKAGE}.priorart",
+        f"{PACKAGE}.selection",
+        f"{PACKAGE}.runtime.providers",
+        f"{PACKAGE}.runtime.metrics",
+    )
+    allowed_relative = (
+        "core",
+        "ideation",
+        "mapping",
+        "priorart",
+        "runtime.providers",
+        "runtime.metrics",
+    )
+    violations: list[str] = []
+    for path in sorted(SELECTION.rglob("*.py")):
+        tree = ast.parse(path.read_text(), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+                if node.level == 0 and module.startswith(f"{PACKAGE}."):
+                    if not module.startswith(allowed_absolute):
+                        violations.append(f"{path.name}: imports {module}")
+                elif node.level == 2 and not module.startswith(
+                    allowed_relative
+                ):
+                    violations.append(
+                        f"{path.name}: relative import of {module}"
+                    )
+                elif node.level > 2:
+                    violations.append(
+                        f"{path.name}: relative import above package"
+                    )
+            elif isinstance(node, ast.Import):
+                violations.extend(
+                    f"{path.name}: imports {alias.name}"
+                    for alias in node.names
+                    if alias.name.startswith(f"{PACKAGE}.")
+                    and not alias.name.startswith(allowed_absolute)
+                )
+    assert violations == []
+
+
+def test_selection_cannot_touch_scientific_state() -> None:
+    """A selection is a preference over a challenged portfolio, never a
+    scientific-state proposition: no module in ``selection`` may import
+    the state, proposal, transition, evidence, or execution machinery,
+    reference ``ResearchState``, ``Evidence``, or ``ExperimentResult``
+    by name, or call a state mutator. Admission through the governed
+    commit belongs to a later task."""
+    forbidden_names = {"ResearchState", "Evidence", "ExperimentResult"}
+    violations: list[str] = []
+    for path in sorted(SELECTION.rglob("*.py")):
+        tree = ast.parse(path.read_text(), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+                if any(
+                    fragment in module
+                    for fragment in (
+                        ".state",
+                        "proposals",
+                        "transitions",
+                        "evidence",
+                        "execution",
+                    )
+                ):
+                    violations.append(f"{path.name}: imports {module}")
+            elif (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr in STATE_MUTATORS
+            ):
+                violations.append(
+                    f"{path.name}:{node.lineno}: calls .{node.func.attr}(...)"
+                )
+            elif isinstance(node, ast.Name) and node.id in forbidden_names:
+                violations.append(
+                    f"{path.name}:{node.lineno}: references {node.id}"
+                )
+    assert violations == []
+
+
+def test_selection_imports_no_vendor_sdk() -> None:
+    """The selector is provider-neutral: it speaks to the generic seam,
+    and no Muse-specific (or any vendor-specific) logic may appear
+    here."""
+    for path in sorted(SELECTION.rglob("*.py")):
+        roots = {module.split(".")[0] for module in _imported_modules(path)}
+        assert roots & VENDOR_SDKS == set(), f"{path.name} imports a vendor SDK"
+        modules = set(_imported_modules(path))
+        assert not any("muse" in module for module in modules), (
+            f"{path.name} imports the Muse adapter; the selector knows "
+            f"only the generic provider seam"
+        )
+
+
+def test_nothing_in_the_package_imports_selection() -> None:
+    """Selection is the new leaf: a selected candidate reaches
     scientific state only when a later task deliberately builds the
     proposal path through the governed commit."""
+    violations: list[str] = []
+    for path in sorted(SRC.rglob("*.py")):
+        if SELECTION in path.parents:
+            continue
+        tree = ast.parse(path.read_text(), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+                if "selection" in module.split("."):
+                    violations.append(
+                        f"{path.relative_to(SRC)}: imports {module}"
+                    )
+            elif isinstance(node, ast.Import):
+                violations.extend(
+                    f"{path.relative_to(SRC)}: imports {alias.name}"
+                    for alias in node.names
+                    if "selection" in alias.name.split(".")
+                )
+    assert violations == []
+
+
+def test_priorart_has_exactly_one_consumer_in_the_package() -> None:
+    """Only ``selection`` — the choice among the challenge's survivors,
+    itself barred from scientific state — may import priorart: a
+    prior-art assessment reaches scientific state only when a later
+    task deliberately builds the proposal path through the governed
+    commit."""
     violations: list[str] = []
     for path in sorted(SRC.rglob("*.py")):
         if PRIORART in path.parents or SELECTION in path.parents:
