@@ -26,11 +26,20 @@ human in the loop, producing results that survive scrutiny.
   alternative explanations in the system's own work. Built early: a
   loop without one drifts toward self-confirmation, and retrofitting
   adversarial review is much harder than building around it.
-- **Persistence.** Partly done. `ResearchState` snapshots persist to
-  disk content-addressed (`persistence/`), and trajectory records
-  reference them, so a run is auditable and reconstructible offline.
-  Still open: a durable evidence store behind the existing
-  `EvidenceStore` protocol, and resume-from-snapshot orchestration.
+- **Persistence.** Done for facts (Task 6B, 2026-08-20).
+  `ResearchState` snapshots persist to disk content-addressed
+  (`persistence/`), and trajectory records reference them. The facts
+  they cite now persist beside them: `FileEvidenceStore` writes results
+  and evidence under their own payload digests, and a content-addressed
+  blob store keeps the artifact bytes, so the executor's run directory
+  is expendable once a result is recorded. Recording a fact stores its
+  bytes first, which is what makes "a state never references a fact
+  that is not durable" true by construction rather than by convention.
+  `verify_run` checks a whole run root from cold — snapshots, payloads,
+  references, artifact bytes, the evidence chain, and the budget
+  ledger — and reports every problem rather than raising on the first.
+  Still open: resume-from-snapshot orchestration, and reachability
+  rules for anything that would ever delete a stored fact.
 - **Literature access.** Substantially done, proven live task by task:
   - *Task 5A (2026-08-18).* Bounded search against OpenAlex behind a
     provider-neutral seam. Normalized snapshot records with preserved
@@ -152,8 +161,7 @@ human in the loop, producing results that survive scrutiny.
   attempt behind a protocol seam and fails closed when the ledger and
   the state disagree. Proven over the preserved Task 5F admission with
   zero model calls and zero network calls. Still open: a stage
-  controller and CLI that carry a topic through the whole chain, and a
-  durable evidence store behind the in-memory one.
+  controller and CLI that carry a topic through the whole chain.
 - **Real experiment execution.** ML training runs under the existing
   executor contract: checkpoints, longer timeouts, GPU accounting.
 - **Scientific debugging and experiment verification.** Done in its

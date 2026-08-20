@@ -72,7 +72,8 @@ from autonomous_research_lab.core.proposals import (
 )
 from autonomous_research_lab.core.question import ResearchQuestion
 from autonomous_research_lab.core.state import ResearchState
-from autonomous_research_lab.evidence.store import EvidenceStore, InMemoryEvidenceStore
+from autonomous_research_lab.evidence.file_store import FileEvidenceStore
+from autonomous_research_lab.evidence.store import EvidenceStore
 from autonomous_research_lab.execution.executor import ExperimentJob
 from autonomous_research_lab.execution.local import LocalExecutor
 from autonomous_research_lab.knowledge.graph import ClaimEvidenceGraph
@@ -140,7 +141,7 @@ def run_minimal_loop(
 ) -> LoopOutcome:
     root = Path(run_root) if run_root else Path(mkdtemp())
     executor = LocalExecutor(root / "runs")
-    store: EvidenceStore = InMemoryEvidenceStore()
+    store: EvidenceStore = FileEvidenceStore(root)
     states = FileStateStore(root)
     director = ResearchDirector(
         generator=RuleBasedCandidateGenerator(),

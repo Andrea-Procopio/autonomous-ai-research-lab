@@ -563,5 +563,5 @@ class TestReplayAndSecondRuns:
         assert run.prediction_ids == tuple(p.id for p in admitted.predictions)
         assert run.authority == grant.authority
         assert json.loads(
-            (tmp_path / "run" / "runs" / f"{run.id}.json").read_text()
+            (tmp_path / "run" / "envelopes" / f"{run.id}.json").read_text()
         )["run_id"] == run.run_id

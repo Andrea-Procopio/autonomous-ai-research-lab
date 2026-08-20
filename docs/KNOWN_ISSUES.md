@@ -5,21 +5,34 @@ diagnosed to some degree, and not yet fixed. An issue leaves this file
 by being fixed in a commit that references it — never by being
 forgotten.
 
-## Timing flake: `test_a_genuinely_stalled_read_times_out` under heavy load
+## Timing flakes in the real-deadline Muse tests under heavy load
 
-- **Where:** `tests/test_muse_provider.py::test_a_genuinely_stalled_read_times_out`
-- **Status:** open. Observed once; passes in isolation, in normal full
-  runs, and (so far) in CI.
+- **Where:** `tests/test_muse_provider.py`, the tests that use a real
+  socket and a real clock:
+  `test_a_genuinely_stalled_read_times_out` and
+  `test_a_genuinely_dripping_body_hits_the_deadline`.
+- **Status:** open. Each observed once; both pass in isolation, in
+  normal full runs, and (so far) in CI.
 - **First observed:** 2026-08-18, locally, while two copies of the full
   suite ran at the same time in separate git worktrees on one machine.
   The immediate re-run of the same commit passed. The failing assertion
   was not captured.
+- **Recurred:** 2026-08-20, in the sibling
+  `test_a_genuinely_dripping_body_hits_the_deadline`, during a full
+  suite run on a loaded machine. It passed both in isolation and on the
+  immediate full re-run. Same mechanism, different test — which is the
+  useful part of the sighting: the fragility is in the shared margin
+  sizing, not in one test.
 
-### What the test does
+### What the tests do
 
-It is one of the deliberately real deadline tests: a loopback socket
-server sends response headers and then stalls for 3.0 s, while the
-Muse adapter is invoked with a 0.5 s deadline. The test asserts:
+Both are deliberately real deadline tests over a loopback socket, and
+both are the same shape. In the stalled-read case the server sends
+response headers and then stalls for 3.0 s, while the Muse adapter is
+invoked with a 0.5 s deadline. In the dripping-body case the server
+sends one byte every 0.15 s instead of stalling outright, so no single
+socket operation ever times out and only the whole-call deadline can
+end it. Each asserts:
 
 1. the call raises `ProviderTimeoutError` (the watchdog, not the
    stall, ends the exchange), and
@@ -48,7 +61,8 @@ sized for a lightly loaded machine.
 - Derive the elapsed bound and the server stall from shared constants
   with a wider ratio (for example: deadline 0.5 s, stall 10 s, elapsed
   bound 5 s), so contention has to be extreme before either assertion
-  lies.
+  lies. The second sighting strengthens this one: shared constants
+  would widen every deadline test at once.
 - Capture and report which assertion failed on the next occurrence
   before choosing the fix.
 

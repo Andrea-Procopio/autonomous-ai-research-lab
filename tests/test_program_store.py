@@ -81,7 +81,7 @@ class TestWriteOnce:
     def test_a_tampered_record_fails_to_load(self, tmp_path: Path) -> None:
         store = ProgramStore(tmp_path)
         run = store.record_run(make_run())
-        path = tmp_path / "runs" / f"{run.id}.json"
+        path = tmp_path / "envelopes" / f"{run.id}.json"
         payload = json.loads(path.read_text(encoding="utf-8"))
         payload["label"] = "a different run"
         path.write_text(json.dumps(payload, indent=2), encoding="utf-8")

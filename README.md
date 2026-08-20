@@ -124,6 +124,22 @@ end-to-end runs:
   completed directive replaying its run, and every admission file
   byte-identical afterwards. A grant is authorization, never scientific
   standing.
+- **Facts that outlive their process.** Results, evidence, and the
+  artifact bytes they point at are stored on disk under the same run
+  root as the states. Recording a fact stores its bytes first, so a
+  state can only reference a result whose outputs are already durable.
+  Artifacts are content-addressed, kept once however many results
+  produced them, and refused if they escape the run directory, no
+  longer match what the run itself recorded, or exceed the size
+  ceiling. Each stored record carries its own payload digest, because
+  the domain ids of results and evidence deliberately do not cover
+  their content — a result's id comes from its job alone — so
+  recomputing an id would check nothing. One command verifies a whole
+  run from cold: snapshots, payloads, references, artifact bytes, the
+  evidence chain, and the budget ledger. Pointed at a demo run before
+  this change it found eight state snapshots and no facts at all; after
+  it, the same run verifies intact with the executor's whole run
+  directory deleted.
 
 Nothing a model says becomes scientific state until deterministic code
 has gated, committed, executed, and verified it. Literature-derived
@@ -142,9 +158,9 @@ real experiment execution over the funded state (the execution
 requirements admission carries are stated capabilities, not
 implementations, and the admitted predictions' metrics match no
 trusted template yet), one command that carries a topic through the
-whole chain, a durable evidence store behind the in-memory one,
-literature-grounded findings entering research state, cloud execution,
-statistician and skeptic roles with real inference, and paper writing.
+whole chain, literature-grounded findings entering research state,
+cloud execution, statistician and skeptic roles with real inference,
+and paper writing.
 
 Expect interfaces to change.
 
@@ -153,7 +169,7 @@ Expect interfaces to change.
 | Package | What it does |
 | --- | --- |
 | `core` | The basic data types: questions, hypotheses, predictions, experiments, results, evidence, claims, assessments, budgets, and the research state that ties them together. Depends on nothing else. |
-| `evidence` | Storage for results and evidence. Records can be added but never changed. |
+| `evidence` | Storage for results and evidence. Records can be added but never changed. Two backends behind one contract: in memory for tests and ablations, and file-backed for a real run — each record under its own payload digest, with the artifact bytes kept in a content-addressed blob store. |
 | `execution` | Runs an experiment as a subprocess. Each job gets its own working directory, its own home directory, and a minimal environment. Output files are collected and hashed. |
 | `knowledge` | Read-only views over the data, such as the graph linking claims to evidence. |
 | `literature` | Bounded search against a real scholarly API (OpenAlex): normalized snapshot records, deterministic deduplication, write-once search provenance, and a replayable local corpus. Depends only on `core`; its one consumer is `mapping`. |
@@ -162,7 +178,7 @@ Expect interfaces to change.
 | `priorart` | Whether it was already done: the prior-art challenge over the candidate portfolio, with a deterministic fail-closed verdict per candidate. Depends on `core`, `literature`, `mapping`, `ideation`, and the provider seam; its consumers are `selection` and `admission`. |
 | `selection` | Which candidate to pursue, if any: gated two-stage selection over the `DISTINGUISHED` survivors of one named prior-art run, with attested disqualifiers and three honest outcomes. Score-free and write-once. Depends on `core`, `ideation`, `mapping`, `priorart`, and the provider seam; its one consumer is `admission`. |
 | `admission` | The governed bridge into research state: one named `SELECTED` run verified through its whole lineage, one gated model call encoding the recorded predictions sign-only, deterministic copies for everything else, and an all-or-nothing state snapshot beside a write-once record. Depends on `core` (uniquely including the state it constructs), `ideation`, `mapping`, `priorart`, `selection`, `persistence`, and the provider seam; nothing imports it. |
-| `program` | A funded run: the bridge from one admitted state to something the runtime may spend against. One named admission, one authorized grant, a funded successor state, and an append-only budget ledger that is idempotent by charge id and safe under concurrent debits. Depends on `core`, `admission`, and `persistence`; nothing imports it. |
+| `program` | A funded run: the bridge from one admitted state to something the runtime may spend against. One named admission, one authorized grant, a funded successor state, an append-only budget ledger that is idempotent by charge id and safe under concurrent debits, and the cold verification of a whole run root. Depends on `core`, `admission`, `persistence`, and `evidence`; nothing imports it. |
 | `persistence` | Saves every state to disk so a run can be inspected or replayed later. |
 | `runtime` | Bookkeeping around the loop: open work, validation and verification, cost tracking, metrics, the model-provider seam (with the Muse adapter), and the write-once stores for implementation and planning provenance. |
 | `search` | Policies for choosing the next action among candidates. |
@@ -254,6 +270,22 @@ gets refuted: the metric is read from a file written by the
 subprocess, the pre-registered prediction check fails, and the
 refutation is recorded as an assessment. Every decision is logged and
 every intermediate state is saved to disk.
+
+### examples/verify_run.py
+
+```bash
+python examples/verify_run.py --root <run_root>
+```
+
+Checks a run root written by an earlier process: state snapshots
+re-hash to their filenames, result and evidence payloads survive their
+digests, every state reference resolves, every stored artifact still
+hashes to what its manifest says, the evidence chain holds, and a
+funded run's budget ledger replays. Prints every problem it finds, not
+just the first, and exits non-zero if there is one.
+
+A verified run is one whose records survived. Whether its science is
+right is a different question.
 
 ## Tests and checks
 
