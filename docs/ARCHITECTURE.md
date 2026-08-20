@@ -1756,6 +1756,141 @@ were byte-identical before and after, the admission reloaded
 identically from a fresh store, and re-running the completed directive
 replayed the stored result through a provider that refuses every call.
 
+## The funded run (Task 6A)
+
+The `program` package is the bridge from an admitted state to something
+the runtime may spend against. It consumes `admission` (the seed and its
+record), `core` (the state it funds), and `persistence` (the snapshot
+store). It makes no model call — funding is an operator act and a
+deterministic one — and nothing imports it.
+
+The defect it exists to fix is an identity one, and it was
+release-blocking. An admitted state carries a zero budget by
+construction, and a `ResearchState`'s content id deliberately excludes
+its budget, because what remains to spend is operational rather than
+scientific. So the obvious way to fund one — replace the budget —
+produces different bytes under an unchanged id, and `FileStateStore`
+refuses the second write. The store is right. The move was wrong.
+
+**Funding is succession.** `ResearchState.fund()` derives a successor
+whose `parent_id` is the admitted state, so it carries its own identity
+and persists beside its parent. The admitted snapshot keeps its zero
+budget forever, and admission's accessor keeps checking exactly that.
+The grant is added rather than assigned, so a first grant and a later
+top-up are one operation. This is the one state mutator outside
+orchestration's commit layer, and the only one this package may call —
+pinned structurally, the same way roles are held to proposals.
+
+One run performs a fixed sequence:
+
+```
+RunDirective (names one admission record and one authorization; a
+              required label saying what this run is)
+  -> replay?      a completed directive returns the run it already
+                  started — no second grant, nothing rewritten
+  -> require_admitted_state_for_run
+                  (reuses admission's own accessor, so "an admitted
+                  state" is never forked, then proves the grant was
+                  issued against this admission and the reloaded state
+                  is the seed the record stamps)
+  -> check_funding_coherence   (refuse before the grant)
+  -> preserve the admitted snapshot into the run root
+  -> funded = admitted.fund(grant)
+  -> persist the funded snapshot and read it back
+  -> ledger entry zero: the grant
+  -> write the run envelope    (last)
+```
+
+**Identity, split the standard way.** A run is an event: `run_id` is an
+occurrence id, because two runs of one admission are two runs and no
+content distinguishes them. Every record *about* the run is
+content-addressed over that event, so it re-derives on load and a
+tampered envelope fails loudly — the same shape `AdmissionRecord` uses
+over its own `run_id`. The audit's first design rule, that `run_id` must
+not be the scientific state's content id, holds by construction.
+
+**Spend is a ledger fact, not a field rewrite.** The ledger is one
+write-once file per entry under `ledgers/<run_id>/`, named by its
+sequence number and published by hard-linking a scratch file into place.
+Four properties, each with a mechanism behind it rather than a
+convention:
+
+* *append-only* — the link fails if the name is taken, and a crash
+  mid-write leaves an ignorable scratch file rather than a corrupt
+  ledger;
+* *ordered and whole* — sequence numbers are the filenames, so a gap is
+  visible without reading anything, and each entry names its
+  predecessor's id and the balance after itself, so a deleted middle
+  entry, a reordering, or a doctored amount contradicts the replay;
+* *idempotent* — every posting carries a `charge_id` the caller already
+  holds (an attempt id for a debit, the authorization id for the grant),
+  so posting one charge twice returns the entry already on the ledger,
+  and the same id for a different amount is a conflict;
+* *safe under concurrency* — the exclusive create is the lock. Two
+  debits racing for one sequence number cannot both win; the loser
+  re-reads the head — the winner may have posted the very charge it was
+  about to — and retries. A debit the balance cannot cover raises
+  instead of overdrawing.
+
+**All or nothing, one level up.** The write order is admission's: the
+admitted snapshot is copied into the run root (content-addressed and
+verify-on-repeat, so the copy is a byte-identical no-op and the run root
+ends up holding the whole lineage from genesis onward), then the funded
+successor is persisted and read back, then the grant reaches the ledger,
+then the envelope is written last. A crash before the envelope leaves an
+inert orphan snapshot and no run — "no envelope means no run" — and
+because the grant is idempotent by authorization id, the honest re-run
+cannot double-credit. The only accessor loads the envelope first and the
+state through it, and refuses a snapshot whose budget is not what the
+envelope granted: the state's content id excludes the budget, so a
+doctored one would otherwise reload in silence.
+
+**Two records of one number, reconciled rather than merged.** The
+runtime still charges `state.budget` — the working remainder it reasons
+with, fast and local. A `SpendLedger` protocol in `runtime` is the seam
+to the durable side: the loop posts one debit per attempt, keyed by the
+attempt id, and then requires the ledger's balance to equal the state's.
+It posts what was *charged*, not what the work cost, because an overrun
+clamps to the remaining budget and posting the unclamped figure would
+desynchronise the two records at exactly the moment the run halts. A
+divergence raises out of the step instead of becoming a halt reason a
+director would read: a bookkeeping failure is not a research outcome.
+The seam is a protocol rather than an import because `runtime` depends
+on `core` alone and `program` sits above it; `ledger=None` is the
+default and leaves the pre-existing behavior as the explicit ablation.
+Moving the budget out of `ResearchState` altogether stays a later
+question — the reconciliation is what makes the answer measurable
+rather than assumed.
+
+**Two runs, both stated.** One admission may back several runs, and each
+needs its own directive: a second grant, or a second label saying how
+this run differs. Running the same command twice replays the first run
+at no cost. That is the difference between a deliberate replication and
+an accidental duplicate.
+
+**The ladder, and the evidence (2026-08-20).** `DISTINGUISHED` meant
+differentiated within one bounded prior-art corpus; `SELECTED` meant
+preferred within one constrained portfolio; `ADMITTED` meant converted
+into the governed initial state; `FUNDED` means an operator authorized
+spend against it. None of the four means true, novel, or empirically
+supported. The Task 6A proof funded the preserved 5F admission with zero
+model calls and zero network calls: the door and preflight passed, the
+funded successor carried the same propositions under a new id whose
+parent is the admitted seed, the grant landed as ledger entry zero
+agreeing with the state, one deterministic charge moved the balance by
+exactly its amount, the same charge id posted again debited nothing, a
+fresh store replayed the identical balance, a doctored balance was
+refused rather than reconciled, the completed directive replayed its run
+without a second grant, and all three preserved admission files were
+byte-identical afterwards.
+
+What remains honestly absent: this is a funding bridge, not a stage
+controller. There is no command that carries a topic through the whole
+chain, no durable evidence store behind the in-memory one, and no
+experiment contract wide enough for real ML work — the admitted
+predictions' metrics match no entry in any trusted template catalog, so
+funding a run does not yet make that run executable.
+
 ## Architectural invariants
 
 The list this pass was made against; each is enforced by at least one
@@ -1793,6 +1928,12 @@ model authors only operationalization wording under verbatim
 grounding, every number in the encoded predictions is a structural
 constant, the admitted state holds propositions only, and one
 admission exists per selection run, ever — replayable at zero calls.
+Funding is succession, never replacement: a state's identity excludes
+its budget, so an admitted seed is funded by deriving a successor and
+never by rewriting a snapshot, spend is an append-only ledger fact
+keyed by a charge id rather than a field rewrite, and a ledger that
+disagrees with the state it bills for fails closed instead of being
+reconciled.
 Every important research decision is reconstructible later.
 ```
 
@@ -1845,6 +1986,11 @@ admission     the governed bridge into research state: one named
               record  (depends on core — uniquely including the state
               it constructs — ideation, mapping, priorart, selection,
               persistence, and the provider seam; nothing imports it)
+program       a funded run: one named admission, one authorized
+              grant, a funded successor state, and an append-only
+              budget ledger that is idempotent by charge id and safe
+              under concurrent debits  (depends on core, admission,
+              and persistence; nothing imports it)
 search        which move to take
 roles         who does the work, under what contract; the model-backed
               engineer and planner

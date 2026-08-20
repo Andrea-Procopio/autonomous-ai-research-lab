@@ -106,22 +106,45 @@ end-to-end runs:
   that refuses every call. `DISTINGUISHED`, `SELECTED`, and `ADMITTED`
   are rungs of bounded process — none of them means true, novel, or
   empirically supported.
+- **A funded research run.** The bridge from an admitted seed to
+  something a runtime may spend against. An admitted state carries no
+  budget, and a state's identity excludes its budget, so funding one in
+  place would leave two different snapshots claiming one id — which the
+  append-only snapshot store refuses, correctly. Funding is succession
+  instead: the funded state is a child of the admitted one, which keeps
+  its zero budget forever. What is spent afterwards is a ledger fact,
+  not a field rewrite — sequence-numbered, chained, write-once entries,
+  idempotent by charge id, so a balance survives a restart, a repeated
+  charge cannot debit twice, and two concurrent debits cannot overspend.
+  The runtime loop posts one debit per attempt and fails closed if the
+  ledger and the state ever disagree. Proven over the preserved Task 5F
+  admission with zero model calls and zero network calls: the grant on
+  the ledger, one charge, the same charge again debiting nothing, the
+  balance replayed from a fresh store, a disagreement refused, the
+  completed directive replaying its run, and every admission file
+  byte-identical afterwards. A grant is authorization, never scientific
+  standing.
 
 Nothing a model says becomes scientific state until deterministic code
 has gated, committed, executed, and verified it. Literature-derived
 records describe, conjecture, and prefer, carrying their sources; the
 one path into scientific state is admission's governed door, which
 turns exactly one validated selection into a bare initial state of
-propositions — no result, evidence, or judgment is expressible there. Orchestration is not model-driven: a fixed-priority
-director dispatches work, and every model decision passes a
-deterministic gate before it takes effect.
+propositions — no result, evidence, or judgment is expressible there.
+Funding that seed is a separate operator act with its own record and
+its own ledger: it buys the chance to find something out, never a
+finding. Orchestration is not model-driven: a fixed-priority director
+dispatches work, and every model decision passes a deterministic gate
+before it takes effect.
 
-Not built yet: access resolution for metadata-only retrieved works, a
-budgeted planner and real experiment execution over the admitted state
-(the execution requirements it carries are stated capabilities, not
-implementations), literature-grounded findings entering research
-state, cloud execution, statistician and skeptic roles with real
-inference, and paper writing.
+Not built yet: access resolution for metadata-only retrieved works,
+real experiment execution over the funded state (the execution
+requirements admission carries are stated capabilities, not
+implementations, and the admitted predictions' metrics match no
+trusted template yet), one command that carries a topic through the
+whole chain, a durable evidence store behind the in-memory one,
+literature-grounded findings entering research state, cloud execution,
+statistician and skeptic roles with real inference, and paper writing.
 
 Expect interfaces to change.
 
@@ -139,6 +162,7 @@ Expect interfaces to change.
 | `priorart` | Whether it was already done: the prior-art challenge over the candidate portfolio, with a deterministic fail-closed verdict per candidate. Depends on `core`, `literature`, `mapping`, `ideation`, and the provider seam; its consumers are `selection` and `admission`. |
 | `selection` | Which candidate to pursue, if any: gated two-stage selection over the `DISTINGUISHED` survivors of one named prior-art run, with attested disqualifiers and three honest outcomes. Score-free and write-once. Depends on `core`, `ideation`, `mapping`, `priorart`, and the provider seam; its one consumer is `admission`. |
 | `admission` | The governed bridge into research state: one named `SELECTED` run verified through its whole lineage, one gated model call encoding the recorded predictions sign-only, deterministic copies for everything else, and an all-or-nothing state snapshot beside a write-once record. Depends on `core` (uniquely including the state it constructs), `ideation`, `mapping`, `priorart`, `selection`, `persistence`, and the provider seam; nothing imports it. |
+| `program` | A funded run: the bridge from one admitted state to something the runtime may spend against. One named admission, one authorized grant, a funded successor state, and an append-only budget ledger that is idempotent by charge id and safe under concurrent debits. Depends on `core`, `admission`, and `persistence`; nothing imports it. |
 | `persistence` | Saves every state to disk so a run can be inspected or replayed later. |
 | `runtime` | Bookkeeping around the loop: open work, validation and verification, cost tracking, metrics, the model-provider seam (with the Muse adapter), and the write-once stores for implementation and planning provenance. |
 | `search` | Policies for choosing the next action among candidates. |

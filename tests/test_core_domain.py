@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from autonomous_research_lab.core.actions import ResearchAction, ResearchActionType
@@ -227,3 +229,62 @@ class TestBudget:
 
         with pytest.raises(InsufficientBudgetError):
             budget.spend(ResourceCost(usd=5.0))
+
+    def test_a_grant_is_added_to_what_remains(self) -> None:
+        budget = ResearchBudget(wall_clock_seconds=10.0, usd=1.0, model_tokens=100)
+
+        topped_up = budget.plus(ResearchBudget(usd=4.0, model_tokens=50))
+
+        assert topped_up.usd == 5.0
+        assert topped_up.model_tokens == 150
+        assert topped_up.wall_clock_seconds == 10.0
+        assert budget.usd == 1.0  # the original is untouched
+
+
+class TestFunding:
+    """The genesis state an admission produces carries no budget, and a
+    state's content id deliberately excludes the budget. Funding must
+    therefore be succession, never replacement -- pinned here from both
+    sides: the tempting shortcut, and the supported operation."""
+
+    def test_replacing_the_budget_keeps_the_id_and_changes_the_bytes(self) -> None:
+        genesis = ResearchState(objective="o", budget=ResearchBudget.zero())
+
+        shortcut = replace(
+            genesis, budget=ResearchBudget(usd=100.0, model_tokens=10_000)
+        )
+
+        # The identity is unchanged because the budget is not part of it,
+        # and `replace` carries the populated id straight through. Two
+        # different states now claim one id -- which is exactly what an
+        # append-only, content-addressed snapshot store must refuse.
+        assert shortcut.id == genesis.id
+        assert shortcut.budget != genesis.budget
+
+    def test_funding_derives_a_successor_with_its_own_identity(self) -> None:
+        genesis = ResearchState(objective="o", budget=ResearchBudget.zero())
+
+        funded = genesis.fund(ResearchBudget(usd=100.0, model_tokens=10_000))
+
+        assert funded.id != genesis.id
+        assert funded.parent_id == genesis.id
+        assert funded.budget == ResearchBudget(usd=100.0, model_tokens=10_000)
+        assert genesis.budget.is_exhausted  # the genesis state is untouched
+
+    def test_a_grant_adds_to_a_budget_already_held(self) -> None:
+        funded = ResearchState(objective="o").fund(ResearchBudget(usd=10.0))
+
+        topped_up = funded.fund(ResearchBudget(usd=5.0))
+
+        assert topped_up.budget.usd == 15.0
+        assert topped_up.parent_id == funded.id
+
+    def test_the_scientific_content_survives_funding_unchanged(self) -> None:
+        hypothesis = make_hypothesis()
+        genesis = ResearchState(objective="o").upsert_hypothesis(hypothesis)
+
+        funded = genesis.fund(ResearchBudget(usd=10.0))
+
+        assert funded.hypotheses == genesis.hypotheses
+        assert funded.questions == genesis.questions
+        assert funded.predictions == genesis.predictions

@@ -39,7 +39,11 @@ Two bookkeeping fields deserve explicit contracts:
 The mutator methods on this class are the commit layer's API. Roles do not
 call them — roles produce proposals, and the transition layer in
 ``orchestration`` validates and commits (enforced structurally by
-``tests/test_layering.py``).
+``tests/test_layering.py``). One mutator sits outside that layer:
+:meth:`ResearchState.fund` derives a funded successor of a genesis state,
+and belongs to the ``program`` package that authorizes and records the
+grant. It is the only mutator that package may call, which the same
+structural test pins.
 
 On decomposition: this state is deliberately still one object. The split into
 sub-states (scientific / execution / epistemic) is documented as a threshold
@@ -173,6 +177,24 @@ class ResearchState:
 
     def charge(self, cost: ResourceCost) -> ResearchState:
         return self._evolve(budget=self.budget.spend(cost))
+
+    def fund(self, grant: ResearchBudget) -> ResearchState:
+        """Derive a successor holding an operator grant -- the counterpart
+        to :meth:`charge`.
+
+        Funding is *succession*, never replacement. A state's content id
+        deliberately excludes its budget, so overwriting the budget of an
+        existing state would leave two different snapshots claiming one id;
+        a successor carries a fresh ``parent_id`` and therefore a fresh
+        identity. The genesis state a program is admitted with keeps its
+        zero budget forever, and the funded state names it as its parent.
+
+        The grant is added, so a first grant and a later top-up are the
+        same operation. This method judges nothing: *which* states may be
+        funded, by whose authority, and how the grant and every debit
+        against it are recorded durably, all belong to the caller.
+        """
+        return self._evolve(budget=self.budget.plus(grant))
 
     # -- queries ------------------------------------------------------------
 
