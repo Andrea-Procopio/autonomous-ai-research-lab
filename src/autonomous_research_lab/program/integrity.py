@@ -6,7 +6,7 @@ still here, and still what it said it was?* — and answers it with typed
 issues, never with verdicts. What a broken run means is somebody else's
 call; this module only says what is broken.
 
-Seven checks, each reusing the guarantee the writing layer already
+Eight checks, each reusing the guarantee the writing layer already
 built:
 
 ============  ============================================================
@@ -18,6 +18,8 @@ references    every ``ResultRef`` and evidence id in every state resolves
 artifacts     every manifest entry has a blob that still hashes to it
 chain         ``validate_evidence_chain`` on each leaf state
 ledger        the funded run replays to the balance its own head carries
+attempts      every reservation, debit, phase, bundle and successor
+              points at something that exists
 ============  ============================================================
 
 The lineage check is the one that decides whether the others are worth
@@ -53,11 +55,15 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 
+from ..core.attempt import AttemptPhase
 from ..core.state import ResearchState
 from ..evidence.artifacts import ArtifactEntry, ArtifactManifest
 from ..evidence.file_store import FileEvidenceStore
 from ..evidence.validation import validate_evidence_chain
+from ..persistence.commit_store import CommitBundleStore
 from ..persistence.state_store import FileStateStore, SnapshotError
+from .journal import AttemptEvent, RunJournal
+from .records import BudgetEntry, EntryKind
 from .store import ProgramStore
 
 
@@ -94,6 +100,13 @@ class IntegrityIssueKind(StrEnum):
     LEDGER_ISSUE = "ledger_issue"
     """A funded run's envelope, state, or budget ledger does not reload
     and reconcile."""
+
+    ATTEMPT_LINK = "attempt_link"
+    """The attempt journal, the ledger, the bundle store and the
+    snapshots do not agree about one attempt: money held for an attempt
+    nobody began, a debit answering no authorization, a phase naming a
+    bundle or a state that is not there, or an attempt still open on a
+    run that has stopped."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,6 +158,7 @@ def verify_run(
     _check_references(states, store, issues)
     _check_chain(states, store, issues)
     _check_ledger(root, program_root, states, issues)
+    _check_attempts(root, program_root, states, issues)
     return IntegrityReport(
         root=str(root),
         states_checked=len(states),
@@ -515,6 +529,202 @@ def _check_ledger(
                 ),
             )
         )
+
+
+def _check_attempts(
+    root: Path,
+    program_root: Path | None,
+    states: list[ResearchState],
+    issues: list[IntegrityIssue],
+) -> None:
+    """Six links, each a one-to-one the records claim and must keep.
+
+    ================================  ==================================
+    link                              broken when
+    ================================  ==================================
+    reservation -> attempt            money is held for an attempt the
+                                      journal never began
+    debit -> reservation              a debit answers no authorization
+    attempt -> reservation            a journalled attempt holds nothing
+    attempt -> bundle                 a durable-bundle phase names a
+                                      bundle the store does not hold
+    attempt -> successor              a committed phase names a state
+                                      that is not stored
+    attempt -> job                    a submitted phase names a job with
+                                      no run directory
+    ================================  ==================================
+
+    Plus one whole-run question: nothing may still be open. An attempt
+    with no terminal phase is a run that owes something, which is a
+    legitimate state to be caught mid-flight in and never a legitimate
+    state to have stopped in.
+
+    Runs with no journal are skipped rather than failed. Everything
+    written before the journal existed is such a run, and reporting all
+    of it broken would say nothing about integrity and a great deal
+    about the date.
+    """
+    resolved = program_root if program_root is not None else root / "program"
+    if not (resolved / "envelopes").is_dir():
+        return
+    store = ProgramStore(resolved)
+    try:
+        envelopes = store.runs()
+    except Exception:  # already reported by the ledger check
+        return
+    stored_states = {state.id for state in states}
+    bundles = store.bundles()
+    for envelope in envelopes:
+        run_id = envelope.run_id
+        try:
+            journal = store.journal_for(run_id)
+            events = journal.events()
+            entries = store.ledger_for(run_id).entries()
+        except Exception as error:  # reported, never re-raised
+            issues.append(
+                IntegrityIssue(
+                    kind=IntegrityIssueKind.ATTEMPT_LINK,
+                    subject_id=run_id,
+                    detail=f"the attempt records could not be read: {error}",
+                )
+            )
+            continue
+        if not events:
+            continue
+        _check_holds(run_id, journal, events, entries, issues)
+        _check_phases(root, run_id, journal, bundles, stored_states, issues)
+
+
+def _check_holds(
+    run_id: str,
+    journal: RunJournal,
+    events: tuple[AttemptEvent, ...],
+    entries: tuple[BudgetEntry, ...],
+    issues: list[IntegrityIssue],
+) -> None:
+    """The ledger and the journal must name the same attempts."""
+    began = {
+        event.attempt_id
+        for event in events
+        if event.phase is AttemptPhase.STARTED
+    }
+    reserved = {
+        entry.charge_id
+        for entry in entries
+        if entry.kind is EntryKind.RESERVATION
+    }
+    for charge_id in sorted(reserved - began):
+        issues.append(
+            IntegrityIssue(
+                kind=IntegrityIssueKind.ATTEMPT_LINK,
+                subject_id=charge_id,
+                detail=(
+                    f"run {run_id} holds money for {charge_id}, which the "
+                    f"journal never began; a reservation nobody can "
+                    f"explain is money nobody will answer for"
+                ),
+            )
+        )
+    released = {
+        event.attempt_id
+        for event in events
+        if event.phase is AttemptPhase.RELEASED
+    }
+    # A released attempt held nothing *and* bought nothing, and saying so
+    # is the whole content of the phase. It is the one attempt with no
+    # reservation that is not a hole in the record.
+    for charge_id in sorted(began - reserved - released):
+        issues.append(
+            IntegrityIssue(
+                kind=IntegrityIssueKind.ATTEMPT_LINK,
+                subject_id=charge_id,
+                detail=(
+                    f"attempt {charge_id} was begun but nothing was held "
+                    f"for it; it was authorized to spend nothing and may "
+                    f"have spent something"
+                ),
+            )
+        )
+    for entry in entries:
+        if entry.kind is EntryKind.DEBIT and entry.charge_id not in reserved:
+            issues.append(
+                IntegrityIssue(
+                    kind=IntegrityIssueKind.ATTEMPT_LINK,
+                    subject_id=entry.charge_id,
+                    detail=(
+                        f"debit {entry.id} answers no reservation; every "
+                        f"charge is authorized before it is made"
+                    ),
+                )
+            )
+    for attempt_id in journal.open_attempts():
+        issues.append(
+            IntegrityIssue(
+                kind=IntegrityIssueKind.ATTEMPT_LINK,
+                subject_id=attempt_id,
+                detail=(
+                    f"attempt {attempt_id} reached no terminal phase; the "
+                    f"run still owes an answer for what it spent"
+                ),
+            )
+        )
+
+
+def _check_phases(
+    root: Path,
+    run_id: str,
+    journal: RunJournal,
+    bundles: CommitBundleStore,
+    stored_states: set[str],
+    issues: list[IntegrityIssue],
+) -> None:
+    """Every phase that names something must name something that is
+    there."""
+    runs_directory = root / "runs"
+    for event in journal.events():
+        if event.phase is AttemptPhase.BUNDLE_DURABLE and not bundles.has(
+            event.bundle_id
+        ):
+            issues.append(
+                IntegrityIssue(
+                    kind=IntegrityIssueKind.ATTEMPT_LINK,
+                    subject_id=event.attempt_id,
+                    detail=(
+                        f"the bundle {event.bundle_id} this attempt says is "
+                        f"durable is not in the store; the step it records "
+                        f"could not be finished from disk"
+                    ),
+                )
+            )
+        if event.state_id and event.state_id not in stored_states:
+            issues.append(
+                IntegrityIssue(
+                    kind=IntegrityIssueKind.ATTEMPT_LINK,
+                    subject_id=event.attempt_id,
+                    detail=(
+                        f"{event.phase} names state {event.state_id}, which "
+                        f"run {run_id} did not store"
+                    ),
+                )
+            )
+        # The job check is the local executor's layout, and only that
+        # one. A run whose jobs live somewhere else has no ``runs``
+        # directory here, and this check has nothing to say about it.
+        if (
+            event.phase is AttemptPhase.SUBMITTED
+            and runs_directory.is_dir()
+            and not (runs_directory / event.job_id).is_dir()
+        ):
+            issues.append(
+                IntegrityIssue(
+                    kind=IntegrityIssueKind.ATTEMPT_LINK,
+                    subject_id=event.attempt_id,
+                    detail=(
+                        f"job {event.job_id} was submitted and left no run "
+                        f"directory; nothing can be collected or ruled out"
+                    ),
+                )
+            )
 
 
 # -- helpers -------------------------------------------------------------------

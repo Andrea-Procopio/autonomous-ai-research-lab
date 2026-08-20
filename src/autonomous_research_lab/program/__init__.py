@@ -29,6 +29,12 @@ package may call, because every evolution after the funded state belongs
 to orchestration's commit layer.
 """
 
+from ..persistence.commit_store import (
+    BundleConflictError,
+    BundleError,
+    CommitBundleStore,
+    bundle_id_of,
+)
 from .authorization import (
     MAX_AUTHORITY_CHARS,
     MAX_GPU_HOURS,
@@ -49,6 +55,13 @@ from .integrity import (
     IntegrityIssueKind,
     IntegrityReport,
     verify_run,
+)
+from .journal import (
+    AttemptEvent,
+    JournalConflictError,
+    JournalContentionError,
+    JournalIntegrityError,
+    RunJournal,
 )
 from .ledger import (
     BudgetLedger,
@@ -79,13 +92,20 @@ __all__ = [
     "MAX_REASON_CHARS",
     "MAX_USD",
     "MAX_WALL_CLOCK_SECONDS",
+    "AttemptEvent",
     "BudgetEntry",
     "BudgetLedger",
+    "BundleConflictError",
+    "BundleError",
+    "CommitBundleStore",
     "EntryKind",
     "FundingAuthorization",
     "IntegrityIssue",
     "IntegrityIssueKind",
     "IntegrityReport",
+    "JournalConflictError",
+    "JournalContentionError",
+    "JournalIntegrityError",
     "LedgerConflictError",
     "LedgerContentionError",
     "LedgerIntegrityError",
@@ -96,11 +116,13 @@ __all__ = [
     "ResearchRun",
     "RunDirective",
     "RunInputs",
+    "RunJournal",
     "RunPlan",
     "RunPreflightError",
     "RunRefusedError",
     "RunStartResult",
     "UnauthorizedGrantError",
+    "bundle_id_of",
     "check_funding_coherence",
     "require_admitted_state_for_run",
     "start_run",

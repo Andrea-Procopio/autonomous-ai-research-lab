@@ -1,0 +1,21 @@
+{
+  "amount": {
+    "gpu_hours": 0.5,
+    "model_tokens": 12000,
+    "usd": 3.25,
+    "wall_clock_seconds": 1800.0
+  },
+  "balance_after": {
+    "gpu_hours": 99.5,
+    "model_tokens": 1988000,
+    "usd": 246.75,
+    "wall_clock_seconds": 84600.0
+  },
+  "charge_id": "att_task6a_demonstration",
+  "id": "bent_9fd69d880e640b5f",
+  "kind": "debit",
+  "previous_entry_id": "bent_f2e3108a79f3c566",
+  "reason": "attempt att_task6a_demonstration",
+  "run_id": "run_71303a08659a48a9",
+  "sequence": 1
+}

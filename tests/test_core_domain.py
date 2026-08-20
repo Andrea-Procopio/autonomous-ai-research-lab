@@ -9,6 +9,7 @@ from autonomous_research_lab.core.budget import (
     InsufficientBudgetError,
     ResearchBudget,
     ResourceCost,
+    Settlement,
 )
 from autonomous_research_lab.core.experiment import ExperimentSpec
 from autonomous_research_lab.core.hypothesis import Hypothesis
@@ -230,6 +231,19 @@ class TestBudget:
         with pytest.raises(InsufficientBudgetError):
             budget.spend(ResourceCost(usd=5.0))
 
+    def test_an_overrun_is_recorded_rather_than_clamped(self) -> None:
+        budget = ResearchBudget(usd=1.0)
+
+        spent = budget.spend(ResourceCost(usd=3.0), allow_overdraw=True)
+
+        assert spent.usd == -2.0  # the money is gone; the record says so
+
+    def test_a_cost_exceeds_a_ceiling_in_any_one_dimension(self) -> None:
+        ceiling = ResourceCost(usd=10.0, gpu_hours=1.0)
+
+        assert not ResourceCost(usd=10.0, gpu_hours=1.0).exceeds(ceiling)
+        assert ResourceCost(usd=1.0, gpu_hours=3.0).exceeds(ceiling)
+
     def test_a_grant_is_added_to_what_remains(self) -> None:
         budget = ResearchBudget(wall_clock_seconds=10.0, usd=1.0, model_tokens=100)
 
@@ -288,3 +302,28 @@ class TestFunding:
         assert funded.hypotheses == genesis.hypotheses
         assert funded.questions == genesis.questions
         assert funded.predictions == genesis.predictions
+
+
+class TestSettlement:
+    def settlement(self, actual: ResourceCost) -> Settlement:
+        return Settlement(
+            charge_id="att_1",
+            reserved=ResourceCost(usd=10.0),
+            actual=actual,
+            entry_id="bent_1",
+        )
+
+    def test_spending_less_than_authorized_is_not_a_breach(self) -> None:
+        assert not self.settlement(ResourceCost(usd=4.0)).breached
+
+    def test_spending_exactly_the_authorization_is_not_a_breach(self) -> None:
+        assert not self.settlement(ResourceCost(usd=10.0)).breached
+
+    def test_spending_more_than_authorized_is_a_breach(self) -> None:
+        assert self.settlement(ResourceCost(usd=10.01)).breached
+
+    def test_the_two_numbers_are_kept_apart(self) -> None:
+        settled = self.settlement(ResourceCost(usd=25.0))
+
+        assert settled.reserved == ResourceCost(usd=10.0)
+        assert settled.actual == ResourceCost(usd=25.0)

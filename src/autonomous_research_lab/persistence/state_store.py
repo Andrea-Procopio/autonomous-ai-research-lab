@@ -115,24 +115,29 @@ def deserialize_state(text: str) -> ResearchState:
 # Boundary code, deliberately explicit: every field is checked as it is read,
 # and the state id is recomputed from content (the id field is stripped before
 # construction) so codec drift surfaces as an error instead of a wrong state.
+#
+# The ``read_*`` decoders are public within this package because a second
+# reader needs them: ``commit_store`` reconstructs the same payloads out of a
+# stored commit bundle, and two codecs for one type is how the two stop
+# agreeing.
 
 
 def _state(raw: dict[str, object]) -> ResearchState:
     return ResearchState(
         objective=_str(_get(raw, "objective", "state"), "state.objective"),
         questions=tuple(
-            _question(_dict(q, "question")) for q in _list(raw.get("questions"))
+            read_question(_dict(q, "question")) for q in _list(raw.get("questions"))
         ),
         hypotheses=tuple(
-            _hypothesis(_dict(h, "hypothesis"))
+            read_hypothesis(_dict(h, "hypothesis"))
             for h in _list(raw.get("hypotheses"))
         ),
         predictions=tuple(
-            _prediction(_dict(p, "prediction"))
+            read_prediction(_dict(p, "prediction"))
             for p in _list(raw.get("predictions"))
         ),
         experiments=tuple(
-            _spec(_dict(e, "experiment")) for e in _list(raw.get("experiments"))
+            read_spec(_dict(e, "experiment")) for e in _list(raw.get("experiments"))
         ),
         results=tuple(
             _result_ref(_dict(r, "result ref")) for r in _list(raw.get("results"))
@@ -142,13 +147,13 @@ def _state(raw: dict[str, object]) -> ResearchState:
             _prediction_test(_dict(t, "prediction test"))
             for t in _list(raw.get("prediction_tests"))
         ),
-        claims=tuple(_claim(_dict(c, "claim")) for c in _list(raw.get("claims"))),
+        claims=tuple(read_claim(_dict(c, "claim")) for c in _list(raw.get("claims"))),
         evidence_links=tuple(
-            _link(_dict(link, "evidence link"))
+            read_link(_dict(link, "evidence link"))
             for link in _list(raw.get("evidence_links"))
         ),
         assessments=tuple(
-            _assessment(_dict(a, "assessment"))
+            read_assessment(_dict(a, "assessment"))
             for a in _list(raw.get("assessments"))
         ),
         attempts=tuple(
@@ -162,7 +167,7 @@ def _state(raw: dict[str, object]) -> ResearchState:
     )
 
 
-def _question(raw: dict[str, object]) -> ResearchQuestion:
+def read_question(raw: dict[str, object]) -> ResearchQuestion:
     return ResearchQuestion(
         text=_str(_get(raw, "text", "question"), "question.text"),
         importance=_str(raw.get("importance", ""), "question.importance"),
@@ -172,7 +177,7 @@ def _question(raw: dict[str, object]) -> ResearchQuestion:
     )
 
 
-def _hypothesis(raw: dict[str, object]) -> Hypothesis:
+def read_hypothesis(raw: dict[str, object]) -> Hypothesis:
     return Hypothesis(
         statement=_str(_get(raw, "statement", "hypothesis"), "statement"),
         rationale=_str(raw.get("rationale", ""), "hypothesis.rationale"),
@@ -183,7 +188,7 @@ def _hypothesis(raw: dict[str, object]) -> Hypothesis:
     )
 
 
-def _prediction(raw: dict[str, object]) -> Prediction:
+def read_prediction(raw: dict[str, object]) -> Prediction:
     return Prediction(
         hypothesis_id=_str(_get(raw, "hypothesis_id", "prediction"), "hypothesis_id"),
         condition=_str(_get(raw, "condition", "prediction"), "condition"),
@@ -211,7 +216,7 @@ def _prediction_test(raw: dict[str, object]) -> PredictionTest:
     )
 
 
-def _spec(raw: dict[str, object]) -> ExperimentSpec:
+def read_spec(raw: dict[str, object]) -> ExperimentSpec:
     return ExperimentSpec(
         prediction_id=_str(_get(raw, "prediction_id", "spec"), "prediction_id"),
         objective=_str(_get(raw, "objective", "spec"), "spec.objective"),
@@ -220,7 +225,7 @@ def _spec(raw: dict[str, object]) -> ExperimentSpec:
         baselines=_str_tuple(raw.get("baselines"), "spec.baselines"),
         controls=_str_tuple(raw.get("controls"), "spec.controls"),
         seeds=tuple(_int(s, "spec.seeds") for s in _list(raw.get("seeds"))),
-        estimated_cost=_cost(
+        estimated_cost=read_cost(
             _dict(_get(raw, "estimated_cost", "spec"), "estimated_cost")
         ),
         id=_str(_get(raw, "id", "spec"), "spec.id"),
@@ -235,7 +240,7 @@ def _result_ref(raw: dict[str, object]) -> ResultRef:
     )
 
 
-def _claim(raw: dict[str, object]) -> Claim:
+def read_claim(raw: dict[str, object]) -> Claim:
     return Claim(
         statement=_str(_get(raw, "statement", "claim"), "claim.statement"),
         scope=_str(raw.get("scope", ""), "claim.scope"),
@@ -244,7 +249,7 @@ def _claim(raw: dict[str, object]) -> Claim:
     )
 
 
-def _link(raw: dict[str, object]) -> EvidenceLink:
+def read_link(raw: dict[str, object]) -> EvidenceLink:
     return EvidenceLink(
         claim_id=_str(_get(raw, "claim_id", "link"), "link.claim_id"),
         evidence_id=_str(_get(raw, "evidence_id", "link"), "link.evidence_id"),
@@ -254,7 +259,7 @@ def _link(raw: dict[str, object]) -> EvidenceLink:
     )
 
 
-def _assessment(raw: dict[str, object]) -> EpistemicAssessment:
+def read_assessment(raw: dict[str, object]) -> EpistemicAssessment:
     return EpistemicAssessment(
         subject_id=_str(_get(raw, "subject_id", "assessment"), "subject_id"),
         verdict=AssessmentVerdict(_str(_get(raw, "verdict", "assessment"), "verdict")),
@@ -279,12 +284,14 @@ def _action(raw: dict[str, object]) -> ResearchAction:
     )
 
 
-def _outcome(raw: dict[str, object]) -> ActionOutcome:
+def read_outcome(raw: dict[str, object]) -> ActionOutcome:
     return ActionOutcome(
         status=AttemptStatus(_str(_get(raw, "status", "outcome"), "outcome.status")),
         produced=_str_tuple(raw.get("produced"), "outcome.produced"),
         error=_opt_str(raw.get("error"), "outcome.error"),
-        actual_cost=_cost(_dict(_get(raw, "actual_cost", "outcome"), "actual_cost")),
+        actual_cost=read_cost(
+            _dict(_get(raw, "actual_cost", "outcome"), "actual_cost")
+        ),
     )
 
 
@@ -295,12 +302,12 @@ def _attempt(raw: dict[str, object]) -> ActionAttempt:
         status=AttemptStatus(_str(_get(raw, "status", "attempt"), "attempt.status")),
         outcome=None
         if outcome_raw is None
-        else _outcome(_dict(outcome_raw, "attempt.outcome")),
+        else read_outcome(_dict(outcome_raw, "attempt.outcome")),
         id=_str(_get(raw, "id", "attempt"), "attempt.id"),
     )
 
 
-def _cost(raw: dict[str, object]) -> ResourceCost:
+def read_cost(raw: dict[str, object]) -> ResourceCost:
     return ResourceCost(
         wall_clock_seconds=_number(
             raw.get("wall_clock_seconds", 0.0), "cost.wall_clock_seconds"

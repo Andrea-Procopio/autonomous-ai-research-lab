@@ -45,6 +45,7 @@ from autonomous_research_lab.evidence.file_store import FileEvidenceStore
 from autonomous_research_lab.execution.binding import ContainerBinding
 from autonomous_research_lab.execution.executor import ExperimentJob
 from autonomous_research_lab.execution.local import LocalExecutor
+from autonomous_research_lab.execution.runner import DirectJobRunner
 from autonomous_research_lab.orchestration.loop import ResearchRuntime
 from autonomous_research_lab.orchestration.planning import PlanningDirector
 from autonomous_research_lab.orchestration.trajectory import (
@@ -362,7 +363,7 @@ def main(argv: list[str] | None = None) -> int:
     engineer = ModelBackedEngineer(
         provider=MuseSparkProvider(),
         model=MUSE_SPARK_1_2,
-        executor=LocalExecutor(root / "runs"),
+        runner=DirectJobRunner(LocalExecutor(root / "runs")),
         ledger=ledger,
         store=implementations,
         binding=ContainerBinding(

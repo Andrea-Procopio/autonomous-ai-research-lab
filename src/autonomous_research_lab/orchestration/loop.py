@@ -68,7 +68,13 @@ from dataclasses import dataclass, field
 
 from ..core.actions import ResearchAction, ResearchActionType
 from ..core.assessment import AssessmentVerdict
-from ..core.attempt import ActionAttempt, ActionOutcome, AttemptStatus
+from ..core.attempt import (
+    ActionAttempt,
+    ActionOutcome,
+    AttemptPhase,
+    AttemptStatus,
+    SettlementBasis,
+)
 from ..core.budget import NO_COST, ResearchBudget, ResourceCost
 from ..core.claim import EvidenceRelation
 from ..core.commit import CommitBundle
@@ -85,9 +91,11 @@ from ..core.proposals import (
     ResultProposal,
     payload_ids,
 )
-from ..core.state import ResearchState, recording_lineage
+from ..core.state import ResearchState, recorded_lineage, recording_lineage
 from ..evidence.store import EvidenceStore, UnknownRecordError
+from ..execution.executor import derive_job_id
 from ..execution.failure_classifier import diagnose_failure
+from ..persistence.commit_store import CommitBundleStore
 from ..persistence.state_store import FileStateStore
 from ..roles.base import ResearchRole, RoleContext, RoleInvocation, RoleName
 from ..runtime.config import RuntimeConfig
@@ -98,6 +106,7 @@ from ..runtime.escalation import (
     ReasoningTier,
 )
 from ..runtime.frontier import ResearchFrontier, build_frontier, find_contradictions
+from ..runtime.journal import AttemptJournal
 from ..runtime.metrics import (
     NO_USAGE,
     MetricsSink,
@@ -280,6 +289,18 @@ class ResearchRuntime:
     state snapshots alone — the pre-existing behavior, kept as the
     explicit ablation."""
 
+    journal: AttemptJournal | None = None
+    """Where each attempt's phases are written down as they happen. With
+    it, a process killed inside a step leaves a record saying how far it
+    got; without it the run is recoverable between steps and not inside
+    one — the pre-existing behavior, kept as the explicit ablation."""
+
+    bundles: CommitBundleStore | None = None
+    """Where the effect of an attempt is stored before it is applied. A
+    bundle on disk is what lets a recovering process finish a step it
+    never started, so this and ``journal`` are wired together or not at
+    all."""
+
     debugger: ExperimentDebugger | None = None
     """The bounded repair loop for failed executions. ``None`` (and
     ``config.debug_enabled = False``) leaves failures diagnosed and noted
@@ -317,6 +338,18 @@ class ResearchRuntime:
         if self.synthesis_trigger is None:
             self.synthesis_trigger = SynthesisTrigger(
                 every=self.config.synthesis_every
+            )
+        if (self.journal is None) != (self.bundles is None):
+            raise ValueError(
+                "a journal without a bundle store records phases nobody "
+                "can act on, and a bundle store without a journal stores "
+                "effects nobody will look for; wire both or neither"
+            )
+        if self.journal is not None and self.states is None:
+            raise ValueError(
+                "a journal names states a recovering process must be able "
+                "to load; without a snapshot store there is nowhere to "
+                "load them from"
             )
 
     def run(self, state: ResearchState, *, max_steps: int = 32) -> RunOutcome:
@@ -423,6 +456,7 @@ class ResearchRuntime:
 
         attempt = ActionAttempt(action=action).started()
         state = state.begin_attempt(attempt)
+        self._open_attempt(attempt.id, state, estimated)
         invocation = RoleInvocation(
             role=seat,
             assignment=action,
@@ -432,6 +466,7 @@ class ResearchRuntime:
             allowed_actions=frozenset({action.action_type}),
             expected_output=expected_proposals(action.action_type),
             budget=estimated,
+            attempt_id=attempt.id,
         )
 
         failures = 0
@@ -556,6 +591,7 @@ class ResearchRuntime:
         contradictions_before = len(
             find_contradictions(state, admissible=admissible)
         )
+        self._store_bundle(attempt.id, bundle)
         try:
             state = commit_bundle(state, bundle, self.store)
             if bundle.outcome.status is AttemptStatus.SUCCEEDED:
@@ -563,15 +599,14 @@ class ResearchRuntime:
         except TransitionError as exc:
             failures += 1
             step_notes.append(f"engineering failure: commit rejected — {exc}")
-            state = commit_bundle(
-                state,
-                _failed_bundle(
-                    attempt.id,
-                    str(exc),
-                    _actual_cost(executed_results, estimated),
-                ),
-                self.store,
+            fallback = _failed_bundle(
+                attempt.id,
+                str(exc),
+                _actual_cost(executed_results, estimated),
             )
+            self._store_bundle(attempt.id, fallback, replacing=True)
+            state = commit_bundle(state, fallback, self.store)
+        self._committed(attempt.id, state)
         outcome = _outcome_of(state, attempt.id)
 
         # -- Tier 0 aftermath of committed results ---------------------------
@@ -619,6 +654,10 @@ class ResearchRuntime:
                 invocations += debug_invocations
                 executed_results = (*executed_results, *debug_results)
                 if exhausted:
+                    state, _, _ = self._bill(
+                        state, outcome.actual_cost, estimated,
+                        charge_id=attempt.id,
+                    )
                     return self._finish(
                         state, record, deliberation, tier, invocations, started,
                         attempt_id=attempt.id, outcome=outcome, seat=seat,
@@ -643,6 +682,10 @@ class ResearchRuntime:
                 invocations += repair_invocations
                 executed_results = (*executed_results, *repair_results)
                 if exhausted:
+                    state, _, _ = self._bill(
+                        state, outcome.actual_cost, estimated,
+                        charge_id=attempt.id,
+                    )
                     return self._finish(
                         state, record, deliberation, tier, invocations, started,
                         attempt_id=attempt.id, outcome=outcome, seat=seat,
@@ -667,7 +710,7 @@ class ResearchRuntime:
                 critic_invoked=critic_invoked, failures=failures,
                 executed_results=executed_results, notes=tuple(step_notes),
                 stats=stats,
-                halt_reason="budget exhausted after cost overrun",
+                halt_reason="budget breached: the run spent past its grant",
             )
 
         synthesis = self._maybe_synthesize(
@@ -1289,7 +1332,13 @@ class ResearchRuntime:
             targets=(spec.id,),
         )
         attempt = ActionAttempt(action=action).started()
+        estimated = (
+            spec.estimated_cost
+            if not spec.estimated_cost.is_zero
+            else record.result.cost
+        )
         state = state.begin_attempt(attempt)
+        self._open_attempt(attempt.id, state, estimated)
         result = record.result
         proposal = ResultProposal(result=result, proposer="runtime:debug-loop:v1")
         committed = True
@@ -1318,11 +1367,10 @@ class ResearchRuntime:
                 f"preserved)"
             )
             bundle = _failed_bundle(attempt.id, str(exc), result.cost)
+        self._store_bundle(attempt.id, bundle)
         state = commit_bundle(state, bundle, self.store)
+        self._committed(attempt.id, state)
         state = state.apply(action)
-        estimated = (
-            spec.estimated_cost if not spec.estimated_cost.is_zero else result.cost
-        )
         state, overrun_note, exhausted = self._bill(
             state, result.cost, estimated, charge_id=attempt.id
         )
@@ -1362,6 +1410,8 @@ class ResearchRuntime:
             rationale="; ".join(reasons),
             targets=(result.id,),
         )
+        # No separate authorization: a critic invocation is part of the
+        # step that triggered it, and its cost is billed there.
         attempt = ActionAttempt(action=action).started()
         state = state.begin_attempt(attempt)
         invocation = RoleInvocation(
@@ -1649,6 +1699,94 @@ class ResearchRuntime:
             halt_reason=halt_reason,
         )
 
+    # -- the attempt lifecycle -----------------------------------------------
+
+    def _open_attempt(
+        self, attempt_id: str, begun: ResearchState, estimated: ResourceCost
+    ) -> None:
+        """Make the attempt's starting point durable, write it down, and
+        hold the money it is authorized to spend. In that order.
+
+        The snapshot goes first because the journal is about to name it,
+        and a record that names a state nobody stored is the one thing
+        this whole mechanism must never write. It is the state with the
+        attempt *begun* on it, which is what recovery has to apply a
+        stored bundle to — a bundle names an attempt, and a state that
+        never began that attempt refuses it.
+
+        The journal goes before the reservation because money held for a
+        reason no later process can reconstruct is worse than an attempt
+        that plainly never got started.
+
+        An attempt nobody expected to cost anything holds nothing and is
+        not journalled: there is no authorization to record and nothing
+        for recovery to answer for.
+        """
+        if estimated.is_zero:
+            return
+        if self.journal is not None:
+            self._persist(begun)
+            self.journal.record(
+                attempt_id=attempt_id,
+                phase=AttemptPhase.STARTED,
+                state_id=begun.id,
+                job_id=derive_job_id(attempt_id),
+                reserved=estimated,
+            )
+        if self.ledger is not None and not self.ledger.holds(attempt_id):
+            self.ledger.reserve(
+                estimated,
+                charge_id=attempt_id,
+                reason=f"attempt {attempt_id}",
+            )
+
+    def _store_bundle(
+        self, attempt_id: str, bundle: CommitBundle, *, replacing: bool = False
+    ) -> None:
+        """Put the whole effect of an attempt on disk before applying it.
+
+        ``replacing`` is the commit-rejected path: the first bundle was
+        stored and then refused, and the failure bundle that answers for
+        it is a second effect for one attempt. The journal records one
+        phase per attempt, so the second bundle is stored — it is
+        content-addressed and cheap — and the phase is left naming the
+        first, which is the one the run actually tried to commit.
+        """
+        if self.bundles is None:
+            return
+        bundle_id = self.bundles.record(bundle)
+        if self.journal is None or replacing:
+            return
+        self.journal.record(
+            attempt_id=attempt_id,
+            phase=AttemptPhase.BUNDLE_DURABLE,
+            bundle_id=bundle_id,
+            detail=f"{bundle.outcome.status}",
+        )
+
+    def _committed(self, attempt_id: str, successor: ResearchState) -> None:
+        """The successor exists; make it durable and say so.
+
+        Persisted here rather than only at the end of the step, because
+        the phase claims a state a recovering process must be able to
+        load. A durability claim written before the bytes exist is the
+        one thing this whole record must never do.
+        """
+        if self.journal is None:
+            return
+        # The successor's ancestors go down with it. A snapshot whose
+        # parents are not stored is exactly the broken lineage the
+        # verifier refuses to call intact, and the rest of the step —
+        # which may still fail — is what would otherwise have written
+        # them.
+        for produced in recorded_lineage() or (successor,):
+            self._persist(produced)
+        self.journal.record(
+            attempt_id=attempt_id,
+            phase=AttemptPhase.COMMITTED,
+            state_id=successor.id,
+        )
+
     def _bill(
         self,
         state: ResearchState,
@@ -1657,28 +1795,63 @@ class ResearchRuntime:
         *,
         charge_id: str,
     ) -> tuple[ResearchState, str | None, bool]:
-        """Charge the state, then put the same movement on the durable
-        ledger.
+        """Charge the state, settle the hold, and close the attempt.
 
-        Two details decide correctness. The ledger receives what was
-        *charged*, not what the work actually cost: an overrun clamps to
-        the remaining budget, and posting the unclamped figure would
-        desynchronise the two records at exactly the moment the run
-        halts. And the balance is checked against the state afterwards,
+        Two details decide correctness. The ledger receives exactly what
+        came off the state's budget, derived from the two balances rather
+        than taken from the caller, so the two records cannot drift
+        apart. And the balance is checked against the state afterwards,
         so a divergence raises here instead of travelling on as a halt
         reason — a bookkeeping failure is not a research outcome.
         """
         before = state.budget
         state, note, exhausted = _reconcile_cost(state, actual, estimated)
-        if self.ledger is None:
-            return state, note, exhausted
         charged = _charged_between(before, state.budget)
-        if not charged.is_zero:
-            self.ledger.debit(
-                charged, charge_id=charge_id, reason=f"attempt {charge_id}"
+        self._settle(charged, charge_id=charge_id, estimated=estimated)
+        if self.ledger is not None:
+            self.ledger.require_balance(state.budget)
+        if self.journal is not None and not estimated.is_zero:
+            self.journal.record(
+                attempt_id=charge_id,
+                phase=AttemptPhase.COMPLETED,
+                reserved=estimated,
+                settled=charged,
+                # A live step knows what came off the budget, because it
+                # is the one that took it off.
+                basis=SettlementBasis.MEASURED,
             )
-        self.ledger.require_balance(state.budget)
         return state, note, exhausted
+
+    def _settle(
+        self,
+        charged: ResourceCost,
+        *,
+        charge_id: str,
+        estimated: ResourceCost,
+    ) -> None:
+        """Answer this attempt's hold with what came off the budget.
+
+        Every debit answers a reservation — no exceptions, or a verifier
+        could not check the link. Where no hold was taken in advance
+        (nothing was expected to be spent, and something was) one is
+        posted now for the larger of the two figures, with a reason
+        saying it was authorized late. That is worse authorization than
+        holding the money first, and it is still a complete record.
+        """
+        if self.ledger is None:
+            return
+        held = self.ledger.holds(charge_id)
+        if charged.is_zero and not held:
+            return  # nothing held and nothing spent
+        if not held:
+            self.ledger.reserve(
+                charged if charged.exceeds(estimated) else estimated,
+                charge_id=charge_id,
+                reason=f"attempt {charge_id} (authorized at settlement)",
+            )
+        self.ledger.settle(
+            charged, charge_id=charge_id, reason=f"attempt {charge_id}"
+        )
 
     def _persist(self, state: ResearchState) -> None:
         if self.states is not None:
@@ -1798,35 +1971,44 @@ def _reconcile_cost(
     actual: ResourceCost,
     estimated: ResourceCost,
 ) -> tuple[ResearchState, str | None, bool]:
-    """Bill the work that just committed; never leave it unbilled.
+    """Bill the work that just committed; never leave it unbilled, and
+    never bill less than it cost.
 
-    Returns ``(state, note, exhausted)``. Affordable costs charge in full;
-    an overrun beyond the invocation's estimate is recorded explicitly; a
-    cost the remaining budget cannot cover drains the budget to its floor,
-    records the overrun, and signals a safe halt.
+    Returns ``(state, note, exhausted)``. The actual cost is charged in
+    full whatever it is. An overrun beyond the invocation's estimate is
+    noted; one beyond the remaining budget is noted, takes the balance
+    below zero, and halts the run.
+
+    Charging the full figure past an empty budget is the point. The
+    earlier version clamped — it charged the largest affordable share and
+    posted that to the ledger — which kept the two records agreeing by
+    making both of them wrong. Money spent above the budget then appeared
+    nowhere at all, which is precisely the failure a budget exists to
+    make visible. A negative remainder is unpleasant to read and it is
+    true, and the run stops either way.
     """
     if state.budget.can_afford(actual):
         note = None
-        if not _fits(actual, estimated):
+        if actual.exceeds(estimated):
             note = (
                 "budget overrun: actual cost exceeded the invocation's "
                 "estimated budget; charged in full"
             )
         return state.charge(actual), note, False
-    charged = _clamp(actual, state.budget)
     note = (
-        "budget overrun: actual cost exceeded the remaining budget; "
-        "remainder drained and the program halted"
+        "budget breach: actual cost exceeded the remaining budget; "
+        "charged in full, the balance is negative, and the program "
+        "halted"
     )
-    return state.charge(charged), note, True
+    return state.charge(actual, allow_overdraw=True), note, True
 
 
 def _charged_between(
     before: ResearchBudget, after: ResearchBudget
 ) -> ResourceCost:
     """What actually came off the budget. Derived from the two balances
-    rather than taken from the caller, so a clamped overrun bills the
-    clamped amount by construction."""
+    rather than taken from the caller, so the ledger and the state cannot
+    disagree about the figure even by a rounding error."""
     return ResourceCost(
         wall_clock_seconds=before.wall_clock_seconds - after.wall_clock_seconds,
         gpu_hours=before.gpu_hours - after.gpu_hours,
@@ -1835,24 +2017,6 @@ def _charged_between(
     )
 
 
-def _fits(cost: ResourceCost, cap: ResourceCost) -> bool:
-    return (
-        cost.wall_clock_seconds <= cap.wall_clock_seconds
-        and cost.gpu_hours <= cap.gpu_hours
-        and cost.usd <= cap.usd
-        and cost.model_tokens <= cap.model_tokens
-    )
-
-
-def _clamp(cost: ResourceCost, budget: ResearchBudget) -> ResourceCost:
-    """The largest affordable share of ``cost`` — what an overrun can still
-    be billed against a nearly-empty budget."""
-    return ResourceCost(
-        wall_clock_seconds=min(cost.wall_clock_seconds, budget.wall_clock_seconds),
-        gpu_hours=min(cost.gpu_hours, budget.gpu_hours),
-        usd=min(cost.usd, budget.usd),
-        model_tokens=min(cost.model_tokens, budget.model_tokens),
-    )
 
 
 # -- helpers -----------------------------------------------------------------

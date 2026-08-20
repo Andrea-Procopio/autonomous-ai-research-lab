@@ -9,7 +9,7 @@ performs one narrow slice of work::
       -> deterministic source validation  (allowlist, size, text, syntax)
       -> preserved, content-addressed implementation + provenance record
       -> ExperimentJob                    (constructed by trusted code only)
-      -> the existing Executor            (which alone produces results)
+      -> a JobRunner                      (trusted code submits and collects)
       -> exactly one ResultProposal
 
 The model's authority is deliberately narrow. It may propose the *content*
@@ -28,6 +28,12 @@ scientific residue. And a completed run with disappointing metrics is not a
 failure of any kind here: this role returns what actually happened and holds
 no opinion about it.
 
+The role no longer submits anything. It prepares a job and hands it to a
+:class:`~autonomous_research_lab.execution.runner.JobRunner`, which is
+trusted code: a role that held an executor could launch work nobody
+recorded, and the two boundaries either side of a submission are exactly
+where an interrupted run needs a durable note written.
+
 The role depends only on the provider-neutral seam
 (:class:`~autonomous_research_lab.runtime.providers.ModelProvider`); which
 vendor sits behind it is wiring. How validated source is *launched* is a
@@ -38,7 +44,6 @@ the host.
 
 from __future__ import annotations
 
-import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import PurePosixPath
@@ -50,7 +55,8 @@ from ..core.ids import content_id
 from ..core.proposals import Proposal, ResultProposal
 from ..core.state import ResearchState
 from ..execution.binding import JobBinding
-from ..execution.executor import Executor
+from ..execution.executor import job_id_for_attempt
+from ..execution.runner import JobRunner
 from ..runtime.implementation_store import (
     ImplementationRecord,
     ImplementationStore,
@@ -78,7 +84,6 @@ ENTRYPOINT: Final = "experiment.py"
 ALLOWED_SOURCE_FILES: Final = frozenset({ENTRYPOINT})
 MAX_SOURCE_BYTES: Final = 128 * 1024
 
-_POLL_SECONDS: Final = 0.05
 
 #: The whole output contract of the model call. ``files`` is constrained
 #: further by deterministic validation (exactly the allowlisted set); the
@@ -168,7 +173,7 @@ class ImplementationTemplate:
 
 class ModelBackedEngineer(ResearchRole):
     """See the module docstring; construction is explicit wiring, and every
-    collaborator is injected — provider, executor, ledger, store, binding,
+    collaborator is injected — provider, runner, ledger, store, binding,
     template — so tests and live runs differ only in what is plugged in."""
 
     def __init__(
@@ -176,7 +181,7 @@ class ModelBackedEngineer(ResearchRole):
         *,
         provider: ModelProvider,
         model: str,
-        executor: Executor,
+        runner: JobRunner,
         ledger: UsageLedger,
         store: ImplementationStore,
         binding: JobBinding,
@@ -192,7 +197,7 @@ class ModelBackedEngineer(ResearchRole):
     ) -> None:
         self._provider = provider
         self._model = model
-        self._executor = executor
+        self._runner = runner
         self._ledger = ledger
         self._store = store
         self._binding = binding
@@ -284,6 +289,10 @@ class ModelBackedEngineer(ResearchRole):
                 "implementation_id": implementation_id,
             },
             seed=seed,
+            # Derived from the attempt when there is one, so the runtime
+            # already knows this job's id before it exists and can find
+            # it again afterwards. Empty otherwise: nothing to recover.
+            job_id=job_id_for_attempt(invocation.attempt_id),
         )
         record = ImplementationRecord(
             invocation_id=invocation.id,
@@ -312,10 +321,7 @@ class ModelBackedEngineer(ResearchRole):
         # The record now exists whatever happens next: a preflight
         # rejection or a failed run preserves, never erases, the attempt.
         require_preflight(job, spec, checks=self._preflight_checks)
-        job_id = self._executor.submit(job)
-        while not self._executor.status(job_id).is_terminal:
-            time.sleep(_POLL_SECONDS)
-        result = self._executor.collect(job_id)
+        result = self._runner.run(job, invocation.attempt_id)
         return (
             ResultProposal(
                 result=result,

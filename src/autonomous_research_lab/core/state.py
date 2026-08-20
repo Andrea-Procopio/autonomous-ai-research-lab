@@ -102,6 +102,18 @@ def recording_lineage() -> Iterator[list[ResearchState]]:
         _LINEAGE.reset(token)
 
 
+def recorded_lineage() -> tuple[ResearchState, ...]:
+    """Every state derived so far inside the active recorder.
+
+    A reader for the same list :func:`recording_lineage` collects, so a
+    caller that must make a state durable *before* the recorder is
+    drained can flush its whole ancestry rather than one snapshot with
+    unstored parents. Empty when nothing is recording.
+    """
+    produced = _LINEAGE.get()
+    return tuple(produced) if produced is not None else ()
+
+
 @dataclass(frozen=True, slots=True)
 class ResearchState:
     objective: str
@@ -218,8 +230,20 @@ class ResearchState:
         """Append to the audit trail. Nothing operational may read ``history``."""
         return self._evolve(history=(*self.history, action))
 
-    def charge(self, cost: ResourceCost) -> ResearchState:
-        return self._evolve(budget=self.budget.spend(cost))
+    def charge(
+        self, cost: ResourceCost, *, allow_overdraw: bool = False
+    ) -> ResearchState:
+        """The successor with ``cost`` taken off the budget.
+
+        ``allow_overdraw`` is for recording money already gone — an
+        attempt that overran, or one a crash left unaccounted. The
+        remainder then goes negative, which is the honest number:
+        clamping it at zero would make the overrun vanish from every
+        record that reads the budget. Authorization never passes it.
+        """
+        return self._evolve(
+            budget=self.budget.spend(cost, allow_overdraw=allow_overdraw)
+        )
 
     def fund(self, grant: ResearchBudget) -> ResearchState:
         """Derive a successor holding an operator grant -- the counterpart

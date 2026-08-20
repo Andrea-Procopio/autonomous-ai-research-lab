@@ -43,7 +43,13 @@ _SHIM_MODULE = "autonomous_research_lab.execution.container_shim"
 
 
 class JobBinding(Protocol):
-    """Turn one validated source tree into one runnable job."""
+    """Turn one validated source tree into one runnable job.
+
+    ``job_id`` lets the caller name the job before it exists — see
+    :func:`~.executor.derive_job_id`. Empty means the job mints its own,
+    which is the right answer wherever nobody is going to have to find
+    the job again after a crash.
+    """
 
     def bind(
         self,
@@ -53,6 +59,7 @@ class JobBinding(Protocol):
         entrypoint: str,
         config: Mapping[str, ConfigValue],
         seed: int | None,
+        job_id: str = "",
     ) -> ExperimentJob: ...
 
 
@@ -71,6 +78,7 @@ class HostPythonBinding:
         entrypoint: str,
         config: Mapping[str, ConfigValue],
         seed: int | None,
+        job_id: str = "",
     ) -> ExperimentJob:
         return ExperimentJob(
             spec_id=spec_id,
@@ -79,6 +87,7 @@ class HostPythonBinding:
             seed=seed,
             timeout_seconds=self.timeout_seconds,
             required_artifacts=(METRICS_ARTIFACT,),
+            id=job_id,
         )
 
 
@@ -123,6 +132,7 @@ class ContainerBinding:
         entrypoint: str,
         config: Mapping[str, ConfigValue],
         seed: int | None,
+        job_id: str = "",
     ) -> ExperimentJob:
         env = (
             {"DOCKER_HOST": self.docker_host}
@@ -155,4 +165,5 @@ class ContainerBinding:
             seed=seed,
             timeout_seconds=self.timeout_seconds + self.launch_margin_seconds,
             required_artifacts=(METRICS_ARTIFACT,),
+            id=job_id,
         )

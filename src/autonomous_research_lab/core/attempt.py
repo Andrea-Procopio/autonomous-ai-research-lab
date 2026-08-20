@@ -12,6 +12,16 @@ Three separate concepts:
 ``ActionOutcome``
     How one attempt ended: terminal status, what it produced, what it cost.
 
+``AttemptPhase``
+    How far one attempt got in making itself durable. Orthogonal to
+    status: a succeeded attempt whose result is still only in memory has
+    not survived anything yet.
+
+``SettlementBasis``
+    Where the figure an attempt was charged came from. A measurement and
+    a defensible guess are both legitimate charges and they are not the
+    same fact, so the record says which it is holding.
+
 The lifecycle::
 
     (action proposed/selected)
@@ -34,6 +44,112 @@ from enum import StrEnum
 from .actions import ResearchAction
 from .budget import NO_COST, ResourceCost
 from .ids import occurrence_id
+
+
+class SettlementBasis(StrEnum):
+    """Where the amount an attempt was charged came from.
+
+    A charge is a number and a claim about that number. ``MEASURED``
+    claims the work reported this cost. ``CONSERVATIVE_MAX`` claims
+    something weaker and more important: *nobody knows what this cost*,
+    and the authorized maximum was charged because it is the only figure
+    the run can defend.
+
+    The two are kept apart because conflating them would make the record
+    safe and untrue. An attempt a crash left unaccounted for did not
+    "cost its reservation" — it cost an unknown amount, and the ledger
+    moved by the reservation. Writing the second down as if it were the
+    first turns a deliberate over-charge into a measurement nobody took,
+    and every later reading of the run inherits the error.
+    """
+
+    NONE = "none"
+    """Nothing was settled by this event."""
+
+    MEASURED = "measured"
+    """The work reported what it cost, and this is that figure."""
+
+    CONSERVATIVE_MAX = "conservative_max"
+    """The actual cost is unknown. The authorized maximum was charged
+    instead: it cannot understate what was authorized, and erring toward
+    recording more is the only safe direction when the truth is
+    unavailable."""
+
+
+class AttemptPhase(StrEnum):
+    """How far an attempt got in writing itself down.
+
+    ``AttemptStatus`` says whether the science worked. This says whether
+    the record of it would survive the process dying, which is a
+    different question with a different answer at every moment in
+    between::
+
+        STARTED -> SUBMITTED -> OUTPUTS_DURABLE -> BUNDLE_DURABLE
+                -> COMMITTED -> COMPLETED
+
+    Phases may be skipped — an attempt that runs no job never reaches
+    ``SUBMITTED`` — but they never go backwards, and every attempt
+    begins at ``STARTED``. Two phases end an attempt early instead:
+    ``RELEASED`` when nothing was bought, ``ABANDONED`` when something
+    was.
+
+    The first two are written *before* the thing they name, and the rest
+    *after*. That asymmetry is deliberate. An intent recorded early can
+    be checked afterwards, because the job id is derived rather than
+    minted, so "was this ever submitted?" has an answer; a side effect
+    nobody wrote down first is undiscoverable. A durability claim is the
+    other way round: it is only true once the bytes are there.
+    """
+
+    STARTED = "started"
+    """A reservation is about to be posted and the attempt is about to
+    run. Carries the state it begins from, the amount to be held, and
+    the job id it will use if it runs one."""
+
+    SUBMITTED = "submitted"
+    """The job is about to be handed to the executor. Recovery reattaches
+    to exactly this job id, or finds it was never submitted."""
+
+    OUTPUTS_DURABLE = "outputs_durable"
+    """The result and its evidence are in the store. The work is bought
+    and paid for; from here on nothing needs re-running."""
+
+    BUNDLE_DURABLE = "bundle_durable"
+    """The commit bundle is written. Applying it again produces the same
+    successor, so from here recovery can finish without the runtime."""
+
+    COMMITTED = "committed"
+    """The successor the bundle produces is persisted. The science has
+    landed; only the money is still open."""
+
+    COMPLETED = "completed"
+    """The debit is settled and nothing is owed. Carries what was
+    reserved, what was settled, and where that figure came from, so a
+    breach is two numbers on one row rather than a flag that could
+    contradict them."""
+
+    RELEASED = "released"
+    """Abandoned before it cost anything, its reservation given back.
+    Only written where nothing was bought can be *proven* — a role that
+    refused before calling anything, or an attempt whose job was never
+    submitted."""
+
+    ABANDONED = "abandoned"
+    """Abandoned after it had already cost something. The debit is
+    settled and no successor was produced: the work was bought, and the
+    reasoning that would have turned it into a state change is gone.
+    What it cost is usually unknown, which is what
+    :class:`SettlementBasis` is for."""
+
+    @property
+    def is_terminal(self) -> bool:
+        """Three ways to end, and the difference between them is what was
+        paid and what was produced."""
+        return self in {
+            AttemptPhase.COMPLETED,
+            AttemptPhase.RELEASED,
+            AttemptPhase.ABANDONED,
+        }
 
 
 class AttemptStatus(StrEnum):

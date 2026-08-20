@@ -55,6 +55,7 @@ from autonomous_research_lab.core.state import ResearchState
 from autonomous_research_lab.evidence.file_store import FileEvidenceStore
 from autonomous_research_lab.execution.binding import ContainerBinding, JobBinding
 from autonomous_research_lab.execution.local import LocalExecutor
+from autonomous_research_lab.execution.runner import DirectJobRunner
 from autonomous_research_lab.orchestration.director import RuleBasedFrontierDirector
 from autonomous_research_lab.orchestration.loop import (
     MissingRoleError,
@@ -568,7 +569,7 @@ def run_task(
     engineer = ModelBackedEngineer(
         provider=provider,
         model=model,
-        executor=LocalExecutor(root / "runs"),
+        runner=DirectJobRunner(LocalExecutor(root / "runs")),
         ledger=ledger,
         store=implementations,
         binding=binding,

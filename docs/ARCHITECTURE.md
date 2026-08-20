@@ -2116,6 +2116,161 @@ runtime persisted only each step's head, so every committed state named
 a parent nobody had written down, and a verifier calling such a run
 intact was saying something it could not know.
 
+## Recoverable attempts (Task 6D)
+
+Task 6C made a run resumable at *stage* boundaries. Inside a step it was
+not, and the reason was small and fatal: the ledger recorded that money
+moved and nothing recorded what the money bought. A process killed
+between the two left the ledger and the snapshots disagreeing, the next
+step refused to guess which was true, and an expensive experiment was
+lost. That is correct behaviour and it is not acceptable for a run that
+trains anything.
+
+Three records close the gap, and each is written in the one order that
+makes it useful.
+
+**Money is held before it is spent.** `EntryKind` gains `RESERVATION`
+and `RELEASE`. Neither moves the balance — nothing has been spent yet —
+so `balance()` keeps its meaning and a ledger written before this change
+replays byte for byte. What they move is `available()`, which is what a
+reservation is checked against: money another attempt is holding has
+been promised, and promising it twice is how two attempts both believe
+they can afford to run. One charge id passes through once — reserved,
+then settled or released, never both and never re-opened — so an
+interrupted attempt leaves a visible claim on the budget instead of a
+silence that reads as free money.
+
+**Every attempt writes down how far it got.** `program/journal.py` is
+the ledger's mechanism applied to a different question: sequence
+numbers as filenames, each event naming the one before it, publication
+by hard-linking a scratch file into place. The phases are
+
+```
+STARTED -> SUBMITTED -> OUTPUTS_DURABLE -> BUNDLE_DURABLE
+        -> COMMITTED -> COMPLETED
+```
+
+with `RELEASED` and `ABANDONED` as the two ways an attempt ends early —
+the first when nothing was bought, the second when something was. The
+first two phases are written *before* the thing they name and the rest
+*after*, and the asymmetry is the design. An intent recorded early can
+be checked afterwards, because the job id is derived from the attempt
+rather than minted, so "was this ever submitted?" has an answer; a side
+effect nobody wrote down first is undiscoverable. A durability claim is
+the other way round: it is only true once the bytes are there.
+
+**The effect of a step is stored before it is applied.** A `CommitBundle`
+is everything one attempt asks the state to accept, and until now it
+existed only in memory — which made the last few instructions of a step
+the most expensive thing in the system to lose. Written down first, they
+become a replay: the bundle is content-addressed, so applying it again
+reaches the same successor with the same id. Results and evidence are
+stored by reference, because a bundle is only written after its outputs
+are durable and a second copy is a second thing to keep in agreement.
+
+### What recovery does
+
+It runs before the chain steps again, and every open attempt gets one of
+two answers, turning on a single fact.
+
+| durable evidence | what happens |
+| --- | --- |
+| the bundle reached disk | apply it, settle the cost it records, close `COMPLETED` — nothing lost, nothing re-run |
+| it did not | settle the reservation in full, close `ABANDONED` — the work was bought and the reasoning that would have used it is gone |
+| nothing was ever held | release, close `RELEASED` — the one place "nothing was spent" is provable |
+
+The middle row can overcharge: an attempt killed a millisecond after it
+began pays its whole authorization. That is the deliberate direction to
+err in. Nothing on disk says what such an attempt cost, something
+usually was spent — a model call, a job, or both — and releasing money
+that may well be gone is precisely the failure this record exists to
+prevent. The authorized maximum is the only number the run can defend.
+
+**And it is recorded as what it is.** A charge is a number and a claim
+about that number, so the closing event carries a `SettlementBasis`
+alongside the figure: `MEASURED` when the work reported this cost,
+`CONSERVATIVE_MAX` when it did not and the authorization was charged in
+its place. The second says, on the record, that the actual cost is
+*unknown*.
+
+Without that field the ledger would stay safe and the history would
+become false. Every later reading of the run would inherit a figure
+nobody took, and — concretely — a conservative charge would count as a
+budget breach, because `settled` equals `reserved` and a naive
+comparison cannot tell a deliberate over-charge from an overrun. Only a
+measurement can breach; that is one line in `AttemptEvent.breached` and
+it is the line that keeps a crash from reading as a budget incident.
+
+Then one reconciliation, always: the state's budget is brought back to
+the ledger's balance. A process can die between settling a debit and
+persisting the state that paid it, and the two records then differ by
+exactly that debit. It is the state that moves, because the debit is
+what actually happened, and the correction only ever goes one way —
+inventing a credit to cover a ledger that lost a movement is how a
+bookkeeping failure becomes a bookkeeping fiction.
+
+Two things recovery never does. It never resubmits a job: job ids are
+derived from attempt ids, the executor refuses a second submission of
+one, and a retry is a new attempt by definition. And it never deletes a
+debit — a reservation already answered is left exactly as it is, which
+is what makes running recovery twice a no-op.
+
+### The overrun
+
+`_reconcile_cost` used to charge the largest affordable share of an
+overrun and post that clamped figure to the ledger. The defence was that
+posting the unclamped figure would desynchronise the two records, which
+was true; the conclusion was wrong. It kept them agreeing by making both
+of them wrong, and money spent above the budget appeared nowhere at all
+— which is exactly the failure a budget exists to make visible. The real
+figure is charged now, the remainder may go negative, and the run halts.
+A breach is not a new field: it is the closing journal event whose
+`actual` exceeds its `reserved`, two numbers already on the record that
+cannot contradict each other the way a flag and a figure can.
+
+### Who submits
+
+A role prepares work; it does not perform side effects. The engineer was
+quietly the exception — it built a job and then submitted, polled and
+collected it itself — and it is not any more. It takes a `JobRunner`,
+hands over a prepared job and receives a result, and a layering test
+enforces that nothing under `roles/` imports the executor contract or
+calls submit or collect. A role holding an executor can launch work
+nobody outside it recorded, and the boundaries either side of a
+submission are exactly where an interrupted run needs a durable note.
+
+### What is checked, and how
+
+`verify_run` gains an eighth check over six one-to-one links —
+reservation to attempt, debit to reservation, attempt to reservation,
+attempt to bundle, attempt to successor, attempt to job — plus one
+whole-run question: nothing may still be open. A run with no journal is
+skipped rather than faulted, because everything written before the
+journal existed is such a run.
+
+The proof is a sweep. One canary step makes sixteen durable writes, and
+the suite runs that step once per write, stopping immediately after it,
+and requires that recovery leaves a run which verifies from cold, owes
+nothing, has charged each attempt exactly once, and can take another
+step. Four of those positions run again as two real processes —
+`examples/torn_step.py`, killed with `os._exit`, resumed by a process
+that saw none of it. The sweep found two defects, both fixed here: a
+crash between `STARTED` and the reservation left an attempt the ledger
+had never heard of, and a crash between a settlement and the snapshot
+that paid it left the two records differing by exactly that debit.
+
+**Known limit, blocking PR4.** A job submitted inside the bounded repair
+loop is covered by its attempt's reservation but is not individually
+journalled, so a crash there abandons the attempt — charging the
+authorization — rather than reattaching to the rerun. The *accounting*
+is sound: nothing is hidden, nothing is paid twice, and the charge is
+marked `CONSERVATIVE_MAX`. The *execution recovery* is not. Under the
+current deterministic executor a lost rerun costs seconds; under PR4 it
+would cost a GPU job, and abandoning one of those is a real loss however
+honestly it is billed. Before PR4 lands, either every repair-loop job
+gets its own journalled attempt, or repairs are disabled for jobs above
+a cost threshold. See `docs/KNOWN_ISSUES.md`.
+
 ## Architectural invariants
 
 The list this pass was made against; each is enforced by at least one
@@ -2164,6 +2319,13 @@ the artifact bytes they point at are durable before any state may
 reference them, each stored record carries its own payload digest
 because these domain ids deliberately do not cover their content, and a
 whole run can be verified from cold by a process that wrote none of it.
+Money is held before it is spent and settled afterwards, so an attempt
+interrupted between the two leaves a claim on the budget rather than a
+silence; what an attempt actually cost is recorded in full, past its
+authorization and past the balance if that is what happened; an attempt
+nobody can account for is charged what it was authorized rather than
+released; and a charge nobody measured is recorded as a charge nobody
+measured.
 Every important research decision is reconstructible later.
 ```
 
@@ -2221,15 +2383,22 @@ admission     the governed bridge into research state: one named
               persistence, and the provider seam; nothing imports it)
 program       a funded run: one named admission, one authorized
               grant, a funded successor state, an append-only budget
-              ledger that is idempotent by charge id and safe under
-              concurrent debits, and the cold verification of a whole
-              run root  (depends on core, admission, persistence, and
-              evidence; nothing imports it)
+              ledger that holds money before an attempt spends it and
+              is idempotent by charge id, an attempt journal recording
+              how far each attempt got in making itself durable, and
+              the cold verification of a whole run root  (depends on
+              core, admission, persistence, and evidence; nothing
+              imports it)
 search        which move to take
 roles         who does the work, under what contract; the model-backed
-              engineer and planner
+              engineer and planner — which prepares a job and hands it
+              to trusted code rather than submitting it
 orchestration director, runtime loop, routing, triggers, bounded debug
               loop, role-backed review, atomic transitions, trajectory
+control       the composition root: one command over the seven stages,
+              the stage event log, and the recovery that finishes a
+              step a killed process left half done  (may import every
+              stage; nothing imports it)
 publication   reporting  (empty)
 ```
 

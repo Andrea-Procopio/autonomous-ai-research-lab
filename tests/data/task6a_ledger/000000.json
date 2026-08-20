@@ -1,0 +1,21 @@
+{
+  "amount": {
+    "gpu_hours": 100.0,
+    "model_tokens": 2000000,
+    "usd": 250.0,
+    "wall_clock_seconds": 86400.0
+  },
+  "balance_after": {
+    "gpu_hours": 100.0,
+    "model_tokens": 2000000,
+    "usd": 250.0,
+    "wall_clock_seconds": 86400.0
+  },
+  "charge_id": "fund_8a68f785bfa80471",
+  "id": "bent_f2e3108a79f3c566",
+  "kind": "grant",
+  "previous_entry_id": "",
+  "reason": "grant authorized by fund_8a68f785bfa80471",
+  "run_id": "run_71303a08659a48a9",
+  "sequence": 0
+}

@@ -9,7 +9,7 @@ Layout, under a program root::
             ├── 000001.json      a debit
             └── ...
 
-Four properties, each earning its mechanism.
+Five properties, each earning its mechanism.
 
 **Append-only.** An entry file is published by hard-linking a scratch
 file into place, which fails if the name is taken. Nothing rewrites an
@@ -22,16 +22,30 @@ entry before it and the balance after itself, so a deleted middle entry,
 a reordering, or a doctored amount contradicts the replay.
 
 **Idempotent.** Every posting carries a ``charge_id`` the caller already
-holds — an attempt id for a debit, the authorization id for the grant.
-Posting the same charge twice returns the entry already on the ledger
-and writes nothing. The same charge id for a different amount is a
-conflict, never a second debit.
+holds — an attempt id for a reservation and its settlement, the
+authorization id for the grant. Posting the same charge twice for the
+same kind of movement returns the entry already on the ledger and writes
+nothing. The same charge id for a different amount is a conflict, never
+a second debit. One charge id passes through the ledger once: reserved,
+then settled or released, never both and never re-opened.
 
 **Safe under concurrency.** The exclusive create *is* the lock. Two
 debits racing for one sequence number cannot both win; the loser
 reloads — the winner may have posted the very charge it was about to —
 and retries against the new head. A debit the balance cannot cover
-raises instead of overdrawing, so the ledger never goes negative.
+raises instead of overdrawing — except when it is settling a
+reservation, where the money is already gone and refusing to write it
+down would only hide it.
+
+**Held, not spent.** A long attempt can die between paying for something
+and recording what it bought. So money is *reserved* before the work
+starts and the reservation is answered afterwards — by the debit that
+settles it, or by the release that cancels it when recovery proves
+nothing was spent. An interrupted attempt therefore leaves a visible
+claim on the budget instead of a silence that reads as free money.
+Reservations do not move the balance, because nothing has been spent
+yet; they move what is *available*, which is the number to ask about
+before committing to anything.
 
 The ledger holds spend, not science. Nothing here knows what the money
 bought.
@@ -44,7 +58,12 @@ import os
 from pathlib import Path
 from typing import Final
 
-from ..core.budget import ResearchBudget, ResourceCost
+from ..core.budget import (
+    InsufficientBudgetError,
+    ResearchBudget,
+    ResourceCost,
+    Settlement,
+)
 from ..core.ids import occurrence_id
 from .authorization import FundingAuthorization
 from .records import BudgetEntry, EntryKind
@@ -126,11 +145,7 @@ class BudgetLedger:
                     f"{entry.previous_entry_id or 'nothing'}, but the "
                     f"entry before it is {previous_id or 'nothing'}"
                 )
-            balance = (
-                _as_budget(entry.amount)
-                if entry.kind is EntryKind.GRANT
-                else balance.spend(entry.amount)
-            )
+            balance = _replayed(balance, entry)
             if balance != entry.balance_after:
                 raise LedgerIntegrityError(
                     f"entry {path.name} records a balance of "
@@ -147,9 +162,50 @@ class BudgetLedger:
         entries = self.entries()
         return entries[-1].balance_after if entries else ResearchBudget.zero()
 
-    def entry_for_charge(self, charge_id: str) -> BudgetEntry | None:
+    def available(self) -> ResearchBudget:
+        """What may still be committed: the balance, less every
+        reservation still waiting to be answered.
+
+        Never negative. A breached attempt can debit more than the
+        balance held, leaving other reservations outstanding against
+        nothing; that is a real event and it is recorded in full on the
+        debit, but "less than nothing is available" is not a fact about
+        money — it means nothing is available, which is what this
+        returns.
+        """
+        entries = self.entries()
+        return _minus(_balance_of(entries), _held(_open_reservations(entries)))
+
+    def reserved(self) -> ResourceCost:
+        """The total held by reservations nobody has answered yet."""
+        return _held(self.reservations())
+
+    def reservations(self) -> tuple[BudgetEntry, ...]:
+        """Every reservation still open, in the order it was posted."""
+        return _open_reservations(self.entries())
+
+    def holds(self, charge_id: str, /) -> bool:
+        """Whether a reservation was ever posted for ``charge_id``, open
+        or already answered."""
+        return (
+            self.entry_for_charge(charge_id, kind=EntryKind.RESERVATION)
+            is not None
+        )
+
+    def entry_for_charge(
+        self, charge_id: str, *, kind: EntryKind | None = None
+    ) -> BudgetEntry | None:
+        """The first entry posted under ``charge_id``, or the first of
+        that ``kind`` — one attempt id can name a reservation and the
+        movement that answered it."""
         return next(
-            (e for e in self.entries() if e.charge_id == charge_id), None
+            (
+                e
+                for e in self.entries()
+                if e.charge_id == charge_id
+                and (kind is None or e.kind is kind)
+            ),
+            None,
         )
 
     def require_balance(self, expected: ResearchBudget) -> None:
@@ -197,6 +253,98 @@ class BudgetLedger:
             reason=reason,
         )
 
+    def reserve(
+        self, cost: ResourceCost, *, charge_id: str, reason: str
+    ) -> BudgetEntry:
+        """Hold ``cost`` against the budget without spending it.
+
+        This is where a run is refused for lack of money, and the only
+        place: a reservation the available balance cannot cover raises
+        rather than authorizing work that cannot be paid for. Reserving
+        the same charge twice returns the first reservation and holds
+        nothing further.
+        """
+        if cost.is_zero:
+            raise ValueError(
+                "a zero reservation holds nothing and would still consume "
+                "a sequence number"
+            )
+        return self._post(
+            kind=EntryKind.RESERVATION,
+            amount=cost,
+            charge_id=charge_id,
+            reason=reason,
+        )
+
+    def release(self, *, charge_id: str, reason: str) -> BudgetEntry:
+        """Cancel an open reservation, spending nothing.
+
+        The release carries the amount it gives back, so a reader of the
+        ledger alone can see what stopped being held and when.
+        """
+        held = self._reservation_for(charge_id)
+        return self._post(
+            kind=EntryKind.RELEASE,
+            amount=held.amount,
+            charge_id=charge_id,
+            reason=reason,
+        )
+
+    def settle(
+        self, cost: ResourceCost, *, charge_id: str, reason: str
+    ) -> Settlement:
+        """Answer an open reservation with what the attempt actually cost.
+
+        The debit is posted in full even when it exceeds the amount that
+        was reserved, and even when it exceeds the balance — the money
+        is gone either way, and a ledger that recorded the smaller number
+        would be a ledger that hides overruns. The returned settlement
+        says whether the authorization was breached; acting on that is
+        the caller's job, not the ledger's.
+
+        An attempt that cost nothing is released rather than debited: a
+        zero debit records nothing and would still take a sequence
+        number.
+
+        Settling twice with the same figure settles once — recovery
+        re-drives this after a crash, and a second debit for one attempt
+        would be the exact fault the journal exists to prevent.
+        """
+        held = self._reservation_for(charge_id)
+        entry = (
+            self.release(charge_id=charge_id, reason=reason)
+            if cost.is_zero
+            else self._post(
+                kind=EntryKind.DEBIT,
+                amount=cost,
+                charge_id=charge_id,
+                reason=reason,
+                overdraw=True,
+            )
+        )
+        return Settlement(
+            charge_id=charge_id,
+            reserved=held.amount,
+            actual=cost,
+            entry_id=entry.id,
+        )
+
+    def _reservation_for(self, charge_id: str) -> BudgetEntry:
+        """The reservation this charge was authorized by, open or not.
+
+        Answered reservations are returned too, so that re-driving a
+        settlement after a crash reaches the idempotent path instead of
+        failing on a reservation its own debit has already closed.
+        """
+        held = self.entry_for_charge(charge_id, kind=EntryKind.RESERVATION)
+        if held is None:
+            raise LedgerIntegrityError(
+                f"ledger {self._run_id} holds no reservation for "
+                f"{charge_id}; every debit answers an authorization, and "
+                f"there is none here to answer"
+            )
+        return held
+
     def _post(
         self,
         *,
@@ -204,12 +352,13 @@ class BudgetLedger:
         amount: ResourceCost,
         charge_id: str,
         reason: str,
+        overdraw: bool = False,
     ) -> BudgetEntry:
         for _ in range(_MAX_POST_ATTEMPTS):
             entries = self.entries()
-            existing = next(
-                (e for e in entries if e.charge_id == charge_id), None
-            )
+            history = tuple(e for e in entries if e.charge_id == charge_id)
+            _require_unanswered(history, kind, charge_id)
+            existing = next((e for e in history if e.kind is kind), None)
             if existing is not None:
                 return _require_same_posting(existing, kind, amount, reason)
             if kind is EntryKind.GRANT:
@@ -219,13 +368,21 @@ class BudgetLedger:
                         f"{entries[0].charge_id}; a run is funded once"
                     )
                 balance = _as_budget(amount)
+            elif not entries:
+                raise LedgerIntegrityError(
+                    f"ledger {self._run_id} has no grant; a debit "
+                    f"before the grant would bill nothing"
+                )
+            elif kind is EntryKind.DEBIT:
+                balance = entries[-1].balance_after.spend(
+                    amount, allow_overdraw=overdraw
+                )
             else:
-                if not entries:
-                    raise LedgerIntegrityError(
-                        f"ledger {self._run_id} has no grant; a debit "
-                        f"before the grant would bill nothing"
-                    )
-                balance = entries[-1].balance_after.spend(amount)
+                # A reservation and a release move what is available,
+                # not what is left.
+                balance = entries[-1].balance_after
+                if kind is EntryKind.RESERVATION:
+                    _require_affordable(entries, amount, self._run_id)
             entry = BudgetEntry(
                 run_id=self._run_id,
                 sequence=len(entries),
@@ -291,6 +448,96 @@ class BudgetLedger:
                 f"re-derives {entry.id}; the file was edited"
             )
         return entry
+
+
+def _replayed(balance: ResearchBudget, entry: BudgetEntry) -> ResearchBudget:
+    """The balance after ``entry``, computed rather than trusted.
+
+    Overdrawing is allowed here because this is a replay: the entry is
+    already written, and a reader that refused to add up a ledger
+    recording an overrun could not report the overrun.
+    """
+    if entry.kind is EntryKind.GRANT:
+        return _as_budget(entry.amount)
+    if entry.kind is EntryKind.DEBIT:
+        return balance.spend(entry.amount, allow_overdraw=True)
+    return balance
+
+
+def _balance_of(entries: tuple[BudgetEntry, ...]) -> ResearchBudget:
+    return entries[-1].balance_after if entries else ResearchBudget.zero()
+
+
+_ANSWERS: Final = frozenset({EntryKind.DEBIT, EntryKind.RELEASE})
+"""The two ways a reservation stops being open."""
+
+
+def _open_reservations(
+    entries: tuple[BudgetEntry, ...],
+) -> tuple[BudgetEntry, ...]:
+    answered = {e.charge_id for e in entries if e.kind in _ANSWERS}
+    return tuple(
+        entry
+        for entry in entries
+        if entry.kind is EntryKind.RESERVATION
+        and entry.charge_id not in answered
+    )
+
+
+def _held(reservations: tuple[BudgetEntry, ...]) -> ResourceCost:
+    total = ResourceCost()
+    for entry in reservations:
+        total = total + entry.amount
+    return total
+
+
+def _minus(balance: ResearchBudget, held: ResourceCost) -> ResearchBudget:
+    """The balance less what is held, floored at nothing in every
+    dimension."""
+    return ResearchBudget(
+        wall_clock_seconds=max(
+            0.0, balance.wall_clock_seconds - held.wall_clock_seconds
+        ),
+        gpu_hours=max(0.0, balance.gpu_hours - held.gpu_hours),
+        usd=max(0.0, balance.usd - held.usd),
+        model_tokens=max(0, balance.model_tokens - held.model_tokens),
+    )
+
+
+def _require_unanswered(
+    history: tuple[BudgetEntry, ...], kind: EntryKind, charge_id: str
+) -> None:
+    """A reservation is answered exactly once, and never re-opened.
+
+    Re-posting the answer itself is the idempotent path and is handled
+    by the caller. Everything else that touches an answered charge — a
+    second reservation, a release after a debit, a debit after a release
+    — is a bookkeeping error and says so.
+    """
+    answered = next((e for e in history if e.kind in _ANSWERS), None)
+    if answered is not None and answered.kind is not kind:
+        raise LedgerConflictError(
+            f"charge {charge_id} is already answered by a "
+            f"{answered.kind} of {answered.amount}; a reservation is "
+            f"answered once, and money already settled is not held again"
+        )
+
+
+def _require_affordable(
+    entries: tuple[BudgetEntry, ...], amount: ResourceCost, run_id: str
+) -> None:
+    """Where a run is refused for lack of money.
+
+    Against what is available, not what is left: money another attempt
+    is already holding has been promised, and promising it twice is how
+    two attempts both believe they can afford to run.
+    """
+    available = _minus(_balance_of(entries), _held(_open_reservations(entries)))
+    if not available.can_afford(amount):
+        raise InsufficientBudgetError(
+            f"ledger {run_id} cannot hold {amount}: {available} is "
+            f"available once open reservations are counted"
+        )
 
 
 def _require_same_posting(

@@ -35,8 +35,10 @@ from typing import Final
 from ..core.budget import ResearchBudget
 from ..core.state import ResearchState
 from ..persistence import FileStateStore
+from ..persistence.commit_store import CommitBundleStore
 from .authorization import FundingAuthorization
 from .directive import RunDirective
+from .journal import RunJournal
 from .ledger import BudgetLedger
 from .records import ResearchRun
 
@@ -255,6 +257,15 @@ class ProgramStore:
 
     def ledger_for(self, run_id: str) -> BudgetLedger:
         return BudgetLedger(self._root, run_id)
+
+    def journal_for(self, run_id: str) -> RunJournal:
+        return RunJournal(self._root, run_id)
+
+    def bundles(self) -> CommitBundleStore:
+        """Commit bundles are stored per program root, not per run: they
+        are content-addressed, so two runs that somehow produced the same
+        effect would share one record rather than disagree about it."""
+        return CommitBundleStore(self._root)
 
 
 # -- payloads ------------------------------------------------------------------

@@ -29,8 +29,10 @@ from autonomous_research_lab.execution.executor import (
     Executor,
     ExperimentJob,
     JobStatus,
+    derive_job_id,
 )
 from autonomous_research_lab.execution.local import LocalExecutor
+from autonomous_research_lab.execution.runner import DirectJobRunner
 from autonomous_research_lab.roles.base import (
     RoleContext,
     RoleInvocation,
@@ -135,7 +137,7 @@ def _engineer(
     engineer = ModelBackedEngineer(
         provider=provider,
         model="test-model",
-        executor=executor or LocalExecutor(tmp_path / "runs"),
+        runner=DirectJobRunner(executor or LocalExecutor(tmp_path / "runs")),
         ledger=ledger,
         store=store,
         binding=HostPythonBinding(timeout_seconds=60.0),
@@ -151,6 +153,7 @@ def _invocation(
     action_type: ResearchActionType = ResearchActionType.RUN_EXPERIMENT,
     results: tuple[ExperimentResult, ...] = (),
     experiments: tuple[ExperimentSpec, ...] | None = None,
+    attempt_id: str = "",
 ) -> RoleInvocation:
     action = ResearchAction(
         action_type=action_type, rationale="assigned", targets=(spec.id,)
@@ -165,6 +168,7 @@ def _invocation(
         ),
         allowed_actions=frozenset({action_type}),
         expected_output=frozenset({ProposalKind.RESULT}),
+        attempt_id=attempt_id,
     )
 
 
@@ -363,11 +367,13 @@ def test_a_failing_preflight_prevents_execution_but_keeps_the_record(
             entrypoint: str,
             config: object,
             seed: int | None,
+            job_id: str = "",
         ) -> ExperimentJob:
             return ExperimentJob(
                 spec_id=spec_id,
                 command=("no-such-binary-anywhere", str(source_dir / entrypoint)),
                 seed=seed,
+                id=job_id,
             )
 
     provider = FakeModelProvider((_reply(),))
@@ -375,7 +381,7 @@ def test_a_failing_preflight_prevents_execution_but_keeps_the_record(
     engineer = ModelBackedEngineer(
         provider=provider,
         model="test-model",
-        executor=ForbiddenExecutor(),
+        runner=DirectJobRunner(ForbiddenExecutor()),
         ledger=UsageLedger(),
         store=store,
         binding=UnresolvableBinding(),
@@ -550,3 +556,85 @@ def test_a_disappointing_result_returns_normally(tmp_path: Path) -> None:
     assert isinstance(proposal, ResultProposal)
     assert proposal.result.succeeded  # completed; its value is not our call
     assert proposal.result.metrics["score"] == 0.01
+
+
+# -- 7. the role prepares work; trusted code runs it ---------------------------
+
+
+class RecordingRunner:
+    """A ``JobRunner`` that remembers what it was handed."""
+
+    def __init__(self, executor: LocalExecutor) -> None:
+        self._direct = DirectJobRunner(executor)
+        self.jobs: list[ExperimentJob] = []
+        self.attempts: list[str] = []
+
+    def run(
+        self, job: ExperimentJob, attempt_id: str = "", /
+    ) -> ExperimentResult:
+        self.jobs.append(job)
+        self.attempts.append(attempt_id)
+        return self._direct.run(job, attempt_id)
+
+
+def test_the_engineer_hands_its_job_over_rather_than_submitting_it(
+    tmp_path: Path,
+) -> None:
+    runner = RecordingRunner(LocalExecutor(tmp_path / "runs"))
+    provider = FakeModelProvider((_reply(),))
+    engineer = ModelBackedEngineer(
+        provider=provider,
+        model="test-model",
+        runner=runner,
+        ledger=UsageLedger(),
+        store=ImplementationStore(tmp_path / "implementations"),
+        binding=HostPythonBinding(timeout_seconds=60.0),
+        template=TEMPLATE,
+    )
+
+    (proposal,) = engineer.perform(_invocation(_spec(), attempt_id="att_1"))
+
+    assert len(runner.jobs) == 1
+    assert runner.attempts == ["att_1"]
+    assert isinstance(proposal, ResultProposal)
+
+
+def test_the_job_carries_the_id_derived_from_the_attempt(
+    tmp_path: Path,
+) -> None:
+    """Trusted code knows the job's id before the job exists, which is
+    what lets a later process find it."""
+    runner = RecordingRunner(LocalExecutor(tmp_path / "runs"))
+    engineer = ModelBackedEngineer(
+        provider=FakeModelProvider((_reply(),)),
+        model="test-model",
+        runner=runner,
+        ledger=UsageLedger(),
+        store=ImplementationStore(tmp_path / "implementations"),
+        binding=HostPythonBinding(timeout_seconds=60.0),
+        template=TEMPLATE,
+    )
+
+    engineer.perform(_invocation(_spec(), attempt_id="att_1"))
+
+    assert runner.jobs[0].id == derive_job_id("att_1")
+
+
+def test_without_an_attempt_the_job_mints_its_own_id(tmp_path: Path) -> None:
+    """Nothing to recover, so nothing to derive from."""
+    runner = RecordingRunner(LocalExecutor(tmp_path / "runs"))
+    engineer = ModelBackedEngineer(
+        provider=FakeModelProvider((_reply(),)),
+        model="test-model",
+        runner=runner,
+        ledger=UsageLedger(),
+        store=ImplementationStore(tmp_path / "implementations"),
+        binding=HostPythonBinding(timeout_seconds=60.0),
+        template=TEMPLATE,
+    )
+
+    engineer.perform(_invocation(_spec()))
+
+    assert runner.jobs[0].id.startswith("job_")
+    # An occurrence id, not a derivation: there is no attempt to derive from.
+    assert runner.jobs[0].id != derive_job_id("att_1")

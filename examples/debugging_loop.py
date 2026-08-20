@@ -42,9 +42,16 @@ from autonomous_research_lab.core.proposals import Proposal, ResultProposal
 from autonomous_research_lab.core.question import ResearchQuestion
 from autonomous_research_lab.core.state import ResearchState
 from autonomous_research_lab.evidence.file_store import FileEvidenceStore
-from autonomous_research_lab.execution.executor import ExperimentJob
+from autonomous_research_lab.execution.executor import (
+    ExperimentJob,
+    job_id_for_attempt,
+)
 from autonomous_research_lab.execution.failure_classifier import FailureDiagnosis
 from autonomous_research_lab.execution.local import LocalExecutor
+from autonomous_research_lab.execution.runner import (
+    DirectJobRunner,
+    JobRunner,
+)
 from autonomous_research_lab.orchestration.debug_loop import (
     ExperimentDebugger,
     RepairProposal,
@@ -112,9 +119,9 @@ class DemoEngineer(ResearchRole):
     configured data path (which case A deliberately breaks)."""
 
     def __init__(
-        self, executor: LocalExecutor, data_path: Path, *, preflight: bool
+        self, runner: JobRunner, data_path: Path, *, preflight: bool
     ) -> None:
-        self._executor = executor
+        self._runner = runner
         self._data_path = data_path
         self._preflight = preflight
 
@@ -141,10 +148,11 @@ class DemoEngineer(ResearchRole):
             config={"data_path": str(self._data_path)},
             seed=spec.seeds[0],
             timeout_seconds=60.0,
+            id=job_id_for_attempt(invocation.attempt_id),
         )
         if self._preflight:
             require_preflight(job, spec)
-        result = self._executor.collect(self._executor.submit(job))
+        result = self._runner.run(job, invocation.attempt_id)
         return (ResultProposal(result=result, proposer="demo:engineer"),)
 
 
@@ -279,7 +287,7 @@ def _runtime(
         director=RuleBasedFrontierDirector(),
         roles={
             RoleName.RESEARCH_ENGINEER: DemoEngineer(
-                executor,
+                DirectJobRunner(executor),
                 data_path,
                 preflight=preflight and config.preflight_enabled,
             ),

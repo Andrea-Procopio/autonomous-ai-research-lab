@@ -60,8 +60,15 @@ from autonomous_research_lab.core.question import ResearchQuestion
 from autonomous_research_lab.core.state import ResearchState
 from autonomous_research_lab.evidence.file_store import FileEvidenceStore
 from autonomous_research_lab.evidence.store import EvidenceStore
-from autonomous_research_lab.execution.executor import ExperimentJob
+from autonomous_research_lab.execution.executor import (
+    ExperimentJob,
+    job_id_for_attempt,
+)
 from autonomous_research_lab.execution.local import LocalExecutor
+from autonomous_research_lab.execution.runner import (
+    DirectJobRunner,
+    JobRunner,
+)
 from autonomous_research_lab.orchestration.director import RuleBasedFrontierDirector
 from autonomous_research_lab.orchestration.loop import (
     ResearchRuntime,
@@ -228,8 +235,8 @@ class DemoEngineer(ResearchRole):
     """The executor seat: short-lived, isolated, given a spec and its prior
     runs — nothing else."""
 
-    def __init__(self, executor: LocalExecutor) -> None:
-        self._executor = executor
+    def __init__(self, runner: JobRunner) -> None:
+        self._runner = runner
 
     @property
     def name(self) -> RoleName:
@@ -259,9 +266,9 @@ class DemoEngineer(ResearchRole):
             seed=seed,
             timeout_seconds=120.0,
             required_artifacts=("metrics.json",),
+            id=job_id_for_attempt(invocation.attempt_id),
         )
-        job_id = self._executor.submit(job)
-        result = self._executor.collect(job_id)
+        result = self._runner.run(job, invocation.attempt_id)
         return (ResultProposal(result=result, proposer="executor:local"),)
 
 
@@ -422,7 +429,7 @@ def run_runtime_loop(
                 threshold=threshold, seeds=seeds
             ),
             RoleName.RESEARCH_ENGINEER: DemoEngineer(
-                LocalExecutor(root / "runs")
+                DirectJobRunner(LocalExecutor(root / "runs"))
             ),
             RoleName.RESULT_ANALYST: DemoCritic(),
         },

@@ -44,6 +44,7 @@ membership, is what transitions guarantee atomically.
 
 from __future__ import annotations
 
+from ..core.budget import ResourceCost
 from ..core.commit import CommitBundle
 from ..core.experiment import ExperimentResult, ExperimentStatus, ResultRef
 from ..core.prediction import Consistency, Prediction, PredictionTest
@@ -131,6 +132,23 @@ def commit_bundle(
         )
 
     return working.resolve_attempt(attempt.resolved(bundle.outcome))
+
+
+def reconcile_charge(
+    state: ResearchState, cost: ResourceCost
+) -> ResearchState:
+    """A successor whose budget is ``cost`` smaller, and nothing else.
+
+    The seam recovery charges through. The state and the ledger are two
+    records of one number, and a process that died between moving them
+    left them disagreeing; this is how the disagreement ends — by moving
+    the one that lagged, never by adjusting the one that led.
+
+    Overdrawing is allowed because this is a report, not a request. The
+    money is gone whether or not the budget covered it, and a remainder
+    clamped at zero would say otherwise.
+    """
+    return state.charge(cost, allow_overdraw=True)
 
 
 def _commit_question(

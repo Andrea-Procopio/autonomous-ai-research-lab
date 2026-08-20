@@ -247,6 +247,40 @@ def test_roles_never_construct_experiment_results() -> None:
     assert violations == []
 
 
+def test_roles_never_submit_work() -> None:
+    """A role prepares work; trusted code performs it.
+
+    The engineer was the one exception — it built a job and then
+    submitted, polled and collected it itself — and it is not any more.
+    A role holding an executor can launch work nobody outside it
+    recorded, and the two boundaries either side of a submission are
+    exactly where an interrupted run needs a durable note. So no module
+    under ``roles`` may import the executor contract or call ``submit``,
+    ``status`` or ``collect``: it asks a ``JobRunner`` to run one job and
+    is handed the result."""
+    forbidden_calls = {"submit", "collect"}
+    violations: list[str] = []
+    for path in sorted(ROLES.rglob("*.py")):
+        source = path.read_text()
+        tree = ast.parse(source, filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                names = {alias.name for alias in node.names}
+                if names & {"Executor", "LocalExecutor"}:
+                    violations.append(
+                        f"{path.name}: imports the executor contract"
+                    )
+            elif (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr in forbidden_calls
+            ):
+                violations.append(
+                    f"{path.name}:{node.lineno}: calls {node.func.attr}()"
+                )
+    assert violations == []
+
+
 def test_literature_depends_on_core_alone() -> None:
     """The literature boundary sees the identity and type helpers in
     ``core`` and nothing else in the package: no runtime, no roles, no
