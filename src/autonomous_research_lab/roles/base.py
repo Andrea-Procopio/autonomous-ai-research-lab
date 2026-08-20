@@ -184,6 +184,14 @@ class RoleInvocation:
     budget: ResourceCost = NO_COST
     """The most this invocation may spend, not a program-level budget."""
 
+    attempt_id: str = ""
+    """The attempt this invocation serves, when the caller is running one.
+
+    A role never needs it to do its work. What it names is the unit the
+    *runtime* accounts for — the reservation, the journal, the derived
+    job id — so that work a role hands to trusted code can be tied to the
+    record of what it cost. Empty where no attempt is in play."""
+
     id: str = field(default="")
 
     def __post_init__(self) -> None:

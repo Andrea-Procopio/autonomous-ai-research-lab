@@ -32,6 +32,7 @@ from autonomous_research_lab.core.state import ResearchState
 from autonomous_research_lab.evidence.store import InMemoryEvidenceStore
 from autonomous_research_lab.execution.binding import HostPythonBinding
 from autonomous_research_lab.execution.local import LocalExecutor
+from autonomous_research_lab.execution.runner import DirectJobRunner
 from autonomous_research_lab.orchestration.director import RuleBasedFrontierDirector
 from autonomous_research_lab.orchestration.loop import ResearchRuntime
 from autonomous_research_lab.roles.base import RoleName
@@ -174,7 +175,7 @@ def _runtime(
     engineer = ModelBackedEngineer(
         provider=FakeModelProvider(replies),
         model="test-model",
-        executor=LocalExecutor(tmp_path / "runs"),
+        runner=DirectJobRunner(LocalExecutor(tmp_path / "runs")),
         ledger=ledger,
         store=implementations,
         binding=HostPythonBinding(timeout_seconds=60.0),

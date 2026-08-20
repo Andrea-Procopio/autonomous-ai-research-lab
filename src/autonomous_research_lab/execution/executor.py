@@ -58,6 +58,16 @@ def derive_job_id(attempt_id: str) -> str:
     return content_id("job", attempt_id)
 
 
+def job_id_for_attempt(attempt_id: str) -> str:
+    """The derived id when an attempt is named, and none when it is not.
+
+    The "none" case is not an oversight. A job run outside any accounted
+    attempt has nobody who will need to find it again, and minting an
+    occurrence id for it is honest about that.
+    """
+    return derive_job_id(attempt_id) if attempt_id.strip() else ""
+
+
 class JobStatus(StrEnum):
     PENDING = "pending"
     RUNNING = "running"

@@ -106,6 +106,7 @@ def test_fast_path_needs_no_separate_evaluator_calls(tmp_path: Path) -> None:
     selection — and the intermediate candidate set is still logged."""
     from autonomous_research_lab.evidence.store import InMemoryEvidenceStore
     from autonomous_research_lab.execution.local import LocalExecutor
+    from autonomous_research_lab.execution.runner import DirectJobRunner
     from autonomous_research_lab.orchestration.loop import ResearchRuntime
     from autonomous_research_lab.roles.base import RoleName
     from autonomous_research_lab.runtime.playbook import EmpiricalMLPlaybook
@@ -123,7 +124,7 @@ def test_fast_path_needs_no_separate_evaluator_calls(tmp_path: Path) -> None:
         roles={
             RoleName.RESEARCH_DIRECTOR: DemoScientist(threshold=0.55, seeds=(7,)),
             RoleName.RESEARCH_ENGINEER: DemoEngineer(
-                LocalExecutor(tmp_path / "runs")
+                DirectJobRunner(LocalExecutor(tmp_path / "runs"))
             ),
             RoleName.RESULT_ANALYST: DemoCritic(),
         },

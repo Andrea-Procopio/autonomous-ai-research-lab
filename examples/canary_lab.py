@@ -56,8 +56,15 @@ from autonomous_research_lab.core.proposals import (
     ResultProposal,
 )
 from autonomous_research_lab.core.state import ResearchState
-from autonomous_research_lab.execution.executor import ExperimentJob
+from autonomous_research_lab.execution.executor import (
+    ExperimentJob,
+    job_id_for_attempt,
+)
 from autonomous_research_lab.execution.local import LocalExecutor
+from autonomous_research_lab.execution.runner import (
+    DirectJobRunner,
+    JobRunner,
+)
 from autonomous_research_lab.ideation.records import problem_key, theme_key
 from autonomous_research_lab.literature.retrieval import (
     AccessLevel,
@@ -917,10 +924,10 @@ class CanaryScientist(ResearchRole):
 
 
 class CanaryEngineer(ResearchRole):
-    """Runs the designed experiment through the ordinary local executor."""
+    """Prepares the designed experiment; trusted code runs it."""
 
-    def __init__(self, executor: LocalExecutor) -> None:
-        self._executor = executor
+    def __init__(self, runner: JobRunner) -> None:
+        self._runner = runner
 
     @property
     def name(self) -> RoleName:
@@ -951,9 +958,9 @@ class CanaryEngineer(ResearchRole):
             seed=seed,
             timeout_seconds=120.0,
             required_artifacts=("metrics.json",),
+            id=job_id_for_attempt(invocation.attempt_id),
         )
-        job_id = self._executor.submit(job)
-        result = self._executor.collect(job_id)
+        result = self._runner.run(job, invocation.attempt_id)
         return (ResultProposal(result=result, proposer="executor:local"),)
 
 
@@ -1044,7 +1051,7 @@ class CanaryLab:
             roles={
                 RoleName.RESEARCH_DIRECTOR: CanaryScientist(),
                 RoleName.RESEARCH_ENGINEER: CanaryEngineer(
-                    LocalExecutor(request.root / "runs")
+                    DirectJobRunner(LocalExecutor(request.root / "runs"))
                 ),
                 RoleName.RESULT_ANALYST: CanaryAnalyst(),
             },

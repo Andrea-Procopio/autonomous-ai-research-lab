@@ -432,6 +432,7 @@ class ResearchRuntime:
             allowed_actions=frozenset({action.action_type}),
             expected_output=expected_proposals(action.action_type),
             budget=estimated,
+            attempt_id=attempt.id,
         )
 
         failures = 0
