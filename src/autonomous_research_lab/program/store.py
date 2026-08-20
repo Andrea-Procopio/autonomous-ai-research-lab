@@ -1,7 +1,10 @@
 """Durable storage for research runs, mirroring the admission store.
 
 One directory per record kind — directives, authorizations, and run
-envelopes — plus ``ledgers/`` for the append-only budget entries
+envelopes (in ``envelopes/``, not ``runs/``: a run root also holds the
+executor's ``runs/`` job directories, and two meanings of one name in
+one tree is a trap worth not setting) — plus ``ledgers/`` for the
+append-only budget entries
 (:class:`~.ledger.BudgetLedger` owns those) and ``states/`` for the state
 snapshots, managed by the house
 :class:`~..persistence.state_store.FileStateStore` derived from the same
@@ -41,7 +44,7 @@ _RECORD_SUFFIX: Final = ".json"
 
 _DIRECTIVES: Final = "directives"
 _AUTHORIZATIONS: Final = "authorizations"
-_RUNS: Final = "runs"
+_RUNS: Final = "envelopes"
 
 
 class ProgramConflictError(RuntimeError):
