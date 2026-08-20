@@ -1,0 +1,53 @@
+{
+  "label": "Task 6C replay of the preserved 5B.1-5F chain",
+  "model": "muse-spark-1.2",
+  "brief": {
+    "topic": "in-context learning in large language models: mechanisms, efficiency, and robustness",
+    "cutoff_date": "2026-08-18",
+    "recent_window_start": "2025-08-18",
+    "workshop_hints": [
+      "workshop scope: understanding and improving in-context learning",
+      "topics of interest: mechanisms of ICL, efficient adaptation, robustness under distribution shift, evaluation practices"
+    ],
+    "max_queries_per_family": 1,
+    "results_per_query": 15,
+    "max_screened_sources": 80,
+    "max_extracted_sources": 12,
+    "max_model_calls": 40,
+    "refinement_rounds": 1
+  },
+  "cfp": {
+    "source_url": "https://www.fllmpt-work.shop/call/",
+    "supplied_at": "2026-08-19",
+    "text": "Workshop on Foundations of LLM Post-Training in Changing Environments\nA NeurIPS 2026 workshop. Paris, December 12-13, 2026.\n\nLarge language models are inherently multitask systems, adapted through\nmethods such as instruction tuning, preference-based updates, and domain\nadaptation. Deployed systems face evolving tasks, data distribution\ndrift, and shifting feedback signals, yet current post-training practice\nis largely heuristic, with incomplete understanding of statistical\nidentifiability, optimization dynamics, robustness to misspecification,\nand trade-offs between adaptation and capability preservation.\n\nTopics of interest include:\n- preference feedback as data: statistical modeling of preference\n  signals, heterogeneous annotators, and noise\n- robustness and valid inference: conditions for reliable post-training\n  updates and uncertainty quantification methods\n- adaptive data collection and feedback loops: sequential data\n  collection effects and selection bias in evolving contexts\n- adaptation mechanisms and limits: understanding parameter-efficient\n  methods and capability preservation trade-offs\n\nSubmissions: long papers up to 8 pages excluding references and\nappendices; short papers up to 4 pages. PDF using the NeurIPS 2026\nstyle file. Double-blind review; the workshop is non-archival and\nwelcomes dual submissions with disclosure. Papers are evaluated on\nnovelty, significance, technical quality, and clarity.\n\nImportant dates:\n- abstract registration: August 23, 2026\n- paper submission: August 30, 2026\n- author notification: October 2026\n- workshop: December 12-13, 2026\n"
+  },
+  "ideation": {
+    "max_candidates": 3
+  },
+  "prior_art": {
+    "cutoff_date": "2026-08-18",
+    "recent_window_start": "2025-08-18"
+  },
+  "selection": {
+    "compute_constraint": "Elastic cloud GPU capacity: up to 2-4 GPUs per study (up to A100/H100 class), provisioned on demand. Continuous availability is not guaranteed, so execution must tolerate queueing, interruption, and reduced parallelism, and must be able to run on a single GPU.",
+    "data_constraint": "Public or lawfully accessible datasets; preprocessing allowed.",
+    "time_constraint": "Individual runs up to days; complete studies up to weeks.",
+    "experimental_constraint": "Containerized seeded runs with parallel sweeps, replications, controls, and ablations."
+  },
+  "admission": {
+    "scheduling_requirement": "Batch-scheduled execution on shared infrastructure (e.g. Slurm-class schedulers) with variable GPU availability.",
+    "job_duration_requirement": "Individual jobs bounded to at most two days of wall-clock time.",
+    "checkpoint_requirement": "All long-running work must support checkpointing and resume across job boundaries."
+  },
+  "funding": {
+    "granted": {
+      "wall_clock_seconds": 86400.0,
+      "gpu_hours": 100.0,
+      "usd": 250.0,
+      "model_tokens": 2000000
+    },
+    "authority": "Lab operator, 2026-08-20: single-run allocation for the admitted Task 5F candidate, against the standing August compute budget.",
+    "label": "Task 6A first funded run of the 5F admission"
+  },
+  "stop_after": "funding"
+}
