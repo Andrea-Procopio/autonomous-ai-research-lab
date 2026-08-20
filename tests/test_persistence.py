@@ -194,3 +194,41 @@ def test_malformed_snapshot_is_rejected(tmp_path: Path) -> None:
     path.write_text("{not json")
     with pytest.raises(SnapshotError, match="not valid JSON"):
         store.load(state.id)
+
+
+def test_a_divergent_snapshot_is_refused_not_replaced(tmp_path: Path) -> None:
+    """persist() verifies on repeat: a snapshot whose bytes differ from what
+    the state serializes to (a truncated write, a tampered file) is a loud
+    error — never silently trusted, never silently overwritten."""
+    store = FileStateStore(tmp_path)
+    state = ResearchState(objective="o")
+    path = store.persist(state)
+    path.write_text(path.read_text(encoding="utf-8")[:40], encoding="utf-8")
+
+    with pytest.raises(SnapshotError, match="never rewritten"):
+        store.persist(state)
+
+
+def test_persist_leaves_no_scratch_file(tmp_path: Path) -> None:
+    store = FileStateStore(tmp_path)
+    store.persist(ResearchState(objective="o"))
+    assert list(tmp_path.rglob("*.tmp")) == []
+
+
+def test_a_failed_write_leaves_no_scratch_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A crash at the rename step must leave neither a partial snapshot nor
+    a stray temporary file behind."""
+    store = FileStateStore(tmp_path)
+    state = ResearchState(objective="o")
+
+    def explode(self: Path, target: str | Path) -> Path:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(Path, "replace", explode)
+    with pytest.raises(OSError, match="disk full"):
+        store.persist(state)
+
+    assert list(tmp_path.rglob("*.tmp")) == []
+    assert store.state_ids() == ()

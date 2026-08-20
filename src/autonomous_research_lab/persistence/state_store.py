@@ -53,10 +53,26 @@ class FileStateStore:
 
     def persist(self, state: ResearchState) -> Path:
         """Write ``state`` and return its snapshot path. Identical content
-        deduplicates: an existing snapshot is left untouched."""
+        deduplicates; a snapshot whose bytes differ from what this state
+        serializes to (a truncated write, a tampered file) is refused loudly
+        rather than silently kept. The write goes through a temporary file
+        and an atomic rename, so a crash mid-write can never leave a partial
+        snapshot under the state's name."""
         path = self.path_for(state.id)
-        if not path.exists():
-            path.write_text(serialize_state(state), encoding="utf-8")
+        payload = serialize_state(state)
+        if path.exists():
+            if path.read_text(encoding="utf-8") != payload:
+                raise SnapshotError(
+                    f"snapshot {path.name} exists with different content; "
+                    f"snapshots are never rewritten"
+                )
+            return path
+        scratch = path.with_suffix(".json.tmp")
+        scratch.write_text(payload, encoding="utf-8")
+        try:
+            scratch.replace(path)
+        finally:
+            scratch.unlink(missing_ok=True)
         return path
 
     def load(self, state_id: str) -> ResearchState:
