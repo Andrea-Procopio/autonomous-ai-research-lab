@@ -39,6 +39,10 @@ Package layout (dependencies point downward only):
     Which candidate to pursue, if any: gated choice among the
     ``DISTINGUISHED`` survivors of one named challenge, with three
     honest outcomes — a preference, never proof.
+``admission``
+    The governed bridge into research state: one named SELECTED
+    selection, verified through its whole lineage, becomes a bare
+    initial state of propositions — a translation, never a promotion.
 ``search``
     Selection policies over evaluated action candidates.
 ``roles``

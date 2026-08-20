@@ -88,20 +88,38 @@ end-to-end runs:
   preserved upstream artifact byte-identical before and after. A
   selection is a model preference validated — never computed — by
   trusted code, and never proof of novelty.
+- **Governed admission into research state.** One guarded door in: the
+  directive names one selection run record, and trusted code
+  re-verifies the whole lineage behind it — cross-checking the records
+  against each other, not only each against itself — before requiring
+  the outcome `SELECTED`. One gated model call translates the
+  candidate's recorded predictions into machine-checkable form under a
+  sign-only neutral encoding (the model never authors a number;
+  comparator and threshold are structural constants); everything else
+  the initial state holds is a deterministic verbatim copy. The state
+  snapshot and the write-once admission record are one all-or-nothing
+  artifact set, one admission exists per selection run ever, and a
+  completed directive replays its stored result at zero model calls.
+  Proven live over the 5E selection: one call, zero corrective calls,
+  spend reconciling exactly with the ledger, every preserved upstream
+  artifact byte-identical, and the replay served through a provider
+  that refuses every call. `DISTINGUISHED`, `SELECTED`, and `ADMITTED`
+  are rungs of bounded process — none of them means true, novel, or
+  empirically supported.
 
 Nothing a model says becomes scientific state until deterministic code
 has gated, committed, executed, and verified it. Literature-derived
-records never become scientific state at all: maps, inventories,
-candidate ideas, and selections describe, conjecture, and prefer,
-carrying their sources, until a later task admits findings through the
-same governed commit as every other proposal. Orchestration is not model-driven: a fixed-priority
+records describe, conjecture, and prefer, carrying their sources; the
+one path into scientific state is admission's governed door, which
+turns exactly one validated selection into a bare initial state of
+propositions — no result, evidence, or judgment is expressible there. Orchestration is not model-driven: a fixed-priority
 director dispatches work, and every model decision passes a
 deterministic gate before it takes effect.
 
-Not built yet: access resolution for metadata-only retrieved works,
-Task 5F admission of a selected candidate into research state (the
-selection record is its input, and must be treated as a validated
-model preference), literature-grounded findings entering research
+Not built yet: access resolution for metadata-only retrieved works, a
+budgeted planner and real experiment execution over the admitted state
+(the execution requirements it carries are stated capabilities, not
+implementations), literature-grounded findings entering research
 state, cloud execution, statistician and skeptic roles with real
 inference, and paper writing.
 
@@ -118,8 +136,9 @@ Expect interfaces to change.
 | `literature` | Bounded search against a real scholarly API (OpenAlex): normalized snapshot records, deterministic deduplication, write-once search provenance, and a replayable local corpus. Depends only on `core`; its one consumer is `mapping`. |
 | `mapping` | What the literature adds up to: model-backed field maps and problem inventories, deterministically gated and write-once, judged by a trusted-code adequacy verdict. Depends on `core`, `literature`, and the provider seam; its one consumer is `ideation`. |
 | `ideation` | What might be worth investigating: CFP-directed candidate generation over the assessed map. Depends on `core`, `mapping`, and the provider seam; its one consumer is `priorart`. |
-| `priorart` | Whether it was already done: the prior-art challenge over the candidate portfolio, with a deterministic fail-closed verdict per candidate. Depends on `core`, `literature`, `mapping`, `ideation`, and the provider seam; its one consumer is `selection`. |
-| `selection` | Which candidate to pursue, if any: gated two-stage selection over the `DISTINGUISHED` survivors of one named prior-art run, with attested disqualifiers and three honest outcomes. Score-free and write-once. Depends on `core`, `ideation`, `mapping`, `priorart`, and the provider seam; nothing imports it. |
+| `priorart` | Whether it was already done: the prior-art challenge over the candidate portfolio, with a deterministic fail-closed verdict per candidate. Depends on `core`, `literature`, `mapping`, `ideation`, and the provider seam; its consumers are `selection` and `admission`. |
+| `selection` | Which candidate to pursue, if any: gated two-stage selection over the `DISTINGUISHED` survivors of one named prior-art run, with attested disqualifiers and three honest outcomes. Score-free and write-once. Depends on `core`, `ideation`, `mapping`, `priorart`, and the provider seam; its one consumer is `admission`. |
+| `admission` | The governed bridge into research state: one named `SELECTED` run verified through its whole lineage, one gated model call encoding the recorded predictions sign-only, deterministic copies for everything else, and an all-or-nothing state snapshot beside a write-once record. Depends on `core` (uniquely including the state it constructs), `ideation`, `mapping`, `priorart`, `selection`, `persistence`, and the provider seam; nothing imports it. |
 | `persistence` | Saves every state to disk so a run can be inspected or replayed later. |
 | `runtime` | Bookkeeping around the loop: open work, validation and verification, cost tracking, metrics, the model-provider seam (with the Muse adapter), and the write-once stores for implementation and planning provenance. |
 | `search` | Policies for choosing the next action among candidates. |

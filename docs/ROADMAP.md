@@ -109,11 +109,34 @@ human in the loop, producing results that survive scrutiny.
     and every preserved upstream artifact byte-identical. A selection
     is a model preference validated — never computed — by trusted
     code, and never proof of novelty.
+  - *Task 5F (2026-08-20).* Governed admission of the selected
+    candidate. One door: the directive names one selection run record,
+    and trusted code re-verifies the complete lineage — selection,
+    prior art, ideation, direction, CFP snapshot — cross-checking the
+    records against each other before requiring `SELECTED`. One gated
+    model call encodes the candidate's recorded predictions under the
+    sign-only neutral encoding (comparator and threshold are
+    structural constants; the model never authors a number); the
+    question, hypothesis, objective, and measurement surface are
+    deterministic verbatim copies; execution requirements are quoted
+    by provenance, inherited versus operator-stated. The initial state
+    is built in one constructor call, persisted content-addressed with
+    a read-back check, and recorded all-or-nothing beside a write-once
+    admission record — one admission per selection run, ever, with a
+    completed directive replaying at zero model calls. The live run
+    admitted the 5E winner in one call with zero corrective calls,
+    1,415 input and 3,533 output tokens reconciling exactly with the
+    ledger, both observables of the single recorded prediction encoded
+    as distinct machine-checkable predictions, all 184 preserved
+    upstream files byte-identical, and the replay served through a
+    provider that refuses every call. An admission is a translation,
+    never a promotion: `ADMITTED` does not mean true, novel, or
+    empirically supported.
   - *Still open:* access resolution for attested material ambiguities
-    on metadata-only works, Task 5F admission of the selected
-    candidate, and only after that, findings entering the state as
-    structured objects carrying their sources, through the same
-    governed commit as every other proposal.
+    on metadata-only works, a budgeted planner and experiment
+    execution over the admitted state, and findings entering the state
+    as structured objects carrying their sources through the governed
+    commit.
 - **Real experiment execution.** ML training runs under the existing
   executor contract: checkpoints, longer timeouts, GPU accounting.
 - **Scientific debugging and experiment verification.** Done in its

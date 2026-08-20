@@ -887,7 +887,11 @@ snapshot filenames and identical states deduplicate by construction.
 Loading reconstructs the full domain object graph and recomputes the
 content id from what it read: a snapshot that no longer hashes to its
 filename fails loudly instead of quietly resurrecting a different
-state. The parsing code lives in `persistence`, not `core` —
+state. Writes go through a temporary file with an atomic rename and
+verify on repeat — an existing snapshot whose bytes differ from what
+the state serializes to is refused, never silently kept. This was
+hardened for Task 5F, whose all-or-nothing admission writes the state
+snapshot first and the admission record last. The parsing code lives in `persistence`, not `core` —
 `core.serialize` stays one-way because parsing needs validation, and
 validation is a boundary concern.
 
@@ -1512,11 +1516,17 @@ existing records; an evidence-limited candidate is never described as
 scientifically indefensible, and no retrieval-retry loop exists to
 manufacture a selectable one. The contract's "no new terminal stop
 states" holds as stated: selection's three outcomes are record values
-inside the `selection` package, nothing entered the scientific state
-machine, and admission to `ResearchState` remains future work behind
-the same governed commit as every other proposal. Selection exists as
-*preference* — deliberately not ranking, since no score is expressible
-anywhere in its records. The next chapter describes the layer.
+inside the `selection` package, and nothing entered the scientific
+state machine. Admission has since been built (Task 5F), with its own
+honest reconciliation: the promise that it would arrive "through the
+same governed commit as every other proposal" assumed a predecessor
+state for the transition layer to evolve, and a genesis state has
+none — so admission constructs the initial state in one constructor
+call behind its own door and gates, never calls a state mutator, and
+every evolution after genesis goes through orchestration's
+`commit_bundle` exactly as before. Selection exists as *preference* —
+deliberately not ranking, since no score is expressible anywhere in
+its records. The next chapters describe both layers.
 
 ## Candidate selection (Task 5E)
 
@@ -1525,8 +1535,9 @@ if any. It consumes `priorart` (the verdicts that define eligibility),
 `ideation` (the immutable portfolio and the governing direction), and
 `mapping` (the shared gate vocabulary) — never `literature`: selection
 runs no retrieval and sees sources only through the records upstream
-stages froze. Nothing imports it; it is the new leaf of the analysis
-DAG, and `priorart` now has exactly one consumer.
+stages froze. Its one consumer is `admission` — the governed bridge
+Task 5F built — and `priorart` now has two deliberate consumers:
+selection, and admission's lineage re-verification behind its door.
 
 One run performs a fixed sequence:
 
@@ -1635,6 +1646,116 @@ three — so the honest-stop paths went unexercised live and rest on the
 calibration suite, where all three outcomes are proven reachable at
 the default ceilings.
 
+## Governed admission (Task 5F)
+
+The `admission` package is the single bridge from a completed
+selection into the initial `ResearchState` — the first analysis-side
+package allowed to construct one, and only to construct it. It
+consumes `selection` (the named run and its frozen directive),
+`priorart` and `ideation` (the lineage it re-verifies, reusing the
+selection door so the definition of a challenged portfolio is never
+forked), `mapping` (the shared gate vocabulary), `persistence` (the
+snapshot store), and the provider seam — never `literature`. Nothing
+imports it.
+
+One run performs a fixed sequence:
+
+```
+AdmissionDirective (names one SelectionRunRecord; three operator
+                    execution-environment statements; a call ceiling)
+  -> replay?      a completed directive returns its stored record and
+                  state from the admission root alone — zero calls
+  -> conflict?    a different directive naming an admitted selection
+                  refuses loudly — one admission per selection, ever
+  -> require_selected_candidate_for_admission
+                  (outcome SELECTED; the whole lineage reloads; the
+                  records agree with each other, not only each with
+                  itself — a self-consistent forgery fails on the
+                  cross-record equalities)
+  -> check_admission_coherence   (refuse before any call)
+  -> one gated call              (operationalize the recorded
+                                 predictions; at most one corrective)
+  -> construct    (question, hypothesis, encoded predictions, ONE
+                  ResearchState constructor call — never a mutator)
+  -> persist + read back         (the snapshot must reload identically
+                                 before anything references it)
+  -> record ADMITTED             (one write-once admission record)
+```
+
+**The authority split.** Trusted code owns the lineage and every
+identifier, the selected candidate, admission legality, every
+deterministic copy (the question is the candidate's own research
+question with its CFP alignment as `importance`; the hypothesis is its
+hypothesis text with its mechanism as rationale; the objective is the
+selection decision's first experimental objective; measurements,
+controls, and comparison targets are its metrics, ablations, and
+baselines verbatim), the construction of every core record,
+persistence, and the spend. The model owns only the operationalization
+wording — a condition, the two comparison arms, a contrary
+restatement, and field-path traceability links per encoding — and the
+gate holds all of it to verbatim re-finding: the prediction text must
+equal a recorded prediction, the arms must re-appear in the
+candidate's own fields, the contrary must re-find in that prediction's
+falsifier and nowhere else, every support quote must re-find at its
+named field path, the base metric is a schema enum over the
+candidate's declared metrics, and an id-shaped token the prompt did
+not show is a fabricated reference — ids carry no decimal digits, so
+the number gate alone would never see one.
+
+**The neutral encoding.** Core predictions are machine-checkable —
+metric, comparator, threshold — and the candidate's comparative prose
+carries no numbers, so each encoding commits to exactly what the
+record supports: `difference in {metric}: {higher arm} minus {lower
+arm}`, `GREATER_THAN`, `0.0`. Comparator and threshold are structural
+constants; the model never authors a number, and the record stamps
+`mechanical_reading = "sign_only"` so a later assessor cannot read a
+marginal delta as confirming "substantially more" — choosing real
+effect-size thresholds is the planner's work. A recorded prediction
+may carry up to three encodings (the live winner's one prediction
+carries two observables); duplicates are rejected on the mechanical
+tuple, because core `Prediction` identity excludes its prose
+expectation and text-keyed deduplication would silently merge two
+commitments; and the templated metric string is an exact-match
+contract for any future experiment spec and executor.
+
+**Requirements split by provenance.** Execution-capability
+requirements are trusted-code verbatim quotes, each carrying the id
+and field path of the record that stated it: inherited (the
+candidate's resources, the frozen selection directive's four
+constraints, the selection decision's capabilities) versus
+operator-stated (the admission directive's three statements — batch
+scheduling, job-duration bounds, checkpoint/resume). The two are never
+presented as each other, the model authors none of them, and none is
+implemented here: they are stated capabilities for later work.
+
+**All or nothing.** The state snapshot is written first and read back
+(the snapshot store verifies on repeat, and the read-back catches what
+id verification alone cannot: a `ResearchState`'s content id
+deliberately excludes its budget, so the accessor also pins the
+admitted seed's zero budget); the admission record is written last. A
+crash in between leaves an inert orphan snapshot — "no record means
+not admitted" — and the re-run honestly spends one fresh gated call.
+The only accessor loads the record first and the state through it, so
+an admitted state is never exposed without its admission record, and a
+record whose snapshot is missing or tampered fails loudly forever: the
+snapshot is part of the write-once artifact set.
+
+**The ladder, and the live evidence (2026-08-20).** `DISTINGUISHED`
+meant differentiated within one bounded prior-art corpus; `SELECTED`
+meant preferred within one constrained portfolio; `ADMITTED` means
+converted into the governed initial research state. None of the three
+means true, novel, or empirically supported. The live run admitted the
+Task 5E winner through the full door: one gated call, zero corrective
+calls, 1,415 input and 3,533 output tokens reconciling exactly with
+the ledger. The model encoded the single recorded prediction's two
+observables as two distinct core predictions — the induction-head
+overlap difference, and the ablation accuracy-drop difference with the
+arms correctly reversed for accuracy-after-ablation — each grounded by
+field-path quotes the gate re-found. All 184 preserved upstream files
+were byte-identical before and after, the admission reloaded
+identically from a fresh store, and re-running the completed directive
+replayed the stored result through a provider that refuses every call.
+
 ## Architectural invariants
 
 The list this pass was made against; each is enforced by at least one
@@ -1666,6 +1787,12 @@ disqualification are stamped by trusted code from one named prior-art
 run, an honest empty stop needs a validated verbatim disqualifier for
 every eligible candidate, and no numeric score exists anywhere in its
 schemas.
+An admission is a translation, never a promotion: one named SELECTED
+run enters through a door that re-verifies the whole lineage, the
+model authors only operationalization wording under verbatim
+grounding, every number in the encoded predictions is a structural
+constant, the admitted state holds propositions only, and one
+admission exists per selection run, ever — replayable at zero calls.
 Every important research decision is reconstructible later.
 ```
 
@@ -1702,13 +1829,22 @@ priorart      whether it was already done: the adversarial prior-art
               bounded retrieval, gated screening and comparison, a
               deterministic fail-closed verdict per candidate,
               write-once  (depends on core, literature, mapping,
-              ideation, and the provider seam; exactly one
-              consumer — selection)
+              ideation, and the provider seam; two deliberate
+              consumers — selection and admission)
 selection     which candidate to pursue, if any: trusted eligibility
               from one named challenge, two gated stages, attested
               disqualifiers, three honest outcomes, one write-once
               nested record  (depends on core, ideation, mapping,
-              priorart, and the provider seam; nothing imports it)
+              priorart, and the provider seam; exactly one
+              consumer — admission)
+admission     the governed bridge into research state: one named
+              SELECTED run verified through the whole lineage, one
+              gated operationalization under the sign-only encoding,
+              deterministic copies for everything else, an
+              all-or-nothing state snapshot beside a write-once
+              record  (depends on core — uniquely including the state
+              it constructs — ideation, mapping, priorart, selection,
+              persistence, and the provider seam; nothing imports it)
 search        which move to take
 roles         who does the work, under what contract; the model-backed
               engineer and planner
