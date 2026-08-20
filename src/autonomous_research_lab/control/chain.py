@@ -39,7 +39,6 @@ from typing import Final, Protocol
 from ..admission.admitter import CandidateAdmitter
 from ..admission.door import AdmissionRefusedError
 from ..admission.store import AdmissionStore
-from ..core.state import ResearchState
 from ..evidence.file_store import FileEvidenceStore
 from ..ideation.generator import IdeaGenerator
 from ..ideation.store import IdeationStore
@@ -64,6 +63,7 @@ from ..selection.selector import CandidateSelector
 from ..selection.store import SelectionStore
 from .config import RunConfig
 from .lab import ExperimentationUnavailableError, Lab, RuntimeRequest
+from .recovery import recover
 from .stage import (
     NO_FACTS,
     ZERO_SPEND,
@@ -687,25 +687,39 @@ class ExperimentationStage:
     def completed(
         self, context: StageContext, plan: StagePlan
     ) -> StageOutcome | None:
-        """Follow the lineage down from the state this step began at.
+        """Ask the attempt journal what the last process left owing.
 
-        The runtime persists every state a step derives, oldest first,
-        so a crash leaves a chain that is shorter rather than one with
-        holes. Its end may be mid-step, though — a state that has begun
-        an attempt and not resolved it — and resuming from there would
-        leave that attempt open forever. So the reconcile adopts the
-        deepest descendant whose attempts are all terminal: the last
-        point the run was actually between steps.
+        Task 6C answered this by inference — walk the lineage down and
+        adopt the deepest descendant whose attempts were all resolved —
+        which is a guess about a shape rather than a fact about a run. It
+        could not tell an attempt that never started from one that ran an
+        experiment and died before recording it, and those owe very
+        different things.
+
+        Now the journal says. Every attempt it left open is settled and
+        closed before the chain steps again, so what this returns is a
+        state the run genuinely owes nothing from.
         """
-        committed = _last_committed_below(
-            context.stores.states, plan.subject_id
+        run_id = context.facts.require(Fact.RUN_ID)
+        report = recover(
+            journal=context.stores.program.journal_for(run_id),
+            ledger=context.stores.program.ledger_for(run_id),
+            bundles=context.stores.program.bundles(),
+            states=context.stores.states,
+            evidence=context.stores.evidence,
+            fallback_state_id=plan.subject_id,
         )
-        if committed is None:
+        if not report.anything_to_do:
             return None
         return StageOutcome(
-            produced=_sorted({Fact.STATE_ID: committed.id}),
-            detail=f"adopted the step a crash hid ({committed.id})",
-            repeat=True,
+            produced=_sorted({Fact.STATE_ID: report.state_id}),
+            detail=report.summary(),
+            ends_investigation=(
+                "an attempt spent more than it was authorized to"
+                if report.breached
+                else ""
+            ),
+            repeat=not report.breached,
         )
 
     def execute(self, context: StageContext) -> StageOutcome:
@@ -716,6 +730,8 @@ class ExperimentationStage:
                 evidence=context.stores.evidence,
                 states=context.stores.states,
                 ledger=context.stores.program.ledger_for(run_id),
+                journal=context.stores.program.journal_for(run_id),
+                bundles=context.stores.program.bundles(),
             )
         )
         state = context.stores.states.load(context.facts.require(Fact.STATE_ID))
@@ -773,40 +789,6 @@ def _selection_outcome(
         detail=str(outcome),
         ends_investigation=ends,
     )
-
-
-def _last_committed_below(
-    states: FileStateStore, state_id: str
-) -> ResearchState | None:
-    """The deepest descendant of ``state_id`` that is between steps.
-
-    Between steps means every attempt on it is resolved. A state with an
-    attempt still open is one the loop was in the middle of, and it is
-    not a place to start from.
-    """
-    loaded = {found: states.load(found) for found in states.state_ids()}
-    children: dict[str, list[str]] = {}
-    for found, state in loaded.items():
-        if state.parent_id:
-            children.setdefault(state.parent_id, []).append(found)
-
-    deepest: ResearchState | None = None
-    depth = 0
-
-    def walk(current: str, distance: int) -> None:
-        nonlocal deepest, depth
-        state = loaded.get(current)
-        if (
-            state is not None
-            and distance > depth
-            and all(attempt.status.is_terminal for attempt in state.attempts)
-        ):
-            deepest, depth = state, distance
-        for child in children.get(current, ()):
-            walk(child, distance + 1)
-
-    walk(state_id, 0)
-    return deepest
 
 
 def _spend(

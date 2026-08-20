@@ -25,6 +25,7 @@ from autonomous_research_lab.control.stage import (
     StageName,
     StageStatus,
 )
+from autonomous_research_lab.core.attempt import AttemptPhase
 from autonomous_research_lab.core.state import ResearchState
 from autonomous_research_lab.evidence.file_store import FileEvidenceStore
 from autonomous_research_lab.ideation.store import IdeationStore
@@ -35,6 +36,7 @@ from autonomous_research_lab.program.integrity import (
     IntegrityIssueKind,
     _reachable_from_roots,
 )
+from autonomous_research_lab.program.records import EntryKind
 from autonomous_research_lab.program.store import ProgramStore
 from autonomous_research_lab.selection.store import SelectionStore
 from examples.canary_chain import CONFIG, verify, walk
@@ -135,16 +137,59 @@ class TestOneWalk:
         assert len(heads) == 1
         assert len(_reachable_from_roots(list(stored.values()))) == len(stored)
 
-    def test_the_ledger_billed_every_attempt(self, tmp_path: Path) -> None:
+    def test_the_ledger_held_and_answered_every_attempt(
+        self, tmp_path: Path
+    ) -> None:
+        walk(tmp_path)
+        program = ProgramStore(tmp_path / "program")
+        (run,) = program.runs()
+        ledger = program.ledger_for(run.run_id)
+
+        entries = ledger.entries()
+
+        assert entries[0].kind is EntryKind.GRANT
+        held = {
+            e.charge_id for e in entries if e.kind is EntryKind.RESERVATION
+        }
+        answered = {
+            e.charge_id
+            for e in entries
+            if e.kind in {EntryKind.DEBIT, EntryKind.RELEASE}
+        }
+        assert held  # every attempt reserved before it ran
+        assert answered == held  # and every reservation was answered
+        assert ledger.reservations() == ()
+        assert ledger.available() == ledger.balance()
+
+    def test_the_journal_closed_every_attempt(self, tmp_path: Path) -> None:
+        """Nothing is left open: a walk that ran to a stop owes nothing."""
         walk(tmp_path)
         program = ProgramStore(tmp_path / "program")
         (run,) = program.runs()
 
-        entries = program.ledger_for(run.run_id).entries()
+        journal = program.journal_for(run.run_id)
 
-        assert entries[0].kind.value == "grant"
-        assert len(entries) > 1
-        assert len({entry.charge_id for entry in entries}) == len(entries)
+        assert journal.attempts()
+        assert journal.open_attempts() == ()
+        assert journal.breaches() == ()
+
+    def test_every_attempt_stored_the_bundle_it_committed(
+        self, tmp_path: Path
+    ) -> None:
+        walk(tmp_path)
+        program = ProgramStore(tmp_path / "program")
+        (run,) = program.runs()
+        journal = program.journal_for(run.run_id)
+        bundles = program.bundles()
+
+        durable = [
+            event
+            for event in journal.events()
+            if event.phase is AttemptPhase.BUNDLE_DURABLE
+        ]
+
+        assert durable
+        assert all(bundles.has(event.bundle_id) for event in durable)
 
     def test_it_records_one_investigation_and_one_run(
         self, tmp_path: Path
@@ -309,6 +354,8 @@ class TestAStepInterruptedMidFlight:
                 evidence=FileEvidenceStore(root),
                 states=shadow,
                 ledger=program.ledger_for(run.run_id),
+                journal=program.journal_for(run.run_id),
+                bundles=program.bundles(),
             )
         )
         runtime.step(FileStateStore(root).load(head))

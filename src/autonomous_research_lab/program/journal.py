@@ -31,21 +31,21 @@ paid for?* — with a fact rather than an inference:
 ============================  =============================================
 last phase                    what is true
 ============================  =============================================
-``STARTED``                   nothing has run; the reservation may be
-                              released and the attempt abandoned
-``SUBMITTED``                 a job may exist under a known id; reattach
-                              or collect, never resubmit
-``OUTPUTS_DURABLE``           the work is bought; finish committing it
+``STARTED``                   nothing has run *if* no job exists under
+                              the derived id; release and retry
+``SUBMITTED``                 a job may exist under a known id; collect
+                              it, never resubmit it
+``OUTPUTS_DURABLE``           the work is bought and collectable
 ``BUNDLE_DURABLE``            the successor is derivable without the
                               runtime; apply the bundle
-``COMMITTED``                 the money is settled and the state is
-                              stored; only the closing record is missing
-``COMPLETED`` / ``RELEASED``  nothing is owed
+``COMMITTED``                 the successor is stored; only the money is
+                              still open
+terminal                      nothing is owed
 ============================  =============================================
 
-A budget breach is not a phase. It is the ``COMMITTED`` event whose
-``actual`` exceeds its ``reserved``, which is two numbers already on the
-record rather than a third field that could disagree with them.
+A budget breach is not a phase. It is the closing event whose ``actual``
+exceeds its ``reserved``, which is two numbers already on the record
+rather than a third field that could disagree with them.
 
 One writer per run is assumed, as everywhere else in the repository. The
 exclusive create still makes a collision loud rather than silent.
@@ -83,9 +83,16 @@ _ORDER: Final[Mapping[AttemptPhase, int]] = {
     AttemptPhase.COMMITTED: 4,
     AttemptPhase.COMPLETED: 5,
     AttemptPhase.RELEASED: 5,
+    AttemptPhase.ABANDONED: 5,
 }
 """How far along each phase is. Phases may be skipped but never
 repeated and never reversed, so one comparison enforces the lifecycle."""
+
+_SETTLING: Final = frozenset(
+    {AttemptPhase.COMPLETED, AttemptPhase.ABANDONED}
+)
+"""The phases that close an attempt by answering its reservation, and so
+the only ones that may say what it cost."""
 
 
 class JournalIntegrityError(RuntimeError):
@@ -209,10 +216,13 @@ class AttemptEvent:
             raise ValueError(
                 "a committed attempt names the successor it produced"
             )
-        if self.phase is not AttemptPhase.COMMITTED and not self.actual.is_zero:
+        if self.phase not in _SETTLING and not self.actual.is_zero:
+            # ``RELEASED`` is caught here too, and that is the point: an
+            # attempt that bought nothing cannot report a cost.
             raise ValueError(
-                "only the committing event says what an attempt cost; a "
-                "cost recorded anywhere else is a second answer"
+                "only the event that closes an attempt by settling it says "
+                "what it cost; a cost recorded anywhere else is a second "
+                "answer"
             )
 
     def _derived_id(self) -> str:
@@ -242,10 +252,7 @@ class AttemptEvent:
     def breached(self) -> bool:
         """Whether this event records an attempt that cost more than it
         was authorized to."""
-        return (
-            self.phase is AttemptPhase.COMMITTED
-            and self.actual.exceeds(self.reserved)
-        )
+        return self.phase in _SETTLING and self.actual.exceeds(self.reserved)
 
 
 class RunJournal:
@@ -456,6 +463,12 @@ class RunJournal:
         return event
 
 
+_ENDS_EARLY: Final = frozenset(
+    {AttemptPhase.RELEASED, AttemptPhase.ABANDONED}
+)
+"""The two ways an attempt ends without a successor."""
+
+
 def _reached_terminal(events: tuple[AttemptEvent, ...]) -> bool:
     return any(event.phase.is_terminal for event in events)
 
@@ -479,13 +492,13 @@ def _require_forward(
             f"{phase} would move it backwards, and an attempt has one "
             f"history"
         )
-    if (
-        phase is AttemptPhase.RELEASED
-        and any(e.phase is AttemptPhase.COMMITTED for e in mine)
+    if phase in _ENDS_EARLY and any(
+        e.phase is AttemptPhase.COMMITTED for e in mine
     ):
         raise JournalConflictError(
-            f"attempt {attempt_id} settled its debit; releasing it now "
-            f"would give back money that has already been spent"
+            f"attempt {attempt_id} already committed a successor; it "
+            f"cannot then be {phase}, which says no state change came of "
+            f"it"
         )
 
 

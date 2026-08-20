@@ -13,7 +13,11 @@ import pytest
 
 from autonomous_research_lab.core.actions import ResearchAction, ResearchActionType
 from autonomous_research_lab.core.attempt import AttemptStatus
-from autonomous_research_lab.core.budget import ResearchBudget, ResourceCost
+from autonomous_research_lab.core.budget import (
+    ResearchBudget,
+    ResourceCost,
+    Settlement,
+)
 from autonomous_research_lab.core.experiment import ExperimentSpec
 from autonomous_research_lab.core.hypothesis import Hypothesis
 from autonomous_research_lab.core.prediction import (
@@ -785,21 +789,48 @@ def test_failed_result_with_broken_provenance_is_rejected_but_costed(
 class RecordingLedger:
     """A ``SpendLedger`` that keeps its postings in memory. The durable
     implementation lives in ``program``, which the runtime deliberately
-    cannot import; this pins the contract the loop relies on."""
+    cannot import; this pins the contract the loop relies on — including
+    that every debit answers a hold taken before the work."""
 
     def __init__(self, balance: ResearchBudget) -> None:
         self.balance = balance
         self.postings: list[tuple[str, ResourceCost]] = []
+        self.held: dict[str, ResourceCost] = {}
+        self.released: list[str] = []
 
-    def debit(
+    def reserve(
         self, cost: ResourceCost, *, charge_id: str, reason: str
     ) -> object:
+        del reason
+        self.held.setdefault(charge_id, cost)
+        return None
+
+    def holds(self, charge_id: str, /) -> bool:
+        return charge_id in self.held
+
+    def settle(
+        self, cost: ResourceCost, *, charge_id: str, reason: str
+    ) -> Settlement:
+        del reason
+        reserved = self.held.get(charge_id)
+        assert reserved is not None, "every debit answers a hold"
         for posted_id, posted_cost in self.postings:
             if posted_id == charge_id:
                 assert posted_cost == cost, "one charge id, one movement"
-                return None
-        self.postings.append((charge_id, cost))
-        self.balance = self.balance.spend(cost)
+                break
+        else:
+            if cost.is_zero:
+                self.released.append(charge_id)
+            else:
+                self.postings.append((charge_id, cost))
+                self.balance = self.balance.spend(cost, allow_overdraw=True)
+        return Settlement(
+            charge_id=charge_id, reserved=reserved, actual=cost, entry_id="bent_x"
+        )
+
+    def release(self, *, charge_id: str, reason: str) -> object:
+        del reason
+        self.released.append(charge_id)
         return None
 
     def require_balance(self, expected: ResearchBudget) -> None:

@@ -44,6 +44,7 @@ membership, is what transitions guarantee atomically.
 
 from __future__ import annotations
 
+from ..core.budget import ResourceCost
 from ..core.commit import CommitBundle
 from ..core.experiment import ExperimentResult, ExperimentStatus, ResultRef
 from ..core.prediction import Consistency, Prediction, PredictionTest
@@ -131,6 +132,41 @@ def commit_bundle(
         )
 
     return working.resolve_attempt(attempt.resolved(bundle.outcome))
+
+
+def resume_bundle(
+    state: ResearchState,
+    bundle: CommitBundle,
+    store: EvidenceStore,
+    cost: ResourceCost,
+) -> ResearchState:
+    """Finish a commit a dead process started, and pay for it.
+
+    Recovery reaches this with a bundle it read off disk rather than one
+    a role just produced. Applying it is the same operation either way —
+    that is the whole reason the bundle is stored — and the charge that
+    would have followed in the same step follows here instead, so the
+    state and the ledger stay one number.
+    """
+    return commit_bundle(state, bundle, store).charge(
+        cost, allow_overdraw=True
+    )
+
+
+def charge_abandoned(
+    state: ResearchState, cost: ResourceCost
+) -> ResearchState:
+    """Pay for an attempt that produced nothing.
+
+    A successor with a smaller budget and no scientific change: the work
+    was bought, the reasoning that would have used it is gone, and the
+    record says both.
+
+    Overdrawing is allowed because this is a report, not a request. The
+    money is gone whether or not the budget covered it, and a remainder
+    clamped at zero would say otherwise.
+    """
+    return state.charge(cost, allow_overdraw=True)
 
 
 def _commit_question(

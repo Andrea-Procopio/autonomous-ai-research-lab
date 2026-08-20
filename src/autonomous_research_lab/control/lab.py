@@ -35,6 +35,8 @@ from ..literature.openalex import OpenAlexProvider
 from ..literature.retrieval import LiteratureProvider
 from ..orchestration.loop import ResearchRuntime
 from ..persistence import FileStateStore
+from ..persistence.commit_store import CommitBundleStore
+from ..runtime.journal import AttemptJournal
 from ..runtime.muse import MuseSparkProvider
 from ..runtime.providers import ModelProvider
 from ..runtime.spend import SpendLedger
@@ -56,13 +58,21 @@ class ExperimentationUnavailableError(RuntimeError):
 @dataclass(frozen=True, slots=True)
 class RuntimeRequest:
     """Everything a runtime needs that belongs to the run rather than to
-    the lab: where the run lives, where its facts and snapshots go, and
-    the ledger its spend posts to."""
+    the lab: where the run lives, where its facts and snapshots go, the
+    ledger its spend posts to, and the two records that make a step
+    recoverable."""
 
     root: Path
     evidence: EvidenceStore
     states: FileStateStore
     ledger: SpendLedger
+    journal: AttemptJournal
+    """Where each attempt's phases are written down as they happen. A lab
+    that wires it hands the runtime the ability to be killed mid-step and
+    resumed; one that does not gets the pre-existing behavior."""
+
+    bundles: CommitBundleStore
+    """Where an attempt's whole effect is stored before it is applied."""
 
 
 class Lab(Protocol):

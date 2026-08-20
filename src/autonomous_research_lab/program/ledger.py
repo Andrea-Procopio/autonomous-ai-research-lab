@@ -184,6 +184,14 @@ class BudgetLedger:
         """Every reservation still open, in the order it was posted."""
         return _open_reservations(self.entries())
 
+    def holds(self, charge_id: str, /) -> bool:
+        """Whether a reservation was ever posted for ``charge_id``, open
+        or already answered."""
+        return (
+            self.entry_for_charge(charge_id, kind=EntryKind.RESERVATION)
+            is not None
+        )
+
     def entry_for_charge(
         self, charge_id: str, *, kind: EntryKind | None = None
     ) -> BudgetEntry | None:

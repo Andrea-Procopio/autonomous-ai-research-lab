@@ -54,7 +54,9 @@ class AttemptPhase(StrEnum):
 
     Phases may be skipped — an attempt that runs no job never reaches
     ``SUBMITTED`` — but they never go backwards, and every attempt
-    begins at ``STARTED``.
+    begins at ``STARTED``. Two phases end an attempt early instead:
+    ``RELEASED`` when nothing was bought, ``ABANDONED`` when something
+    was.
 
     The first two are written *before* the thing they name, and the rest
     *after*. That asymmetry is deliberate. An intent recorded early can
@@ -82,19 +84,34 @@ class AttemptPhase(StrEnum):
     successor, so from here recovery can finish without the runtime."""
 
     COMMITTED = "committed"
-    """The debit is settled and the successor state is persisted.
-    Carries what was reserved and what it actually cost."""
+    """The successor the bundle produces is persisted. The science has
+    landed; only the money is still open."""
 
     COMPLETED = "completed"
-    """Nothing is owed. The attempt is closed."""
+    """The debit is settled and nothing is owed. Carries what was
+    reserved and what it actually cost, so a breach is two numbers on one
+    row rather than a flag that could contradict them."""
 
     RELEASED = "released"
-    """The attempt was abandoned before it cost anything, and its
-    reservation was given back. The other way an attempt ends."""
+    """Abandoned before it cost anything, its reservation given back.
+    Only written where nothing was bought can be *proven* — a role that
+    refused before calling anything, or an attempt whose job was never
+    submitted."""
+
+    ABANDONED = "abandoned"
+    """Abandoned after it had already cost something. The debit is
+    settled and no successor was produced: the work was bought, and the
+    reasoning that would have turned it into a state change is gone."""
 
     @property
     def is_terminal(self) -> bool:
-        return self in {AttemptPhase.COMPLETED, AttemptPhase.RELEASED}
+        """Three ways to end, and the difference between them is what was
+        paid and what was produced."""
+        return self in {
+            AttemptPhase.COMPLETED,
+            AttemptPhase.RELEASED,
+            AttemptPhase.ABANDONED,
+        }
 
 
 class AttemptStatus(StrEnum):

@@ -77,10 +77,13 @@ class TestRecording:
             attempt_id="att_1",
             phase=AttemptPhase.COMMITTED,
             state_id="st_next",
+        )
+        journal.record(
+            attempt_id="att_1",
+            phase=AttemptPhase.COMPLETED,
             reserved=HELD,
             actual=ResourceCost(usd=4.0),
         )
-        journal.record(attempt_id="att_1", phase=AttemptPhase.COMPLETED)
 
         assert journal.open_attempts() == ()
         last = journal.last_for("att_1")
@@ -217,7 +220,7 @@ class TestTheLifecycleOnlyMovesForward:
 
         assert event.sequence == 1
 
-    def test_a_settled_attempt_cannot_be_released(
+    def test_a_committed_attempt_cannot_be_released(
         self, tmp_path: Path
     ) -> None:
         journal = RunJournal(tmp_path, "run_1")
@@ -226,12 +229,42 @@ class TestTheLifecycleOnlyMovesForward:
             attempt_id="att_1",
             phase=AttemptPhase.COMMITTED,
             state_id="st_next",
-            reserved=HELD,
-            actual=ResourceCost(usd=4.0),
         )
 
-        with pytest.raises(JournalConflictError, match="already been spent"):
+        with pytest.raises(JournalConflictError, match="already committed"):
             journal.record(attempt_id="att_1", phase=AttemptPhase.RELEASED)
+
+    def test_a_committed_attempt_cannot_be_abandoned_either(
+        self, tmp_path: Path
+    ) -> None:
+        journal = RunJournal(tmp_path, "run_1")
+        started(journal)
+        journal.record(
+            attempt_id="att_1",
+            phase=AttemptPhase.COMMITTED,
+            state_id="st_next",
+        )
+
+        with pytest.raises(JournalConflictError, match="already committed"):
+            journal.record(
+                attempt_id="att_1",
+                phase=AttemptPhase.ABANDONED,
+                reserved=HELD,
+                actual=ResourceCost(usd=4.0),
+            )
+
+    def test_a_released_attempt_cannot_claim_a_cost(
+        self, tmp_path: Path
+    ) -> None:
+        with pytest.raises(ValueError, match="second answer"):
+            AttemptEvent(
+                run_id="run_1",
+                sequence=1,
+                attempt_id="att_1",
+                phase=AttemptPhase.RELEASED,
+                actual=ResourceCost(usd=1.0),
+                previous_event_id="aevt_0",
+            )
 
 
 class TestWhatEachPhasePromises:
@@ -285,7 +318,7 @@ class TestWhatEachPhasePromises:
                 previous_event_id="aevt_0",
             )
 
-    def test_only_the_committing_event_says_what_it_cost(self) -> None:
+    def test_only_the_closing_event_says_what_it_cost(self) -> None:
         with pytest.raises(ValueError, match="second answer"):
             AttemptEvent(
                 run_id="run_1",
@@ -304,6 +337,10 @@ class TestBreach:
             attempt_id="att_1",
             phase=AttemptPhase.COMMITTED,
             state_id="st_next",
+        )
+        journal.record(
+            attempt_id="att_1",
+            phase=AttemptPhase.COMPLETED,
             reserved=HELD,
             actual=actual,
         )

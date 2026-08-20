@@ -83,6 +83,7 @@ from autonomous_research_lab.roles.base import (
     RoleSuitability,
 )
 from autonomous_research_lab.runtime.config import RuntimeConfig
+from autonomous_research_lab.runtime.journal import JournalingJobRunner
 from autonomous_research_lab.runtime.providers import (
     FakeModelProvider,
     ModelProvider,
@@ -1051,13 +1052,20 @@ class CanaryLab:
             roles={
                 RoleName.RESEARCH_DIRECTOR: CanaryScientist(),
                 RoleName.RESEARCH_ENGINEER: CanaryEngineer(
-                    DirectJobRunner(LocalExecutor(request.root / "runs"))
+                    JournalingJobRunner(
+                        inner=DirectJobRunner(
+                            LocalExecutor(request.root / "runs")
+                        ),
+                        journal=request.journal,
+                    )
                 ),
                 RoleName.RESULT_ANALYST: CanaryAnalyst(),
             },
             store=request.evidence,
             states=request.states,
             ledger=request.ledger,
+            journal=request.journal,
+            bundles=request.bundles,
         )
 
 
