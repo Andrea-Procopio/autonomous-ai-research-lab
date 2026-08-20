@@ -6,22 +6,33 @@ still here, and still what it said it was?* — and answers it with typed
 issues, never with verdicts. What a broken run means is somebody else's
 call; this module only says what is broken.
 
-Six checks, each reusing the guarantee the writing layer already built:
+Seven checks, each reusing the guarantee the writing layer already
+built:
 
 ============  ============================================================
 snapshots     ``FileStateStore.load`` recomputes each state's content id
+lineage       every parent is stored, every chain ends at a root, no
+              cycles, and a forward walk from the roots reaches all of it
 records       every result and evidence payload re-hashes to its digest
 references    every ``ResultRef`` and evidence id in every state resolves
 artifacts     every manifest entry has a blob that still hashes to it
 chain         ``validate_evidence_chain`` on each leaf state
-ledger        the funded run replays to the balance its state carries
+ledger        the funded run replays to the balance its own head carries
 ============  ============================================================
 
-The chain check runs on leaf states — the ones nothing else descends
-from — rather than on every snapshot: a lineage's intermediate states
-are already covered by the leaf that grew out of them, and running the
-full chain check on all of them turns a linear pass into a quadratic
-one.
+The lineage check is the one that decides whether the others are worth
+anything. A committed snapshot names a parent, and the whole promise of
+an immutable lineage is that the trajectory can be walked afterwards by
+a process that saw none of it. A run whose states point at parents that
+were never written down does not keep that promise, and a verifier
+reporting it intact would be reporting on the files it happened to find
+rather than on the run.
+
+The evidence-chain check runs on leaf states — the ones nothing else
+descends from — rather than on every snapshot: a lineage's intermediate
+states are already covered by the leaf that grew out of them, and
+running the full chain check on all of them turns a linear pass into a
+quadratic one.
 
 Nothing here raises for a broken run. A missing blob, a corrupt payload,
 a state citing a fact nobody stored — each becomes an issue in the
@@ -69,6 +80,12 @@ class IntegrityIssueKind(StrEnum):
 
     CORRUPT_BLOB = "corrupt_blob"
     """Stored bytes no longer hash to the digest they are filed under."""
+
+    INCOMPLETE_LINEAGE = "incomplete_lineage"
+    """A snapshot's ancestry does not survive: a parent that is not
+    stored, a chain that never reaches a root, a cycle, or a state no
+    forward walk from a root reaches. A run whose committed states point
+    at absent parents is not an intact run, whatever else survives."""
 
     CHAIN_ISSUE = "chain_issue"
     """The evidence chain reports a problem — carried through with its own
@@ -124,6 +141,7 @@ def verify_run(
     results = _check_records(store, issues)
     evidence_count = _check_evidence(store, issues)
     blobs = _check_artifacts(store, results, issues)
+    _check_lineage(states, issues)
     _check_references(states, store, issues)
     _check_chain(states, store, issues)
     _check_ledger(root, program_root, states, issues)
@@ -157,6 +175,111 @@ def _load_states(
                 )
             )
     return loaded
+
+
+def _check_lineage(
+    states: list[ResearchState], issues: list[IntegrityIssue]
+) -> None:
+    """Four questions about ancestry, asked separately.
+
+    A state's ``parent_id`` is a claim about a state that should be
+    findable. Every committed snapshot names one, and the whole point of
+    an immutable lineage is that the trajectory can be walked afterwards
+    by a process that saw none of it. So:
+
+    1. every non-root parent is stored;
+    2. every chain terminates at a root — a state with no parent;
+    3. no chain revisits a state;
+    4. walking *forward* from the roots reaches every state.
+
+    The fourth is not implied by the first three for a reader's
+    purposes: it is the reconstruction a cold process actually performs,
+    done here as its own traversal rather than inferred from the other
+    three, so a mistake in the backward walk cannot hide.
+    """
+    if not states:
+        return
+    by_id = {state.id: state for state in states}
+    reaches_root: dict[str, bool] = {}
+
+    for state in states:
+        walked: list[str] = []
+        seen: set[str] = set()
+        current: ResearchState | None = state
+        while current is not None:
+            if current.id in seen:
+                issues.append(
+                    IntegrityIssue(
+                        kind=IntegrityIssueKind.INCOMPLETE_LINEAGE,
+                        subject_id=state.id,
+                        detail=(
+                            f"the ancestry of {state.id} revisits "
+                            f"{current.id}; a lineage is a chain, and a "
+                            f"cycle in it cannot be replayed"
+                        ),
+                    )
+                )
+                break
+            seen.add(current.id)
+            walked.append(current.id)
+            if current.parent_id is None:
+                for visited in walked:
+                    reaches_root[visited] = True
+                break
+            parent = by_id.get(current.parent_id)
+            if parent is None:
+                issues.append(
+                    IntegrityIssue(
+                        kind=IntegrityIssueKind.INCOMPLETE_LINEAGE,
+                        subject_id=current.id,
+                        detail=(
+                            f"state {current.id} names parent "
+                            f"{current.parent_id}, which is not stored; the "
+                            f"trajectory behind it cannot be walked"
+                        ),
+                    )
+                )
+                break
+            if reaches_root.get(parent.id):
+                for visited in walked:
+                    reaches_root[visited] = True
+                break
+            current = parent
+
+    reachable = _reachable_from_roots(states)
+    for state in states:
+        if state.id in reachable:
+            continue
+        if not reaches_root.get(state.id):
+            continue  # already reported above; do not say it twice
+        issues.append(
+            IntegrityIssue(
+                kind=IntegrityIssueKind.INCOMPLETE_LINEAGE,
+                subject_id=state.id,
+                detail=(
+                    f"state {state.id} is not reached by walking forward "
+                    f"from any root, so a cold reconstruction of this run "
+                    f"would not arrive at it"
+                ),
+            )
+        )
+
+
+def _reachable_from_roots(states: list[ResearchState]) -> set[str]:
+    """Every state a forward walk from the roots arrives at."""
+    children: dict[str, list[str]] = {}
+    for state in states:
+        if state.parent_id:
+            children.setdefault(state.parent_id, []).append(state.id)
+    frontier = [state.id for state in states if state.parent_id is None]
+    reached: set[str] = set()
+    while frontier:
+        current = frontier.pop()
+        if current in reached:
+            continue
+        reached.add(current)
+        frontier.extend(children.get(current, ()))
+    return reached
 
 
 def _check_records(
@@ -333,25 +456,20 @@ def _check_ledger(
     states: list[ResearchState],
     issues: list[IntegrityIssue],
 ) -> None:
-    """The ledger must agree with a state the run actually reached.
+    """The ledger must agree with the head of the run's own chain.
 
-    Which state depends on how far the run has got. An unspent run's
-    balance is its grant, and equals the funded snapshot's budget
+    Which state that is depends on how far the run has got. An unspent
+    run's balance is its grant, and equals the funded snapshot's budget
     because that snapshot *is* the grant. A run that has spent agrees
     with neither: the funded snapshot is immutable and keeps the grant
-    forever, while the balance tracks whatever the run has committed
-    since. Comparing against the funded snapshot alone reports every run
+    forever, while the balance tracks what the run has committed since.
+    Comparing against the funded snapshot alone would report every run
     that did any work, which is the wrong way round.
 
-    The check is therefore "some snapshot under this root holds this
-    balance" rather than "the head of this run's chain does", and that
-    is a real weakening. It is forced: the snapshots a run leaves are a
-    sequence of committed heads, not a linked list. One step evolves the
-    state several times — begin the attempt, apply the transition,
-    resolve it — and persists only what it committed, so each snapshot's
-    parent is an intermediate that was never written down. Recovering
-    the order would need the runtime to persist every evolution, which
-    is a cost decision and not this pass's to make.
+    So the comparison walks forward from the funded state to the heads
+    of its own lineage — its own, because a root may hold snapshots from
+    more than one run, and a balance may only be checked against the
+    chain its grant paid for.
     """
     resolved = program_root if program_root is not None else root / "program"
     if not (resolved / "envelopes").is_dir():
@@ -381,9 +499,10 @@ def _check_ledger(
                 )
             )
             continue
-        reached = {snapshot.budget for snapshot in states}
-        if balance in {run.granted, state.budget, *reached}:
+        heads = _heads_below(run.funded_state_id, states)
+        if balance in {run.granted, state.budget, *(h.budget for h in heads)}:
             continue
+        reached = ", ".join(f"{head.id}: {head.budget}" for head in heads)
         issues.append(
             IntegrityIssue(
                 kind=IntegrityIssueKind.LEDGER_ISSUE,
@@ -391,14 +510,45 @@ def _check_ledger(
                 detail=(
                     f"the ledger replays to {balance}, which is neither the "
                     f"grant {run.granted}, nor the funded state's "
-                    f"{state.budget}, nor the budget of any of the "
-                    f"{len(states)} snapshot(s) this root holds"
+                    f"{state.budget}, nor the budget of any head of this "
+                    f"run's lineage ({reached or 'none recorded'})"
                 ),
             )
         )
 
 
 # -- helpers -------------------------------------------------------------------
+
+
+def _heads_below(
+    funded_state_id: str, states: list[ResearchState]
+) -> list[ResearchState]:
+    """The states this run reached that nothing descends from.
+
+    Walked forward from the funded snapshot, so snapshots belonging to
+    another run under the same root cannot answer for this one.
+    """
+    by_parent: dict[str, list[ResearchState]] = {}
+    for state in states:
+        if state.parent_id:
+            by_parent.setdefault(state.parent_id, []).append(state)
+    heads: list[ResearchState] = []
+    frontier = [funded_state_id]
+    seen = {funded_state_id}
+    by_id = {state.id: state for state in states}
+    while frontier:
+        current = frontier.pop()
+        children = by_parent.get(current, [])
+        if not children:
+            found = by_id.get(current)
+            if found is not None:
+                heads.append(found)
+            continue
+        for child in children:
+            if child.id not in seen:
+                seen.add(child.id)
+                frontier.append(child.id)
+    return heads
 
 
 def _leaves(states: list[ResearchState]) -> list[ResearchState]:

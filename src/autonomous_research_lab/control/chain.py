@@ -39,6 +39,7 @@ from typing import Final, Protocol
 from ..admission.admitter import CandidateAdmitter
 from ..admission.door import AdmissionRefusedError
 from ..admission.store import AdmissionStore
+from ..core.state import ResearchState
 from ..evidence.file_store import FileEvidenceStore
 from ..ideation.generator import IdeaGenerator
 from ..ideation.store import IdeationStore
@@ -70,10 +71,6 @@ from .stage import (
     Fact,
     StageName,
     StageSpend,
-)
-
-_STATE_FACTS: Final = frozenset(
-    {str(Fact.STATE_ID), str(Fact.FUNDED_STATE_ID), str(Fact.ADMITTED_STATE_ID)}
 )
 
 _LITERATURE: Final = "literature"
@@ -132,28 +129,10 @@ class StageContext:
     lab: Lab
     facts: ChainFacts = NO_FACTS
 
-    known_states: frozenset[str] = frozenset()
-    """Every state id the event log has ever mentioned.
-
-    Only experimentation reads it, and it needs it because the snapshot
-    chain a run leaves is not linked: one step evolves the state several
-    times and persists only what it committed, so a successor's parent
-    is an intermediate nobody wrote down. What identifies a step that
-    committed before the crash is therefore not its parent but the fact
-    that the log has never heard of it.
-    """
-
     def with_produced(
         self, produced: tuple[tuple[str, str], ...]
     ) -> StageContext:
-        states = {
-            value for name, value in produced if name in _STATE_FACTS
-        }
-        return replace(
-            self,
-            facts=self.facts.updated(produced),
-            known_states=self.known_states | states,
-        )
+        return replace(self, facts=self.facts.updated(produced))
 
 
 @dataclass(frozen=True, slots=True)
@@ -601,9 +580,11 @@ class AdmissionStage(_SingleAttempt):
 class FundingStage(_SingleAttempt):
     """The one stage no model touches: an operator grant becomes a run.
 
-    It also copies the funded snapshot into the run root's own state
-    store, so the snapshot chain a verifier walks starts where the
-    spending starts.
+    It also copies the admitted seed and its funded successor into the
+    run root's own state store. Both, not just the funded one: the
+    funded state names the admitted state as its parent, and a run root
+    whose oldest snapshot points at a state nobody can find has a
+    lineage that does not terminate.
     """
 
     @property
@@ -663,7 +644,12 @@ class FundingStage(_SingleAttempt):
         *,
         replayed: bool = False,
     ) -> StageOutcome:
-        funded = context.stores.program.state_store().load(funded_state_id)
+        program_states = context.stores.program.state_store()
+        funded = program_states.load(funded_state_id)
+        if funded.parent_id is not None:
+            context.stores.states.persist(
+                program_states.load(funded.parent_id)
+            )
         context.stores.states.persist(funded)
         return StageOutcome(
             produced=_sorted(
@@ -701,25 +687,24 @@ class ExperimentationStage:
     def completed(
         self, context: StageContext, plan: StagePlan
     ) -> StageOutcome | None:
-        """A snapshot the log has never mentioned is a step that
-        committed before the crash reached the log.
+        """Follow the lineage down from the state this step began at.
 
-        Two or more of them is a root that has been interrupted more
-        than once, and there is no honest way to tell which is the head:
-        the walk re-steps, and the orphans stay where they are as
-        preserved partials rather than being guessed about.
+        The runtime persists every state a step derives, oldest first,
+        so a crash leaves a chain that is shorter rather than one with
+        holes. Its end may be mid-step, though — a state that has begun
+        an attempt and not resolved it — and resuming from there would
+        leave that attempt open forever. So the reconcile adopts the
+        deepest descendant whose attempts are all terminal: the last
+        point the run was actually between steps.
         """
-        del plan
-        orphans = [
-            state_id
-            for state_id in context.stores.states.state_ids()
-            if state_id not in context.known_states
-        ]
-        if len(orphans) != 1:
+        committed = _last_committed_below(
+            context.stores.states, plan.subject_id
+        )
+        if committed is None:
             return None
         return StageOutcome(
-            produced=_sorted({Fact.STATE_ID: orphans[0]}),
-            detail=f"adopted the step a crash hid ({orphans[0]})",
+            produced=_sorted({Fact.STATE_ID: committed.id}),
+            detail=f"adopted the step a crash hid ({committed.id})",
             repeat=True,
         )
 
@@ -788,6 +773,40 @@ def _selection_outcome(
         detail=str(outcome),
         ends_investigation=ends,
     )
+
+
+def _last_committed_below(
+    states: FileStateStore, state_id: str
+) -> ResearchState | None:
+    """The deepest descendant of ``state_id`` that is between steps.
+
+    Between steps means every attempt on it is resolved. A state with an
+    attempt still open is one the loop was in the middle of, and it is
+    not a place to start from.
+    """
+    loaded = {found: states.load(found) for found in states.state_ids()}
+    children: dict[str, list[str]] = {}
+    for found, state in loaded.items():
+        if state.parent_id:
+            children.setdefault(state.parent_id, []).append(found)
+
+    deepest: ResearchState | None = None
+    depth = 0
+
+    def walk(current: str, distance: int) -> None:
+        nonlocal deepest, depth
+        state = loaded.get(current)
+        if (
+            state is not None
+            and distance > depth
+            and all(attempt.status.is_terminal for attempt in state.attempts)
+        ):
+            deepest, depth = state, distance
+        for child in children.get(current, ()):
+            walk(child, distance + 1)
+
+    walk(state_id, 0)
+    return deepest
 
 
 def _spend(

@@ -175,10 +175,13 @@ human in the loop, producing results that survive scrutiny.
   root and fund once with every file byte-identical, and a synthetic
   brief walks all seven stages — executing real experiments through the
   ordinary executor — then walks again in seven interrupted pieces to
-  the same admitted state. Still open: a trusted template catalog whose
-  metrics match admitted predictions, without which a live run stops at
-  the funded run; and the snapshot sequence a run leaves is not a linked
-  chain, which weakens two checks (see KNOWN_ISSUES).
+  the same admitted state. Building it exposed two defects, both fixed:
+  the verifier passed every run that had spent anything, and the runtime
+  persisted only each step's head, leaving committed snapshots pointing
+  at parents nobody had written down. A run's whole lineage is stored
+  now, and `arl verify` checks that it is whole. Still open: a trusted
+  template catalog whose metrics match admitted predictions, without
+  which a live run stops at the funded run.
 - **Real experiment execution.** ML training runs under the existing
   executor contract: checkpoints, longer timeouts, GPU accounting.
 - **Scientific debugging and experiment verification.** Done in its

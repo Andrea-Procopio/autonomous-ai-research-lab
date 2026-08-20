@@ -18,15 +18,23 @@ import sys
 from pathlib import Path
 
 from autonomous_research_lab.control.controller import Controller, Outcome
+from autonomous_research_lab.control.lab import RuntimeRequest
 from autonomous_research_lab.control.stage import (
     CHAIN_ORDER,
     Fact,
     StageName,
     StageStatus,
 )
+from autonomous_research_lab.core.state import ResearchState
+from autonomous_research_lab.evidence.file_store import FileEvidenceStore
 from autonomous_research_lab.ideation.store import IdeationStore
 from autonomous_research_lab.mapping.store import MappingStore
+from autonomous_research_lab.persistence import FileStateStore
 from autonomous_research_lab.priorart.store import PriorArtStore
+from autonomous_research_lab.program.integrity import (
+    IntegrityIssueKind,
+    _reachable_from_roots,
+)
 from autonomous_research_lab.program.store import ProgramStore
 from autonomous_research_lab.selection.store import SelectionStore
 from examples.canary_chain import CONFIG, verify, walk
@@ -101,6 +109,31 @@ class TestOneWalk:
 
         assert (tmp_path / "runs").is_dir()
         assert list((tmp_path / "runs").glob("*/metrics.json"))
+
+    def test_the_snapshot_chain_is_whole(self, tmp_path: Path) -> None:
+        """One root, no absent parents, one head, and a forward walk from
+        the root that reaches everything — the four things a verifier has
+        to be able to say before it says "intact"."""
+        walk(tmp_path)
+        states = FileStateStore(tmp_path)
+        stored = {found: states.load(found) for found in states.state_ids()}
+
+        roots = [
+            state for state in stored.values() if state.parent_id is None
+        ]
+        absent = [
+            state.parent_id
+            for state in stored.values()
+            if state.parent_id is not None and state.parent_id not in stored
+        ]
+        heads = set(stored) - {
+            state.parent_id for state in stored.values() if state.parent_id
+        }
+
+        assert len(roots) == 1
+        assert absent == []
+        assert len(heads) == 1
+        assert len(_reachable_from_roots(list(stored.values()))) == len(stored)
 
     def test_the_ledger_billed_every_attempt(self, tmp_path: Path) -> None:
         walk(tmp_path)
@@ -248,6 +281,111 @@ class TestAnHonestRefusal:
         result = Controller(root).run(payload, lab=canary_lab())
 
         assert result.events[-1].spend.is_zero
+
+
+class TestAStepInterruptedMidFlight:
+    """The finest crash the controller has to survive: a process killed
+    inside one step, after some of the states it derived are on disk."""
+
+    def one_step(self, root: Path) -> list[ResearchState]:
+        """Run one real step into a shadow store, and return the lineage
+        it derived in the order the runtime wrote it.
+
+        A shadow store rather than the run's own, because the point is
+        to choose how much of it lands.
+        """
+        controller = Controller(root)
+        (investigation,) = controller.investigations.investigations()
+        log = controller.investigations.log_for(
+            investigation.investigation_id
+        )
+        head = log.facts().require(Fact.STATE_ID)
+        program = ProgramStore(root / "program")
+        (run,) = program.runs()
+        shadow = FileStateStore(root / "shadow")
+        runtime = canary_lab().runtime(
+            RuntimeRequest(
+                root=root,
+                evidence=FileEvidenceStore(root),
+                states=shadow,
+                ledger=program.ledger_for(run.run_id),
+            )
+        )
+        runtime.step(FileStateStore(root).load(head))
+        derived = {found: shadow.load(found) for found in shadow.state_ids()}
+        children = {
+            state.parent_id: state
+            for state in derived.values()
+            if state.parent_id
+        }
+        ordered: list[ResearchState] = []
+        current = children.get(head)
+        while current is not None:
+            ordered.append(current)
+            current = children.get(current.id)
+        return ordered
+
+    def test_a_torn_write_is_loud_rather_than_resumed(
+        self, tmp_path: Path
+    ) -> None:
+        """A step's states are written after the step returns, so a
+        process killed inside the write leaves a ledger that has been
+        debited and a chain that stops mid-attempt.
+
+        Nothing here can honestly recover that: the money moved and the
+        state that recorded what it bought did not survive. The reconcile
+        refuses the mid-attempt end — resuming there would leave the
+        attempt open forever — and the next step finds the ledger and the
+        state disagreeing and fails closed, which is the behavior the
+        funded run was built to have. Afterwards the verifier says
+        exactly which part is broken: the accounting, not the lineage.
+        """
+        walk(tmp_path, stop_after=StageName.FUNDING)
+        derived = self.one_step(tmp_path)
+        assert len(derived) > 2
+        torn = derived[: len(derived) // 2]
+        assert any(
+            not attempt.status.is_terminal for attempt in torn[-1].attempts
+        )
+        states = FileStateStore(tmp_path)
+        for partial in torn:
+            states.persist(partial)
+
+        result = walk(tmp_path)
+
+        assert result.outcome is Outcome.FAILED
+        assert "refusing to guess" in result.detail
+        assert not [
+            event for event in result.events if "crash hid" in event.detail
+        ]
+        report = verify(tmp_path)
+        assert report.of_kind(IntegrityIssueKind.LEDGER_ISSUE)
+        assert not report.of_kind(IntegrityIssueKind.INCOMPLETE_LINEAGE)
+
+    def test_a_whole_step_whose_event_was_lost_is_adopted(
+        self, tmp_path: Path
+    ) -> None:
+        """The other half of the same crash: every state landed, the
+        event did not. The step is adopted, not paid for again."""
+        walk(tmp_path, stop_after=StageName.FUNDING)
+        derived = self.one_step(tmp_path)
+        states = FileStateStore(tmp_path)
+        for partial in derived:
+            states.persist(partial)
+
+        result = walk(tmp_path, stop_after=StageName.EXPERIMENTATION)
+
+        adopted = [
+            event
+            for event in result.events
+            if event.stage is StageName.EXPERIMENTATION
+            and "crash hid" in event.detail
+        ]
+        assert adopted
+        assert adopted[0].produced == (
+            (str(Fact.STATE_ID), derived[-1].id),
+        )
+        assert verify(tmp_path).ok
 
 
 class TestWhenTheRecordIsLost:

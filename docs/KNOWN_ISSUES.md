@@ -70,40 +70,6 @@ The test's value is exactly that it uses a real socket and a real
 clock — it reproduced the >570 s live stall class that motivated the
 watchdog — so the fix should widen margins, not fake the clock.
 
-## The snapshots a run leaves are a sequence, not a linked chain
-
-- **Where:** every state written by
-  `ResearchRuntime` through `FileStateStore`, and therefore every run
-  root under `states/`.
-- **Status:** open, and deliberately not fixed in Task 6C. Nothing is
-  lost; what is missing is the *link* between what is kept.
-- **First observed:** 2026-08-20, while building the Task 6C canary. The
-  controller's reconcile for an interrupted experimentation step asked
-  "is there a snapshot whose `parent_id` is the state this step began
-  from?" and the answer was always no.
-
-One step evolves the state several times — begin the attempt, apply the
-transition, resolve the attempt, commit — and persists only the state it
-committed. Every intermediate is real, carries an id, and is never
-written down. So each persisted snapshot names a parent that is not in
-the store, and the store holds an unconnected sequence of heads rather
-than a chain.
-
-Two consequences, both worked around rather than fixed:
-
-- `verify_run`'s ledger check compares the balance against *any*
-  snapshot the root holds instead of against the head of the run's own
-  chain. Weaker, and stated as such in the code.
-- The controller identifies a step that committed before a crash by
-  finding a snapshot the event log has never mentioned, rather than by
-  following parent links. That works, and it cannot tell two
-  interruptions apart: a root with two unmentioned snapshots re-steps
-  and leaves both as preserved partials.
-
-The fix is to persist every evolution, which costs a file per mutation
-and needs a decision about what a run root should hold. Worth making
-deliberately rather than as a side effect of a controller.
-
 ## Operational: OpenAlex anonymous search returns 429 under cluster load
 
 - **Where:** live prior-art runs through `OpenAlexProvider` without

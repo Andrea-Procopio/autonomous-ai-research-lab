@@ -2108,10 +2108,13 @@ a controller that has nothing in memory — it reaches the same admitted
 state and the same funded state, with one run record in every stage
 store and one grant on the ledger.
 
-The canary found two defects the suite could not have: `verify_run`
-reported every run that had done any work (it compared the ledger
-against the funded snapshot, which keeps the grant forever), and the
-snapshot sequence is not a chain. Both are fixed or documented above.
+The canary found two defects the suite could not have, both fixed here.
+`verify_run` reported every run that had done any work, because it
+compared the ledger against the funded snapshot, which keeps the grant
+forever. And the snapshot store held a sequence rather than a chain: the
+runtime persisted only each step's head, so every committed state named
+a parent nobody had written down, and a verifier calling such a run
+intact was saying something it could not know.
 
 ## Architectural invariants
 

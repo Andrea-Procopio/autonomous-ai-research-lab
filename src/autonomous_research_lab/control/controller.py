@@ -48,17 +48,12 @@ from .lab import DefaultLab, Lab
 from .stage import (
     CHAIN_ORDER,
     ChainFacts,
-    Fact,
     StageName,
     StageSpend,
     StageStatus,
 )
 
 _CONTROL = "control"
-
-_STATE_FACTS = frozenset(
-    {str(Fact.STATE_ID), str(Fact.FUNDED_STATE_ID), str(Fact.ADMITTED_STATE_ID)}
-)
 
 
 class ControllerError(RuntimeError):
@@ -216,7 +211,6 @@ class Controller:
             config=config,
             lab=lab if lab is not None else DefaultLab(),
             facts=log.facts(),
-            known_states=_states_mentioned(log),
         )
         ended = _already_ended(log)
         if ended is not None:
@@ -401,21 +395,6 @@ class Controller:
             facts=log.facts(),
             events=log.events(),
         )
-
-
-def _states_mentioned(log: StageLog) -> frozenset[str]:
-    """Every state id the log has ever produced, succeeded or not.
-
-    "Ever", not "currently": a state a failed step produced is still a
-    state this investigation knows about, and treating it as an orphan
-    afterwards would adopt the same step twice.
-    """
-    return frozenset(
-        value
-        for event in log.events()
-        for name, value in event.produced
-        if name in _STATE_FACTS
-    )
 
 
 def _already_ended(log: StageLog) -> StageEvent | None:

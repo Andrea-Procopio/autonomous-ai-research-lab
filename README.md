@@ -145,7 +145,8 @@ end-to-end runs:
   experiments. Seven stages, one config that contains no record ids at
   all, and a durable event log: `RUNNING` before each stage's side
   effect, a terminal status after it, so a crash leaves a visible claim
-  rather than a gap. A stage whose work is already on disk is
+  rather than a gap, and every state a step derives is persisted so the
+  snapshot store holds a chain a later process can actually walk. A stage whose work is already on disk is
   recognised, never repeated — from the log if the event is there, from
   the stage's own store if a crash lost it. Nothing retries; a refusal
   or a failure stops the walk, and `arl resume` re-attempts that stage
@@ -348,11 +349,14 @@ python examples/verify_run.py --root <run_root>
 ```
 
 Checks a run root written by an earlier process: state snapshots
-re-hash to their filenames, result and evidence payloads survive their
-digests, every state reference resolves, every stored artifact still
-hashes to what its manifest says, the evidence chain holds, and a
-funded run's budget ledger replays. Prints every problem it finds, not
-just the first, and exits non-zero if there is one.
+re-hash to their filenames, the snapshot lineage is whole (every parent
+stored, every chain ending at a root, no cycles, and a forward walk from
+the roots reaching all of it), result and evidence payloads survive
+their digests, every state reference resolves, every stored artifact
+still hashes to what its manifest says, the evidence chain holds, and a
+funded run's budget ledger replays to the balance its own head carries.
+Prints every problem it finds, not just the first, and exits non-zero if
+there is one.
 
 A verified run is one whose records survived. Whether its science is
 right is a different question.
