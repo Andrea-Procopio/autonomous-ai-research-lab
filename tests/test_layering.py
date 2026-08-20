@@ -61,6 +61,12 @@
    ``core`` alone. Verifying a run needs snapshots and a ledger too,
    which is exactly why that pass lives one layer up in ``program``
    rather than here.
+12. ``control`` is the composition root: the one package that may import
+   every stage, and the one nothing may import. It sequences stages and
+   records what happened to them; it mutates no state and builds no
+   result or evidence record of its own. Rules 4 through 10 name it as
+   an allowed consumer for exactly this reason — a composition root is
+   the thing they forbid *everywhere else*.
 """
 
 from __future__ import annotations
@@ -80,6 +86,7 @@ SELECTION = SRC / "selection"
 ADMISSION = SRC / "admission"
 PROGRAM = SRC / "program"
 EVIDENCE = SRC / "evidence"
+CONTROL = SRC / "control"
 PROVIDERS = SRC / "runtime" / "providers.py"
 PROVIDER_MODULES = (PROVIDERS, SRC / "runtime" / "muse.py")
 
@@ -1204,4 +1211,61 @@ def test_evidence_depends_on_core_alone() -> None:
                     if alias.name.startswith(f"{PACKAGE}.")
                     and not alias.name.startswith(f"{PACKAGE}.core")
                 )
+    assert violations == []
+
+
+def test_nothing_in_the_package_imports_control() -> None:
+    """The controller is the composition root and therefore the leaf.
+    It is allowed to import every stage precisely because nothing
+    imports it: the arrow that would let a stage learn its own position
+    in the chain is the one this rule refuses to draw."""
+    violations: list[str] = []
+    for path in sorted(SRC.rglob("*.py")):
+        if CONTROL in path.parents:
+            continue
+        tree = ast.parse(path.read_text(), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+                if "control" in module.split("."):
+                    violations.append(
+                        f"{path.relative_to(SRC)}: imports {module}"
+                    )
+            elif isinstance(node, ast.Import):
+                violations.extend(
+                    f"{path.relative_to(SRC)}: imports {alias.name}"
+                    for alias in node.names
+                    if "control" in alias.name.split(".")
+                )
+    assert violations == []
+
+
+def test_control_sequences_stages_but_never_does_their_work() -> None:
+    """A composition root that started deciding things would be a second
+    implementation of every stage it calls. The controller may hold a
+    state and hand it on; it may not mutate one, and it may not build a
+    result or an evidence record — those belong to the runtime and the
+    stage that owns them."""
+    forbidden = {"ExperimentResult", "Evidence", "EpistemicAssessment"}
+    violations: list[str] = []
+    for path in sorted(CONTROL.rglob("*.py")):
+        tree = ast.parse(path.read_text(), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                if (
+                    isinstance(node.func, ast.Attribute)
+                    and node.func.attr in STATE_MUTATORS
+                ):
+                    violations.append(
+                        f"{path.name}:{node.lineno}: calls "
+                        f".{node.func.attr}(...)"
+                    )
+                if (
+                    isinstance(node.func, ast.Name)
+                    and node.func.id in forbidden
+                ):
+                    violations.append(
+                        f"{path.name}:{node.lineno}: constructs "
+                        f"{node.func.id}"
+                    )
     assert violations == []
