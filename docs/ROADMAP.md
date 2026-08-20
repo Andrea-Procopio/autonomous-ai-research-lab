@@ -133,10 +133,27 @@ human in the loop, producing results that survive scrutiny.
     never a promotion: `ADMITTED` does not mean true, novel, or
     empirically supported.
   - *Still open:* access resolution for attested material ambiguities
-    on metadata-only works, a budgeted planner and experiment
-    execution over the admitted state, and findings entering the state
-    as structured objects carrying their sources through the governed
-    commit.
+    on metadata-only works, experiment execution over the funded
+    state, and findings entering the state as structured objects
+    carrying their sources through the governed commit.
+- **Funded runs.** Done (Task 6A, 2026-08-20). An admitted state
+  carries no budget, and a state's identity excludes its budget, so
+  funding one in place produces different bytes under an unchanged id
+  and the append-only snapshot store refuses the write. Funding is
+  succession instead: the funded state is a child of the admitted one,
+  which keeps its zero budget forever. A run directive names one
+  admission and one authorized grant; the run is an event with an
+  occurrence id, and every record about it is content-addressed and
+  tamper-loud. Spend lives on an append-only ledger — sequence-numbered,
+  hash-chained, write-once entries, idempotent by charge id, with the
+  exclusive file create as the concurrency primitive — so a balance
+  survives a restart, a repeated charge cannot debit twice, and two
+  concurrent debits cannot overspend. The runtime posts one debit per
+  attempt behind a protocol seam and fails closed when the ledger and
+  the state disagree. Proven over the preserved Task 5F admission with
+  zero model calls and zero network calls. Still open: a stage
+  controller and CLI that carry a topic through the whole chain, and a
+  durable evidence store behind the in-memory one.
 - **Real experiment execution.** ML training runs under the existing
   executor contract: checkpoints, longer timeouts, GPU accounting.
 - **Scientific debugging and experiment verification.** Done in its
