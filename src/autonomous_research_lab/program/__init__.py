@@ -39,6 +39,11 @@ from .authorization import (
     UnauthorizedGrantError,
 )
 from .directive import MAX_LABEL_CHARS, RunDirective
+from .door import (
+    RunInputs,
+    RunRefusedError,
+    require_admitted_state_for_run,
+)
 from .ledger import (
     BudgetLedger,
     LedgerConflictError,
@@ -46,12 +51,14 @@ from .ledger import (
     LedgerIntegrityError,
     LedgerMismatchError,
 )
+from .preflight import RunPlan, RunPreflightError, check_funding_coherence
 from .records import (
     MAX_REASON_CHARS,
     BudgetEntry,
     EntryKind,
     ResearchRun,
 )
+from .starter import RunStartResult, start_run
 from .store import (
     ProgramConflictError,
     ProgramIntegrityError,
@@ -79,5 +86,13 @@ __all__ = [
     "ProgramStore",
     "ResearchRun",
     "RunDirective",
+    "RunInputs",
+    "RunPlan",
+    "RunPreflightError",
+    "RunRefusedError",
+    "RunStartResult",
     "UnauthorizedGrantError",
+    "check_funding_coherence",
+    "require_admitted_state_for_run",
+    "start_run",
 ]

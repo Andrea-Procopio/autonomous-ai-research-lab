@@ -48,6 +48,13 @@
    analysis chain is a DAG with one invariant: retrieved papers and
    everything derived from them have no path into scientific state
    except through admission's governed door.
+10. ``program`` is admission's one consumer — the funded run an
+   admitted state descends into. It reads ``core``, ``admission``, and
+   ``persistence``, and nothing else; of every state mutator it may
+   call only ``fund``, because a funded successor is the last state
+   this side of the loop builds and every evolution after it belongs to
+   orchestration's commit layer. It cannot reach roles, orchestration,
+   evidence, execution, or literature, and nothing imports it.
 """
 
 from __future__ import annotations
@@ -65,6 +72,7 @@ IDEATION = SRC / "ideation"
 PRIORART = SRC / "priorart"
 SELECTION = SRC / "selection"
 ADMISSION = SRC / "admission"
+PROGRAM = SRC / "program"
 PROVIDERS = SRC / "runtime" / "providers.py"
 PROVIDER_MODULES = (PROVIDERS, SRC / "runtime" / "muse.py")
 
@@ -997,13 +1005,13 @@ def test_admission_imports_no_vendor_sdk() -> None:
         )
 
 
-def test_nothing_in_the_package_imports_admission() -> None:
-    """Admission is the new leaf: the admitted state leaves it through
-    the persistence store and the orchestration loop, never through an
-    import of the package itself."""
+def test_admission_has_exactly_one_consumer_in_the_package() -> None:
+    """Only ``program`` — the funded run an admitted state descends
+    into — may import admission: an admission record is a translated
+    seed, and funding it into a run is the one act that follows."""
     violations: list[str] = []
     for path in sorted(SRC.rglob("*.py")):
-        if ADMISSION in path.parents:
+        if ADMISSION in path.parents or PROGRAM in path.parents:
             continue
         tree = ast.parse(path.read_text(), filename=str(path))
         for node in ast.walk(tree):
@@ -1018,5 +1026,140 @@ def test_nothing_in_the_package_imports_admission() -> None:
                     f"{path.relative_to(SRC)}: imports {alias.name}"
                     for alias in node.names
                     if "admission" in alias.name.split(".")
+                )
+    assert violations == []
+
+
+def test_program_depends_only_on_its_declared_inputs() -> None:
+    """The run bridge reads ``core`` (the state it funds), ``admission``
+    (the seed it funds), and ``persistence`` (the snapshot store) — and
+    nothing else. It has no provider seam because it makes no model
+    call: funding is an operator act and a deterministic one. A program
+    module that needed roles, orchestration, literature, or the analysis
+    stages behind admission would be re-deciding what admission already
+    decided."""
+    allowed_absolute = (
+        f"{PACKAGE}.core",
+        f"{PACKAGE}.admission",
+        f"{PACKAGE}.persistence",
+        f"{PACKAGE}.program",
+    )
+    allowed_relative = ("core", "admission", "persistence")
+    violations: list[str] = []
+    for path in sorted(PROGRAM.rglob("*.py")):
+        tree = ast.parse(path.read_text(), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+                if node.level == 0 and module.startswith(f"{PACKAGE}."):
+                    if not module.startswith(allowed_absolute):
+                        violations.append(f"{path.name}: imports {module}")
+                elif node.level == 2 and not module.startswith(
+                    allowed_relative
+                ):
+                    violations.append(
+                        f"{path.name}: relative import of {module}"
+                    )
+                elif node.level > 2:
+                    violations.append(
+                        f"{path.name}: relative import above package"
+                    )
+            elif isinstance(node, ast.Import):
+                violations.extend(
+                    f"{path.name}: imports {alias.name}"
+                    for alias in node.names
+                    if alias.name.startswith(f"{PACKAGE}.")
+                    and not alias.name.startswith(allowed_absolute)
+                )
+    assert violations == []
+
+
+def test_program_calls_only_the_funding_mutator() -> None:
+    """Funding a genesis state is this package's one act on a state.
+    Every other evolution — proposals, attempts, results, judgments —
+    belongs to orchestration's commit layer, exactly as it does for
+    roles, so no other mutator may be called here."""
+    violations: list[str] = []
+    for path in sorted(PROGRAM.rglob("*.py")):
+        tree = ast.parse(path.read_text(), filename=str(path))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr in STATE_MUTATORS
+                and node.func.attr != "fund"
+            ):
+                violations.append(
+                    f"{path.name}:{node.lineno}: calls .{node.func.attr}(...)"
+                )
+    assert violations == []
+
+
+def test_program_cannot_reach_evidence_or_execution() -> None:
+    """A grant buys the chance to find something out; it never records
+    what was found. No module in ``program`` may import the proposal,
+    transition, evidence, or execution machinery, or reference
+    ``Evidence`` or ``ExperimentResult`` by name."""
+    forbidden_names = {"Evidence", "ExperimentResult"}
+    violations: list[str] = []
+    for path in sorted(PROGRAM.rglob("*.py")):
+        tree = ast.parse(path.read_text(), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+                if any(
+                    fragment in module.split(".")
+                    for fragment in (
+                        "proposals",
+                        "transitions",
+                        "evidence",
+                        "execution",
+                        "roles",
+                        "orchestration",
+                        "literature",
+                    )
+                ):
+                    violations.append(f"{path.name}: imports {module}")
+            elif isinstance(node, ast.Name) and node.id in forbidden_names:
+                violations.append(
+                    f"{path.name}:{node.lineno}: references {node.id}"
+                )
+    assert violations == []
+
+
+def test_program_imports_no_vendor_sdk() -> None:
+    """Funding makes no model call, so no adapter — vendor or house —
+    has any business here."""
+    for path in sorted(PROGRAM.rglob("*.py")):
+        roots = {module.split(".")[0] for module in _imported_modules(path)}
+        assert roots & VENDOR_SDKS == set(), f"{path.name} imports a vendor SDK"
+        modules = set(_imported_modules(path))
+        assert not any("muse" in module for module in modules), (
+            f"{path.name} imports the Muse adapter; funding makes no call"
+        )
+
+
+def test_nothing_in_the_package_imports_program() -> None:
+    """Program is the new leaf. The funded state leaves it the way the
+    admitted state left admission: through the snapshot store and an
+    explicit hand-off at the edge, never through an import of the
+    package by anything upstream of it."""
+    violations: list[str] = []
+    for path in sorted(SRC.rglob("*.py")):
+        if PROGRAM in path.parents:
+            continue
+        tree = ast.parse(path.read_text(), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+                if "program" in module.split("."):
+                    violations.append(
+                        f"{path.relative_to(SRC)}: imports {module}"
+                    )
+            elif isinstance(node, ast.Import):
+                violations.extend(
+                    f"{path.relative_to(SRC)}: imports {alias.name}"
+                    for alias in node.names
+                    if "program" in alias.name.split(".")
                 )
     assert violations == []
