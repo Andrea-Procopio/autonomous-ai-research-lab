@@ -12,6 +12,7 @@ interruption costs time and nothing else.
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -28,7 +29,8 @@ from autonomous_research_lab.mapping.store import MappingStore
 from autonomous_research_lab.priorart.store import PriorArtStore
 from autonomous_research_lab.program.store import ProgramStore
 from autonomous_research_lab.selection.store import SelectionStore
-from examples.canary_chain import verify, walk
+from examples.canary_chain import CONFIG, verify, walk
+from examples.canary_lab import lab as canary_lab
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -189,6 +191,65 @@ class TestStoppingAtEveryBoundary:
             assert log.unfinished() is None, stage
 
 
+def thin_config(tmp_path: Path) -> Path:
+    """The same canary, with too few sources extracted to build on.
+
+    Not a broken fixture: a map this thin is exactly what the adequacy
+    verdict exists to catch, and what the next stage's door exists to
+    refuse.
+    """
+    payload = json.loads(CONFIG.read_text(encoding="utf-8"))
+    payload["brief"]["max_extracted_sources"] = 3
+    payload["label"] = "canary with a map too thin to build on"
+    path = tmp_path / "thin.json"
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return path
+
+
+class TestAnHonestRefusal:
+    def test_a_door_refuses_and_the_walk_stops(self, tmp_path: Path) -> None:
+        root = tmp_path / "run"
+        controller = Controller(root)
+        payload = json.loads(
+            thin_config(tmp_path).read_text(encoding="utf-8")
+        )
+
+        result = controller.run(payload, lab=canary_lab())
+
+        assert result.outcome is Outcome.REFUSED
+        assert not result.ok
+        assert result.events[-1].status is StageStatus.REFUSED
+        assert result.events[-1].stage is StageName.IDEATION
+        assert "not adequate" in result.events[-1].detail
+
+    def test_the_stage_before_it_still_succeeded(
+        self, tmp_path: Path
+    ) -> None:
+        """An inadequate map is a finding, not a failure: the mapping
+        stage did its job and said so."""
+        root = tmp_path / "run"
+        payload = json.loads(
+            thin_config(tmp_path).read_text(encoding="utf-8")
+        )
+
+        result = Controller(root).run(payload, lab=canary_lab())
+
+        mapping = result.events[1]
+        assert mapping.stage is StageName.MAPPING
+        assert mapping.status is StageStatus.SUCCEEDED
+        assert "insufficient" in mapping.detail
+
+    def test_the_refusal_cost_nothing(self, tmp_path: Path) -> None:
+        root = tmp_path / "run"
+        payload = json.loads(
+            thin_config(tmp_path).read_text(encoding="utf-8")
+        )
+
+        result = Controller(root).run(payload, lab=canary_lab())
+
+        assert result.events[-1].spend.is_zero
+
+
 class TestWhenTheRecordIsLost:
     def test_completed_work_is_reconciled_not_repeated(
         self, tmp_path: Path
@@ -240,6 +301,21 @@ class TestThroughTheCommandLine:
         assert "funding" in finished.stdout
         assert run_counts(tmp_path)["program"] == 1
         assert verify(tmp_path).ok
+
+    def test_a_refusal_exits_two(self, tmp_path: Path) -> None:
+        """Two, not one: a precondition that was not met is a different
+        thing from a fault, and a script should be able to tell."""
+        refused = self._arl(
+            "run",
+            str(thin_config(tmp_path)),
+            "--root",
+            str(tmp_path / "run"),
+            "--lab",
+            "examples.canary_lab:lab",
+        )
+
+        assert refused.returncode == 2, refused.stdout
+        assert "refused" in refused.stdout
 
     def test_verify_says_intact(self, tmp_path: Path) -> None:
         walk(tmp_path)

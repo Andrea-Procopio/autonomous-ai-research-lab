@@ -360,51 +360,68 @@ def _mapping_extraction(request: ModelRequest) -> str:
 
 
 def _mapping_field_map(request: ModelRequest) -> str:
-    del request
+    """A map over exactly the sources the prompt shows.
+
+    Built from the request rather than from the corpus, because a brief
+    that extracts fewer sources shows fewer here — and a theme citing a
+    source the run never extracted is rejected by the gate, correctly.
+    """
+    shown = _shown(request)
+    recent = [source for source in shown if source in RECENT]
+    older = [source for source in shown if source in FOUNDATIONAL]
+    themes = []
+    if recent:
+        themes.append(
+            {
+                "name": "Prompt adaptation",
+                "summary": (
+                    "Recent work reweights attention heads to adapt "
+                    "without weight updates."
+                ),
+                "era": "recent",
+                "source_ids": [source.id for source in recent],
+            }
+        )
+    if older:
+        themes.append(
+            {
+                "name": "Meta-learning foundations",
+                "summary": (
+                    "Earlier work trains episodically for rapid adaptation."
+                ),
+                "era": "foundational",
+                "source_ids": [source.id for source in older],
+            }
+        )
     return json.dumps(
         {
-            "themes": [
-                {
-                    "name": "Prompt adaptation",
-                    "summary": (
-                        "Recent work reweights attention heads to adapt "
-                        "without weight updates."
-                    ),
-                    "era": "recent",
-                    "source_ids": [source.id for source in RECENT],
-                },
-                {
-                    "name": "Meta-learning foundations",
-                    "summary": (
-                        "Earlier work trains episodically for rapid "
-                        "adaptation."
-                    ),
-                    "era": "foundational",
-                    "source_ids": [source.id for source in FOUNDATIONAL],
-                },
-            ],
+            "themes": themes,
             "approaches": [
                 {
                     "name": "Gradient-free adaptation",
                     "summary": "Adaptation without updating any weights.",
-                    "source_ids": [RECENT[0].id, RECENT[1].id],
+                    "source_ids": [source.id for source in shown[:2]],
                 }
             ],
             "evaluation_practices": [
                 {
                     "name": "Held-out prompt accuracy",
                     "summary": "Accuracy measured on held-out prompts.",
-                    "source_ids": [RECENT[0].id, FOUNDATIONAL[0].id],
+                    "source_ids": [source.id for source in shown[:2]],
                 }
             ],
-            "relationships": [
-                {
-                    "kind": "builds_on",
-                    "from_theme": "Prompt adaptation",
-                    "to_theme": "Meta-learning foundations",
-                    "note": "adaptation reuses episodic ideas",
-                }
-            ],
+            "relationships": (
+                [
+                    {
+                        "kind": "builds_on",
+                        "from_theme": "Prompt adaptation",
+                        "to_theme": "Meta-learning foundations",
+                        "note": "adaptation reuses episodic ideas",
+                    }
+                ]
+                if len(themes) == 2
+                else []
+            ),
         }
     )
 
@@ -420,40 +437,40 @@ P_CONFLICT: Final = (
 
 
 def _mapping_inventory(request: ModelRequest) -> str:
-    del request
-    return json.dumps(
-        {
-            "problems": [
-                {
-                    "statement": P_OPEN,
-                    "kind": "open_problem",
-                    "grounding": (
-                        "the recent sources report degradation under "
-                        "distribution shift"
-                    ),
-                    "supporting_source_ids": [
-                        RECENT[0].id,
-                        RECENT[1].id,
-                        RECENT[2].id,
-                    ],
-                    "conflicting_source_ids": [],
-                },
-                {
-                    "statement": P_CONFLICT,
-                    "kind": "conflicting_findings",
-                    "grounding": (
-                        "the foundational sources train episodically; the "
-                        "recent ones adapt prompts without it"
-                    ),
-                    "supporting_source_ids": [
-                        FOUNDATIONAL[0].id,
-                        FOUNDATIONAL[1].id,
-                    ],
-                    "conflicting_source_ids": [RECENT[0].id],
-                },
-            ]
-        }
-    )
+    """The problems the shown extractions support, and no others."""
+    shown = _shown(request)
+    recent = [source for source in shown if source in RECENT]
+    older = [source for source in shown if source in FOUNDATIONAL]
+    problems: list[dict[str, object]] = []
+    if recent:
+        problems.append(
+            {
+                "statement": P_OPEN,
+                "kind": "open_problem",
+                "grounding": (
+                    "the recent sources report degradation under "
+                    "distribution shift"
+                ),
+                "supporting_source_ids": [
+                    source.id for source in recent[:3]
+                ],
+                "conflicting_source_ids": [],
+            }
+        )
+    if older and recent:
+        problems.append(
+            {
+                "statement": P_CONFLICT,
+                "kind": "conflicting_findings",
+                "grounding": (
+                    "the foundational sources train episodically; the "
+                    "recent ones adapt prompts without it"
+                ),
+                "supporting_source_ids": [source.id for source in older[:2]],
+                "conflicting_source_ids": [recent[0].id],
+            }
+        )
+    return json.dumps({"problems": problems})
 
 
 def _ideation_direction(request: ModelRequest) -> str:
