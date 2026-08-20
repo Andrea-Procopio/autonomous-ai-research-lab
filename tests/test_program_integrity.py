@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 from pathlib import Path
 
+from autonomous_research_lab.core.attempt import AttemptPhase
 from autonomous_research_lab.core.budget import ResearchBudget, ResourceCost
 from autonomous_research_lab.core.evidence import Evidence, EvidenceKind
 from autonomous_research_lab.core.experiment import (
@@ -35,11 +37,14 @@ from autonomous_research_lab.program.integrity import (
     _reachable_from_roots,
     verify_run,
 )
+from autonomous_research_lab.program.journal import RunJournal
+from autonomous_research_lab.program.ledger import BudgetLedger
 from autonomous_research_lab.program.records import ResearchRun
 from autonomous_research_lab.program.store import ProgramStore
 
 MANIFEST_FILENAME = "manifest.json"
 GRANT = ResearchBudget(wall_clock_seconds=100.0, usd=10.0, model_tokens=1_000)
+HELD = ResourceCost(usd=2.0)
 
 
 def make_run_dir(root: Path, *, name: str = "job-1") -> Path:
@@ -454,3 +459,173 @@ def _fund(root: Path) -> tuple[ProgramStore, ResearchRun]:
         )
     )
     return program, run
+
+
+class TestAttemptLinks:
+    """One row of the link table per test.
+
+    Each plants a record that is internally valid and points at
+    something that is not there, because that is the only shape this
+    check can catch: every store underneath already refuses content that
+    contradicts its own id.
+    """
+
+    def journalled(
+        self, root: Path
+    ) -> tuple[ProgramStore, ResearchRun, RunJournal, BudgetLedger]:
+        """A funded run with one attempt that began, committed and
+        closed — the shape a healthy step leaves behind."""
+        program, run = _fund(root)
+        journal = program.journal_for(run.run_id)
+        ledger = program.ledger_for(run.run_id)
+        _, _, state = write_run(root)
+        journal.record(
+            attempt_id="att_1",
+            phase=AttemptPhase.STARTED,
+            state_id=state.id,
+            reserved=HELD,
+        )
+        ledger.reserve(HELD, charge_id="att_1", reason="attempt att_1")
+        return program, run, journal, ledger
+
+    def close(self, journal: RunJournal, ledger: BudgetLedger) -> None:
+        ledger.settle(
+            ResourceCost(usd=1.0), charge_id="att_1", reason="attempt att_1"
+        )
+        journal.record(
+            attempt_id="att_1",
+            phase=AttemptPhase.COMPLETED,
+            reserved=HELD,
+            actual=ResourceCost(usd=1.0),
+        )
+
+    def links(self, root: Path) -> tuple[IntegrityIssue, ...]:
+        return verify_run(root, program_root=root / "program").of_kind(
+            IntegrityIssueKind.ATTEMPT_LINK
+        )
+
+    def test_a_closed_attempt_links_up(self, tmp_path: Path) -> None:
+        _, _, journal, ledger = self.journalled(tmp_path)
+        self.close(journal, ledger)
+
+        assert self.links(tmp_path) == ()
+
+    def test_a_run_with_no_journal_is_not_faulted(
+        self, tmp_path: Path
+    ) -> None:
+        """Everything written before the journal existed is such a run."""
+        _fund(tmp_path)
+        write_run(tmp_path)
+
+        assert self.links(tmp_path) == ()
+
+    def test_money_held_for_an_attempt_nobody_began(
+        self, tmp_path: Path
+    ) -> None:
+        _, _, journal, ledger = self.journalled(tmp_path)
+        self.close(journal, ledger)
+        ledger.reserve(HELD, charge_id="att_ghost", reason="a")
+
+        (issue,) = self.links(tmp_path)
+
+        assert issue.subject_id == "att_ghost"
+        assert "never began" in issue.detail
+
+    def test_an_attempt_holding_nothing(self, tmp_path: Path) -> None:
+        _, run, journal, ledger = self.journalled(tmp_path)
+        self.close(journal, ledger)
+        journal.record(
+            attempt_id="att_unheld",
+            phase=AttemptPhase.STARTED,
+            state_id=run.funded_state_id,
+            reserved=HELD,
+        )
+        journal.record(
+            attempt_id="att_unheld",
+            phase=AttemptPhase.RELEASED,
+        )
+
+        details = [issue.detail for issue in self.links(tmp_path)]
+
+        assert any("nothing was held for it" in detail for detail in details)
+
+    def test_a_debit_answering_no_reservation(self, tmp_path: Path) -> None:
+        _, _, journal, ledger = self.journalled(tmp_path)
+        self.close(journal, ledger)
+        ledger.debit(
+            ResourceCost(usd=1.0), charge_id="att_unauthorized", reason="a"
+        )
+
+        details = [issue.detail for issue in self.links(tmp_path)]
+
+        assert any("answers no reservation" in detail for detail in details)
+
+    def test_a_bundle_the_store_does_not_hold(self, tmp_path: Path) -> None:
+        _, _, journal, ledger = self.journalled(tmp_path)
+        journal.record(
+            attempt_id="att_1",
+            phase=AttemptPhase.BUNDLE_DURABLE,
+            bundle_id="bun_nowhere",
+        )
+        self.close(journal, ledger)
+
+        details = [issue.detail for issue in self.links(tmp_path)]
+
+        assert any("is not in the store" in detail for detail in details)
+
+    def test_a_committed_phase_naming_an_unstored_state(
+        self, tmp_path: Path
+    ) -> None:
+        _, _, journal, ledger = self.journalled(tmp_path)
+        journal.record(
+            attempt_id="att_1",
+            phase=AttemptPhase.COMMITTED,
+            state_id="st_nowhere",
+        )
+        self.close(journal, ledger)
+
+        details = [issue.detail for issue in self.links(tmp_path)]
+
+        assert any("did not store" in detail for detail in details)
+
+    def test_a_submitted_job_that_left_no_run_directory(
+        self, tmp_path: Path
+    ) -> None:
+        _, _, journal, ledger = self.journalled(tmp_path)
+        journal.record(
+            attempt_id="att_1",
+            phase=AttemptPhase.SUBMITTED,
+            job_id="job_nowhere",
+        )
+        self.close(journal, ledger)
+        (tmp_path / "runs").mkdir(exist_ok=True)
+
+        details = [issue.detail for issue in self.links(tmp_path)]
+
+        assert any("left no run directory" in detail for detail in details)
+
+    def test_another_backend_is_not_faulted_for_the_local_layout(
+        self, tmp_path: Path
+    ) -> None:
+        """No ``runs`` directory means the jobs live somewhere this check
+        knows nothing about."""
+        _, _, journal, ledger = self.journalled(tmp_path)
+        journal.record(
+            attempt_id="att_1",
+            phase=AttemptPhase.SUBMITTED,
+            job_id="job_elsewhere",
+        )
+        self.close(journal, ledger)
+        shutil.rmtree(tmp_path / "runs")
+
+        assert self.links(tmp_path) == ()
+
+    def test_an_attempt_still_open_is_a_run_that_owes_something(
+        self, tmp_path: Path
+    ) -> None:
+        self.journalled(tmp_path)  # started and never closed
+
+        (issue,) = self.links(tmp_path)
+
+        assert issue.subject_id == "att_1"
+        assert "no terminal phase" in issue.detail
