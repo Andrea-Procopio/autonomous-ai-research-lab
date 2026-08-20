@@ -9,11 +9,13 @@ could tell them apart. The record around that id is content-addressed
 like every other record in the repository, so it re-derives on load and
 a tampered envelope fails loudly.
 
-:class:`BudgetEntry` is one movement on the run's ledger. Entries are
-sequence-numbered from zero, and each names the id of the entry before
-it: the chain makes truncation, reordering, and substitution loud, not
-merely detectable by careful reading. Every entry also carries the
-balance after it, so a replay has something to disagree with.
+:class:`BudgetEntry` is one movement on the run's ledger — money
+granted, money spent, or money held aside against an attempt that has
+not finished. Entries are sequence-numbered from zero, and each names
+the id of the entry before it: the chain makes truncation, reordering,
+and substitution loud, not merely detectable by careful reading. Every
+entry also carries the balance after it, so a replay has something to
+disagree with.
 
 The one thing neither record holds is a scientific judgment. A grant
 buys the chance to find out; it says nothing about what will be found.
@@ -34,10 +36,27 @@ a grant's authority. It is a label, not a narrative."""
 
 
 class EntryKind(StrEnum):
-    """What one ledger entry did to the balance."""
+    """What one ledger entry did to the balance, or to what is free to
+    commit.
+
+    Two kinds move the balance and two do not. A grant raises it, a debit
+    lowers it, and between them a reservation and its release hold money
+    aside without spending it — so a crashed attempt leaves a visible
+    claim on the budget instead of a silence that looks like free money.
+    """
 
     GRANT = "grant"
     DEBIT = "debit"
+
+    RESERVATION = "reservation"
+    """An authorized maximum, held against the budget while an attempt
+    runs. It does not move the balance: nothing has been spent yet. It
+    is answered exactly once, by the debit that settles it or the
+    release that cancels it."""
+
+    RELEASE = "release"
+    """A reservation cancelled without spending. Written when recovery
+    proves the attempt never reached the point of costing anything."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,22 +64,34 @@ class BudgetEntry:
     """One movement on one run's ledger, written once and never revised.
 
     ``charge_id`` is the idempotency key: posting the same charge twice
-    records one entry. The caller supplies it from something already
-    unique — an attempt id for a debit, the authorization id for the
-    grant — so idempotency needs no clock and no coordination.
+    with the same kind records one entry. The caller supplies it from
+    something already unique — an attempt id for a reservation, its
+    debit and its release, the authorization id for the grant — so
+    idempotency needs no clock and no coordination.
+
+    One attempt id therefore appears on up to two entries: the
+    reservation, and whichever of the debit or the release answered it.
+    That shared id *is* the link between them, and it is what lets a
+    verifier ask whether every reservation was answered and every debit
+    was authorized.
     """
 
     run_id: str
     sequence: int
     kind: EntryKind
     amount: ResourceCost
-    """How much moved. Both kinds use the cost type: a grant and a debit
-    are the same four resource dimensions travelling in opposite
-    directions, and one arithmetic path is easier to audit than two."""
+    """How much. Every kind uses the cost type: a grant, a debit and a
+    reservation are the same four resource dimensions pointed in
+    different directions, and one arithmetic path is easier to audit
+    than four."""
 
     charge_id: str
     reason: str
     balance_after: ResearchBudget
+    """What remains once this entry is applied. A reservation and a
+    release repeat the balance they found, because neither spends
+    anything; a replay that finds them moving it says so."""
+
     previous_entry_id: str
     """The id of entry ``sequence - 1``, or ``""`` for the grant. The
     chain is what makes a deleted middle entry loud."""

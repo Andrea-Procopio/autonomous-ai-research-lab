@@ -8,6 +8,7 @@ idempotency by charge id, and safety when two writers post at once.
 from __future__ import annotations
 
 import json
+import shutil
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -305,3 +306,313 @@ def test_a_scratch_file_is_never_left_behind(tmp_path: Path) -> None:
     ledger.debit(ResourceCost(usd=10.0), charge_id="att_1", reason="a")
 
     assert list(ledger.directory.glob("*.tmp")) == []
+
+
+class TestReservations:
+    """Money held against an attempt that has not finished.
+
+    The point of the mechanism is what a crash leaves behind: a
+    reservation nobody answered, which says both that an attempt was
+    authorized and that nobody has yet written down what it cost.
+    """
+
+    def test_a_reservation_holds_money_without_spending_it(
+        self, tmp_path: Path
+    ) -> None:
+        ledger = granted_ledger(tmp_path)
+
+        ledger.reserve(ResourceCost(usd=30.0), charge_id="att_1", reason="a")
+
+        assert ledger.balance() == GRANT  # nothing is spent yet
+        assert ledger.available().usd == 70.0
+        assert ledger.reserved() == ResourceCost(usd=30.0)
+        assert [e.charge_id for e in ledger.reservations()] == ["att_1"]
+
+    def test_settling_spends_it_and_closes_the_reservation(
+        self, tmp_path: Path
+    ) -> None:
+        ledger = granted_ledger(tmp_path)
+        ledger.reserve(ResourceCost(usd=30.0), charge_id="att_1", reason="a")
+
+        settled = ledger.settle(
+            ResourceCost(usd=12.0), charge_id="att_1", reason="a"
+        )
+
+        assert not settled.breached
+        assert settled.reserved == ResourceCost(usd=30.0)
+        assert settled.actual == ResourceCost(usd=12.0)
+        assert ledger.balance().usd == 88.0
+        assert ledger.available().usd == 88.0
+        assert ledger.reservations() == ()
+
+    def test_releasing_gives_it_back_unspent(self, tmp_path: Path) -> None:
+        ledger = granted_ledger(tmp_path)
+        ledger.reserve(ResourceCost(usd=30.0), charge_id="att_1", reason="a")
+
+        released = ledger.release(charge_id="att_1", reason="never started")
+
+        assert released.kind is EntryKind.RELEASE
+        assert released.amount == ResourceCost(usd=30.0)
+        assert ledger.balance() == GRANT
+        assert ledger.available() == GRANT
+        assert ledger.reservations() == ()
+
+    def test_reserving_twice_for_one_attempt_holds_once(
+        self, tmp_path: Path
+    ) -> None:
+        ledger = granted_ledger(tmp_path)
+
+        first = ledger.reserve(
+            ResourceCost(usd=30.0), charge_id="att_1", reason="a"
+        )
+        second = ledger.reserve(
+            ResourceCost(usd=30.0), charge_id="att_1", reason="a"
+        )
+
+        assert first == second
+        assert len(ledger.entries()) == 2
+        assert ledger.available().usd == 70.0
+
+    def test_the_available_balance_is_what_a_reservation_is_checked_against(
+        self, tmp_path: Path
+    ) -> None:
+        ledger = granted_ledger(tmp_path)
+        ledger.reserve(ResourceCost(usd=80.0), charge_id="att_1", reason="a")
+
+        # The balance is still 100, but 80 of it is promised elsewhere.
+        with pytest.raises(InsufficientBudgetError, match="available"):
+            ledger.reserve(
+                ResourceCost(usd=30.0), charge_id="att_2", reason="b"
+            )
+
+        assert len(ledger.entries()) == 2
+
+    def test_a_reservation_larger_than_the_grant_is_refused(
+        self, tmp_path: Path
+    ) -> None:
+        ledger = granted_ledger(tmp_path)
+
+        with pytest.raises(InsufficientBudgetError):
+            ledger.reserve(
+                ResourceCost(usd=101.0), charge_id="att_1", reason="a"
+            )
+
+        assert len(ledger.entries()) == 1
+
+
+class TestBreach:
+    """What happens when an attempt costs more than it was authorized."""
+
+    def test_the_whole_overrun_is_recorded(self, tmp_path: Path) -> None:
+        ledger = granted_ledger(tmp_path)
+        ledger.reserve(ResourceCost(usd=10.0), charge_id="att_1", reason="a")
+
+        settled = ledger.settle(
+            ResourceCost(usd=25.0), charge_id="att_1", reason="a"
+        )
+
+        assert settled.breached
+        assert settled.actual == ResourceCost(usd=25.0)
+        # the debit is the real number, not the authorized one
+        assert ledger.entries()[-1].amount == ResourceCost(usd=25.0)
+        assert ledger.balance().usd == 75.0
+
+    def test_an_overrun_past_the_whole_grant_still_lands_on_the_ledger(
+        self, tmp_path: Path
+    ) -> None:
+        ledger = granted_ledger(tmp_path)
+        ledger.reserve(ResourceCost(usd=100.0), charge_id="att_1", reason="a")
+
+        settled = ledger.settle(
+            ResourceCost(usd=150.0), charge_id="att_1", reason="a"
+        )
+
+        assert settled.breached
+        assert ledger.balance().usd == -50.0  # spent more than it had
+        assert ledger.available().usd == 0.0  # but nothing is free
+        assert ledger.entries()  # and the ledger still replays
+
+    def test_an_unreserved_debit_is_still_refused_when_it_overdraws(
+        self, tmp_path: Path
+    ) -> None:
+        """``settle`` may overdraw because the money is already gone.
+        ``debit`` may not: it is asking to spend, not reporting."""
+        ledger = granted_ledger(tmp_path)
+
+        with pytest.raises(InsufficientBudgetError):
+            ledger.debit(
+                ResourceCost(usd=101.0), charge_id="att_1", reason="a"
+            )
+
+
+class TestOneAnswerPerReservation:
+    def test_settling_without_a_reservation_is_refused(
+        self, tmp_path: Path
+    ) -> None:
+        ledger = granted_ledger(tmp_path)
+
+        with pytest.raises(LedgerIntegrityError, match="no reservation"):
+            ledger.settle(
+                ResourceCost(usd=1.0), charge_id="att_1", reason="a"
+            )
+
+    def test_releasing_without_a_reservation_is_refused(
+        self, tmp_path: Path
+    ) -> None:
+        ledger = granted_ledger(tmp_path)
+
+        with pytest.raises(LedgerIntegrityError, match="no reservation"):
+            ledger.release(charge_id="att_1", reason="a")
+
+    def test_a_settled_reservation_cannot_be_released_as_well(
+        self, tmp_path: Path
+    ) -> None:
+        ledger = granted_ledger(tmp_path)
+        ledger.reserve(ResourceCost(usd=10.0), charge_id="att_1", reason="a")
+        ledger.settle(ResourceCost(usd=4.0), charge_id="att_1", reason="a")
+
+        with pytest.raises(LedgerConflictError, match="already answered"):
+            ledger.release(charge_id="att_1", reason="a")
+
+    def test_a_released_reservation_cannot_then_be_debited(
+        self, tmp_path: Path
+    ) -> None:
+        ledger = granted_ledger(tmp_path)
+        ledger.reserve(ResourceCost(usd=10.0), charge_id="att_1", reason="a")
+        ledger.release(charge_id="att_1", reason="never started")
+
+        with pytest.raises(LedgerConflictError, match="already answered"):
+            ledger.debit(ResourceCost(usd=4.0), charge_id="att_1", reason="a")
+
+    def test_a_settled_attempt_is_not_reserved_again(
+        self, tmp_path: Path
+    ) -> None:
+        ledger = granted_ledger(tmp_path)
+        ledger.reserve(ResourceCost(usd=10.0), charge_id="att_1", reason="a")
+        ledger.settle(ResourceCost(usd=4.0), charge_id="att_1", reason="a")
+
+        with pytest.raises(LedgerConflictError, match="already answered"):
+            ledger.reserve(
+                ResourceCost(usd=10.0), charge_id="att_1", reason="a"
+            )
+
+    def test_settling_twice_with_the_same_figure_settles_once(
+        self, tmp_path: Path
+    ) -> None:
+        """Recovery re-drives a settlement it cannot prove happened."""
+        ledger = granted_ledger(tmp_path)
+        ledger.reserve(ResourceCost(usd=10.0), charge_id="att_1", reason="a")
+
+        first = ledger.settle(
+            ResourceCost(usd=4.0), charge_id="att_1", reason="a"
+        )
+        second = ledger.settle(
+            ResourceCost(usd=4.0), charge_id="att_1", reason="a"
+        )
+
+        assert first == second
+        assert len(ledger.entries()) == 3
+        assert ledger.balance().usd == 96.0
+
+    def test_settling_twice_for_different_amounts_is_a_conflict(
+        self, tmp_path: Path
+    ) -> None:
+        ledger = granted_ledger(tmp_path)
+        ledger.reserve(ResourceCost(usd=10.0), charge_id="att_1", reason="a")
+        ledger.settle(ResourceCost(usd=4.0), charge_id="att_1", reason="a")
+
+        with pytest.raises(LedgerConflictError, match="already on the ledger"):
+            ledger.settle(
+                ResourceCost(usd=5.0), charge_id="att_1", reason="a"
+            )
+
+    def test_an_attempt_that_cost_nothing_is_released(
+        self, tmp_path: Path
+    ) -> None:
+        ledger = granted_ledger(tmp_path)
+        ledger.reserve(ResourceCost(usd=10.0), charge_id="att_1", reason="a")
+
+        settled = ledger.settle(
+            ResourceCost(), charge_id="att_1", reason="free"
+        )
+
+        assert not settled.breached
+        assert ledger.entries()[-1].kind is EntryKind.RELEASE
+        assert ledger.balance() == GRANT
+
+    def test_the_invariant_holds_across_a_run(self, tmp_path: Path) -> None:
+        """``available = balance - open reservations``, and every gap
+        between the two names an attempt nobody has answered."""
+        ledger = granted_ledger(tmp_path)
+
+        def gap() -> float:
+            return ledger.balance().usd - ledger.available().usd
+
+        assert gap() == 0.0
+        ledger.reserve(ResourceCost(usd=30.0), charge_id="att_1", reason="a")
+        ledger.reserve(ResourceCost(usd=20.0), charge_id="att_2", reason="b")
+        assert gap() == 50.0
+        assert {e.charge_id for e in ledger.reservations()} == {
+            "att_1",
+            "att_2",
+        }
+
+        ledger.settle(ResourceCost(usd=25.0), charge_id="att_1", reason="a")
+        assert gap() == 20.0
+        assert [e.charge_id for e in ledger.reservations()] == ["att_2"]
+
+        ledger.release(charge_id="att_2", reason="never started")
+        assert gap() == 0.0
+        assert ledger.reservations() == ()
+
+
+class TestCompatibility:
+    """A ledger written before reservations existed must read the same."""
+
+    def preserved(self, tmp_path: Path) -> BudgetLedger:
+        source = Path(__file__).parent / "data" / "task6a_ledger"
+        run_id = "run_71303a08659a48a9"
+        shutil.copytree(source, tmp_path / "ledgers" / run_id)
+        return BudgetLedger(tmp_path, run_id)
+
+    def test_a_preserved_task_6a_ledger_replays_unchanged(
+        self, tmp_path: Path
+    ) -> None:
+        ledger = self.preserved(tmp_path)
+
+        entries = ledger.entries()
+
+        assert [str(e.kind) for e in entries] == ["grant", "debit"]
+        assert entries[0].id == "bent_f2e3108a79f3c566"
+        assert entries[1].id == "bent_9fd69d880e640b5f"
+        assert ledger.balance() == ResearchBudget(
+            wall_clock_seconds=84600.0,
+            gpu_hours=99.5,
+            usd=246.75,
+            model_tokens=1_988_000,
+        )
+
+    def test_a_ledger_with_no_reservations_has_all_of_it_available(
+        self, tmp_path: Path
+    ) -> None:
+        ledger = self.preserved(tmp_path)
+
+        assert ledger.reservations() == ()
+        assert ledger.reserved() == ResourceCost()
+        assert ledger.available() == ledger.balance()
+
+    def test_reading_it_changes_nothing_on_disk(self, tmp_path: Path) -> None:
+        ledger = self.preserved(tmp_path)
+        before = {
+            path.name: path.read_bytes()
+            for path in sorted(ledger.directory.glob("*.json"))
+        }
+
+        ledger.entries()
+        ledger.available()
+
+        after = {
+            path.name: path.read_bytes()
+            for path in sorted(ledger.directory.glob("*.json"))
+        }
+        assert after == before

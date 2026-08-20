@@ -42,6 +42,20 @@ class ResourceCost:
             and self.model_tokens == 0
         )
 
+    def exceeds(self, ceiling: ResourceCost) -> bool:
+        """Whether this cost is larger than ``ceiling`` in any dimension.
+
+        Any dimension, not all of them: a run that stayed inside its
+        dollar allowance by burning three times the GPU hours it was
+        authorized has still overrun.
+        """
+        return (
+            self.wall_clock_seconds > ceiling.wall_clock_seconds
+            or self.gpu_hours > ceiling.gpu_hours
+            or self.usd > ceiling.usd
+            or self.model_tokens > ceiling.model_tokens
+        )
+
 
 NO_COST: Final = ResourceCost()
 """Shared zero cost, used as a dataclass default so that "free" is a named
@@ -69,13 +83,23 @@ class ResearchBudget:
             and cost.model_tokens <= self.model_tokens
         )
 
-    def spend(self, cost: ResourceCost) -> ResearchBudget:
+    def spend(
+        self, cost: ResourceCost, *, allow_overdraw: bool = False
+    ) -> ResearchBudget:
         """Return the budget remaining after ``cost``.
 
         Raises :class:`InsufficientBudgetError` rather than clamping: an overdrawn
         budget is a decision error worth surfacing, not a value to round off.
+
+        ``allow_overdraw`` is for the other case — recording money that
+        is already gone. An attempt authorized for one amount can cost
+        more, and the remainder is then negative. Clamping it at zero
+        would make the overrun disappear from every record that reads
+        the budget, so the arithmetic is allowed to go below zero when
+        the caller is *reporting* a spend rather than *authorizing* one.
+        Authorization never passes it.
         """
-        if not self.can_afford(cost):
+        if not allow_overdraw and not self.can_afford(cost):
             raise InsufficientBudgetError(f"cannot afford {cost} from {self}")
         return replace(
             self,
@@ -110,3 +134,26 @@ class ResearchBudget:
             and self.usd <= 0.0
             and self.model_tokens <= 0
         )
+
+
+@dataclass(frozen=True, slots=True)
+class Settlement:
+    """What one authorized attempt actually cost.
+
+    Three numbers are kept apart on purpose. ``reserved`` is the
+    authorized maximum, held against the budget while the attempt ran.
+    ``actual`` is what the attempt reports having spent. The gap between
+    them is the whole point: a settlement that breached its authorization
+    is still recorded in full, and the caller is handed a fact rather
+    than a rounded number.
+    """
+
+    charge_id: str
+    reserved: ResourceCost
+    actual: ResourceCost
+    entry_id: str
+
+    @property
+    def breached(self) -> bool:
+        """Whether the attempt cost more than it was authorized to."""
+        return self.actual.exceeds(self.reserved)
