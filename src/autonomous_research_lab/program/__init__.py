@@ -39,11 +39,23 @@ from .authorization import (
     UnauthorizedGrantError,
 )
 from .directive import MAX_LABEL_CHARS, RunDirective
+from .ledger import (
+    BudgetLedger,
+    LedgerConflictError,
+    LedgerContentionError,
+    LedgerIntegrityError,
+    LedgerMismatchError,
+)
 from .records import (
     MAX_REASON_CHARS,
     BudgetEntry,
     EntryKind,
     ResearchRun,
+)
+from .store import (
+    ProgramConflictError,
+    ProgramIntegrityError,
+    ProgramStore,
 )
 
 __all__ = [
@@ -55,8 +67,16 @@ __all__ = [
     "MAX_USD",
     "MAX_WALL_CLOCK_SECONDS",
     "BudgetEntry",
+    "BudgetLedger",
     "EntryKind",
     "FundingAuthorization",
+    "LedgerConflictError",
+    "LedgerContentionError",
+    "LedgerIntegrityError",
+    "LedgerMismatchError",
+    "ProgramConflictError",
+    "ProgramIntegrityError",
+    "ProgramStore",
     "ResearchRun",
     "RunDirective",
     "UnauthorizedGrantError",
