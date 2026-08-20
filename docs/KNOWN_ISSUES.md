@@ -5,6 +5,61 @@ diagnosed to some degree, and not yet fixed. An issue leaves this file
 by being fixed in a commit that references it — never by being
 forgotten.
 
+## Repair-loop jobs are not individually recoverable (blocking PR4)
+
+- **Where:** `orchestration/loop.py::_handle_implementation_invalidity`
+  and `orchestration/debug_loop.py::_rerun`, which submit jobs inside an
+  attempt rather than as attempts of their own.
+- **Status:** open, and **blocking for PR4** (real experiment
+  execution). Not blocking for Task 6D, which is where it was found.
+- **First observed:** 2026-08-20, while scoping Task 6D.
+
+### What happens
+
+Task 6D makes an *attempt* recoverable: the attempt journal records how
+far it got, its commit bundle is on disk before it is applied, and a
+killed process is finished by the next one. The bounded debug and
+implementation-repair loops submit their reruns inside the attempt that
+triggered them, and those submissions get no journal entry of their own.
+
+So a crash during a repair rerun leaves an attempt whose last phase is
+whatever preceded the repair, and no bundle. Recovery takes the
+conservative arm: it charges the attempt's authorization in full, marks
+the settlement `CONSERVATIVE_MAX`, and closes the attempt `ABANDONED`.
+
+### Why the accounting is fine and this is still a problem
+
+Nothing is hidden and nothing is paid twice. The charge is recorded as
+an unmeasured maximum rather than a cost anyone observed, the ledger and
+the state are reconciled, and `verify_run` passes. As *accounting* it is
+correct.
+
+As *execution recovery* it is not. The rerun's job may have completed;
+its outputs may be sitting in the run directory; and recovery walks past
+all of that because nothing wrote down that the job existed. Today that
+costs seconds — the deterministic executor's reruns are cheap. Under
+PR4 it costs a GPU job, and abandoning one of those is a real loss
+however honestly it is billed.
+
+### What would close it
+
+Either of:
+
+1. **Journal repair-loop jobs individually.** Each rerun becomes its own
+   attempt: its own reservation, its own `STARTED`/`SUBMITTED`/
+   `OUTPUTS_DURABLE`, its own derived job id. Recovery then reattaches
+   to the exact job instead of abandoning its parent. This is the real
+   fix and it is the direction the journal was shaped for — the phases
+   and the derived job id already work per attempt; what is missing is
+   that the repair loop opens one.
+2. **Refuse repairs above a cost threshold.** If a job is expensive
+   enough that losing it matters, do not start a rerun that cannot be
+   recovered. Cheaper to build, and it trades a recovery gap for a
+   capability gap.
+
+Option 1 unless PR4 is under time pressure, in which case option 2 is an
+honest stopgap that must not become permanent.
+
 ## Timing flakes in the real-deadline Muse tests under heavy load
 
 - **Where:** `tests/test_muse_provider.py`, the tests that use a real
