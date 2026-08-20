@@ -129,6 +129,12 @@ class Stub:
         return config.experimentation.max_steps if self.steps else 1
 
 
+def config(**overrides: object) -> dict[str, Any]:
+    merged: dict[str, Any] = json.loads(json.dumps(CONFIG))
+    merged.update(overrides)
+    return merged
+
+
 def controller(root: Path, *stages: Stub) -> Controller:
     return Controller(root, chain=tuple(stages))
 
@@ -194,17 +200,35 @@ class TestAStraightWalk:
         assert result.outcome is Outcome.STOPPED
         assert second.calls == []
 
-    def test_a_resumed_walk_passes_the_stop(self, tmp_path: Path) -> None:
+    def test_a_resumed_walk_passes_the_brake(self, tmp_path: Path) -> None:
+        """``--stop-after`` is one walk's brake and is not recorded: the
+        operator who asked for it is the one who resumes past it."""
         first, second = mapping(), ideation()
         control = controller(tmp_path, first, second)
-        investigation = control.begin(CONFIG, stop_after=StageName.MAPPING)
-        control.walk(investigation)
+        control.run(CONFIG, stop_after=StageName.MAPPING)
+        investigation = control.investigations.investigations()[0]
 
         again = Controller(tmp_path, chain=(mapping(), second))
         result = again.resume(investigation.investigation_id)
 
-        assert result.outcome is Outcome.STOPPED
+        assert result.outcome is Outcome.COMPLETED
         assert first.calls == [StageName.MAPPING]
+        assert second.calls == [StageName.IDEATION]
+
+    def test_a_declared_scope_binds_every_walk(self, tmp_path: Path) -> None:
+        """A config that says the investigation ends at a stage is not
+        talked into going further by being resumed."""
+        first, second = mapping(), ideation()
+        control = controller(tmp_path, first, second)
+        scoped = config(stop_after=str(StageName.MAPPING))
+        control.run(scoped)
+        investigation = control.investigations.investigations()[0]
+
+        result = Controller(tmp_path, chain=(mapping(), ideation())).resume(
+            investigation.investigation_id
+        )
+
+        assert result.outcome is Outcome.STOPPED
         assert second.calls == []
 
 

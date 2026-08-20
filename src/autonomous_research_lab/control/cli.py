@@ -81,13 +81,15 @@ def _run(arguments: argparse.Namespace) -> int:
     stop_after = (
         StageName(arguments.stop_after) if arguments.stop_after else None
     )
-    investigation = controller.begin(payload, stop_after=stop_after)
+    investigation = controller.begin(payload)
     print(f"investigation {investigation.investigation_id}")
     print(f"config        {investigation.config_id}")
     print(f"label         {config.label}")
     print(f"root          {root}")
     print()
-    result = controller.walk(investigation, lab=_lab(arguments))
+    result = controller.walk(
+        investigation, lab=_lab(arguments), stop_after=stop_after
+    )
     _print_status(controller.status(investigation.investigation_id))
     print()
     print(f"{result.outcome}: {result.detail}")
@@ -102,7 +104,13 @@ def _resume(arguments: argparse.Namespace) -> int:
     investigation_id = _chosen(root, arguments.investigation)
     if investigation_id is None:
         return FAILED
-    result = controller.resume(investigation_id, lab=_lab(arguments))
+    result = controller.resume(
+        investigation_id,
+        lab=_lab(arguments),
+        stop_after=(
+            StageName(arguments.stop_after) if arguments.stop_after else None
+        ),
+    )
     _print_status(controller.status(investigation_id))
     print()
     print(f"{result.outcome}: {result.detail}")
@@ -232,16 +240,13 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("config", type=Path, help="the run config, JSON")
     _add_root(run)
     _add_lab(run)
-    run.add_argument(
-        "--stop-after",
-        choices=[str(stage) for stage in StageName],
-        help="halt after this stage; resuming continues past it",
-    )
+    _add_stop_after(run)
 
     resume = commands.add_parser("resume", help="continue an investigation")
     resume.add_argument("investigation", nargs="?", help="investigation id")
     _add_root(resume)
     _add_lab(resume)
+    _add_stop_after(resume)
 
     status = commands.add_parser("status", help="what happened so far")
     status.add_argument("investigation", nargs="?", help="investigation id")
@@ -255,6 +260,17 @@ def _parser() -> argparse.ArgumentParser:
 def _add_root(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--root", type=Path, required=True, help="the run root"
+    )
+
+
+def _add_stop_after(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--stop-after",
+        choices=[str(stage) for stage in StageName],
+        help=(
+            "halt this walk after that stage; a brake, not a scope — "
+            "resuming without it continues past"
+        ),
     )
 
 

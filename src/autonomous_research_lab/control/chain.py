@@ -39,7 +39,6 @@ from typing import Final, Protocol
 from ..admission.admitter import CandidateAdmitter
 from ..admission.door import AdmissionRefusedError
 from ..admission.store import AdmissionStore
-from ..core.state import ResearchState
 from ..evidence.file_store import FileEvidenceStore
 from ..ideation.generator import IdeaGenerator
 from ..ideation.store import IdeationStore
@@ -71,6 +70,10 @@ from .stage import (
     Fact,
     StageName,
     StageSpend,
+)
+
+_STATE_FACTS: Final = frozenset(
+    {str(Fact.STATE_ID), str(Fact.FUNDED_STATE_ID), str(Fact.ADMITTED_STATE_ID)}
 )
 
 _LITERATURE: Final = "literature"
@@ -129,10 +132,28 @@ class StageContext:
     lab: Lab
     facts: ChainFacts = NO_FACTS
 
+    known_states: frozenset[str] = frozenset()
+    """Every state id the event log has ever mentioned.
+
+    Only experimentation reads it, and it needs it because the snapshot
+    chain a run leaves is not linked: one step evolves the state several
+    times and persists only what it committed, so a successor's parent
+    is an intermediate nobody wrote down. What identifies a step that
+    committed before the crash is therefore not its parent but the fact
+    that the log has never heard of it.
+    """
+
     def with_produced(
         self, produced: tuple[tuple[str, str], ...]
     ) -> StageContext:
-        return replace(self, facts=self.facts.updated(produced))
+        states = {
+            value for name, value in produced if name in _STATE_FACTS
+        }
+        return replace(
+            self,
+            facts=self.facts.updated(produced),
+            known_states=self.known_states | states,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -680,12 +701,25 @@ class ExperimentationStage:
     def completed(
         self, context: StageContext, plan: StagePlan
     ) -> StageOutcome | None:
-        successor = _successor_of(context.stores.states, plan.subject_id)
-        if successor is None:
+        """A snapshot the log has never mentioned is a step that
+        committed before the crash reached the log.
+
+        Two or more of them is a root that has been interrupted more
+        than once, and there is no honest way to tell which is the head:
+        the walk re-steps, and the orphans stay where they are as
+        preserved partials rather than being guessed about.
+        """
+        del plan
+        orphans = [
+            state_id
+            for state_id in context.stores.states.state_ids()
+            if state_id not in context.known_states
+        ]
+        if len(orphans) != 1:
             return None
         return StageOutcome(
-            produced=_sorted({Fact.STATE_ID: successor.id}),
-            detail="adopted the step a crash hid",
+            produced=_sorted({Fact.STATE_ID: orphans[0]}),
+            detail=f"adopted the step a crash hid ({orphans[0]})",
             repeat=True,
         )
 
@@ -754,23 +788,6 @@ def _selection_outcome(
         detail=str(outcome),
         ends_investigation=ends,
     )
-
-
-def _successor_of(
-    states: FileStateStore, state_id: str
-) -> ResearchState | None:
-    """The persisted snapshot that names ``state_id`` as its parent.
-
-    The runtime writes the successor before the step returns, so finding
-    one means the step committed and only the event was lost.
-    """
-    for candidate_id in states.state_ids():
-        if candidate_id == state_id:
-            continue
-        candidate = states.load(candidate_id)
-        if candidate.parent_id == state_id:
-            return candidate
-    return None
 
 
 def _spend(

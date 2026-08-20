@@ -11,7 +11,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from autonomous_research_lab.core.budget import ResearchBudget
+from autonomous_research_lab.core.budget import ResearchBudget, ResourceCost
 from autonomous_research_lab.core.evidence import Evidence, EvidenceKind
 from autonomous_research_lab.core.experiment import (
     Environment,
@@ -282,6 +282,39 @@ class TestTheFundedRun:
         report = verify_run(tmp_path)
 
         assert report.of_kind(IntegrityIssueKind.LEDGER_ISSUE)
+
+    def test_a_run_that_has_spent_still_verifies(
+        self, tmp_path: Path
+    ) -> None:
+        """The funded snapshot keeps the grant forever, so a run that has
+        spent agrees with it no longer. What the balance must agree with
+        is a state the run actually reached."""
+        write_run(tmp_path)
+        program, run = _fund(tmp_path)
+        cost = ResourceCost(wall_clock_seconds=10.0, usd=1.0)
+        program.ledger_for(run.run_id).debit(
+            cost, charge_id="att_1", reason="one attempt"
+        )
+        funded = program.state_store().load(run.funded_state_id)
+        FileStateStore(tmp_path).persist(funded.charge(cost))
+
+        report = verify_run(tmp_path)
+
+        assert report.ok, report.issues
+
+    def test_a_balance_no_snapshot_agrees_with_is_reported(
+        self, tmp_path: Path
+    ) -> None:
+        write_run(tmp_path)
+        program, run = _fund(tmp_path)
+        program.ledger_for(run.run_id).debit(
+            ResourceCost(usd=1.0), charge_id="att_1", reason="one attempt"
+        )
+
+        report = verify_run(tmp_path)
+
+        (issue,) = report.of_kind(IntegrityIssueKind.LEDGER_ISSUE)
+        assert "nor the budget of any" in issue.detail
 
     def test_an_unfunded_root_skips_the_ledger_check(
         self, tmp_path: Path

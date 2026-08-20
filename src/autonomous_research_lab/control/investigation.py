@@ -62,9 +62,12 @@ class Investigation:
     config_id: str
     label: str
     stop_after: str = ""
-    """A stage name to halt after, or empty for the whole chain. An
-    operator's brake, not a scientific limit: resuming continues past
-    it, and the events it left are indistinguishable from any other."""
+    """The scope the config declared: the stage this investigation is
+    not meant to go past, or empty for the whole chain. Recorded, and so
+    binding on every walk — an investigation meant to reach a funded run
+    and stop is not talked into experimenting by being resumed. The
+    ``--stop-after`` flag is a different thing: a brake on one walk,
+    deliberately not recorded."""
 
     id: str = field(default="")
 

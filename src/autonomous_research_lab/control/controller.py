@@ -48,12 +48,17 @@ from .lab import DefaultLab, Lab
 from .stage import (
     CHAIN_ORDER,
     ChainFacts,
+    Fact,
     StageName,
     StageSpend,
     StageStatus,
 )
 
 _CONTROL = "control"
+
+_STATE_FACTS = frozenset(
+    {str(Fact.STATE_ID), str(Fact.FUNDED_STATE_ID), str(Fact.ADMITTED_STATE_ID)}
+)
 
 
 class ControllerError(RuntimeError):
@@ -144,12 +149,7 @@ class Controller:
 
     # -- starting and resuming -------------------------------------------------
 
-    def begin(
-        self,
-        payload: Mapping[str, object],
-        *,
-        stop_after: StageName | None = None,
-    ) -> Investigation:
+    def begin(self, payload: Mapping[str, object]) -> Investigation:
         """Record one config and the investigation that will use it.
 
         Parsing happens first, so a config that cannot produce a legal
@@ -157,13 +157,16 @@ class Controller:
         """
         config = parse_config(payload)
         config_id = self._investigations.record_config(payload)
-        halt = stop_after if stop_after is not None else config.stop_after
         return self._investigations.record(
             Investigation(
                 investigation_id=occurrence_id("inv"),
                 config_id=config_id,
                 label=config.label,
-                stop_after=str(halt) if halt is not None else "",
+                stop_after=(
+                    str(config.stop_after)
+                    if config.stop_after is not None
+                    else ""
+                ),
             )
         )
 
@@ -174,18 +177,38 @@ class Controller:
         lab: Lab | None = None,
         stop_after: StageName | None = None,
     ) -> WalkResult:
-        return self.walk(self.begin(payload, stop_after=stop_after), lab=lab)
+        return self.walk(
+            self.begin(payload), lab=lab, stop_after=stop_after
+        )
 
     def resume(
-        self, investigation_id: str, *, lab: Lab | None = None
+        self,
+        investigation_id: str,
+        *,
+        lab: Lab | None = None,
+        stop_after: StageName | None = None,
     ) -> WalkResult:
-        return self.walk(self._require(investigation_id), lab=lab)
+        return self.walk(
+            self._require(investigation_id), lab=lab, stop_after=stop_after
+        )
 
     # -- the walk --------------------------------------------------------------
 
     def walk(
-        self, investigation: Investigation, *, lab: Lab | None = None
+        self,
+        investigation: Investigation,
+        *,
+        lab: Lab | None = None,
+        stop_after: StageName | None = None,
     ) -> WalkResult:
+        """Walk as far as this investigation can go.
+
+        ``stop_after`` is this walk's brake and is not recorded: the
+        operator who asked for it can resume past it. The scope the
+        config declared is recorded, and resuming does not pass that —
+        an investigation meant to reach a funded run and stop is not
+        talked into experimenting by being resumed.
+        """
         config = self._config_of(investigation)
         log = self._investigations.log_for(investigation.investigation_id)
         context = StageContext(
@@ -193,23 +216,25 @@ class Controller:
             config=config,
             lab=lab if lab is not None else DefaultLab(),
             facts=log.facts(),
+            known_states=_states_mentioned(log),
         )
         ended = _already_ended(log)
         if ended is not None:
             return self._result(investigation, log, Outcome.ENDED, ended.detail)
 
-        stop_after = (
+        declared = (
             StageName(investigation.stop_after)
             if investigation.stop_after
             else None
         )
+        halt_after = stop_after if stop_after is not None else declared
         for stage in self.chain:
             context, outcome, detail = self._walk_stage(stage, context, log)
             if outcome is not None:
                 if outcome is Outcome.ENDED:
                     _skip_the_rest(log, stage.name, detail)
                 return self._result(investigation, log, outcome, detail)
-            if stop_after is not None and stage.name is stop_after:
+            if halt_after is not None and stage.name is halt_after:
                 return self._result(
                     investigation,
                     log,
@@ -376,6 +401,21 @@ class Controller:
             facts=log.facts(),
             events=log.events(),
         )
+
+
+def _states_mentioned(log: StageLog) -> frozenset[str]:
+    """Every state id the log has ever produced, succeeded or not.
+
+    "Ever", not "currently": a state a failed step produced is still a
+    state this investigation knows about, and treating it as an orphan
+    afterwards would adopt the same step twice.
+    """
+    return frozenset(
+        value
+        for event in log.events()
+        for name, value in event.produced
+        if name in _STATE_FACTS
+    )
 
 
 def _already_ended(log: StageLog) -> StageEvent | None:

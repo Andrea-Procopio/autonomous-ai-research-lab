@@ -126,7 +126,7 @@ def verify_run(
     blobs = _check_artifacts(store, results, issues)
     _check_references(states, store, issues)
     _check_chain(states, store, issues)
-    _check_ledger(root, program_root, issues)
+    _check_ledger(root, program_root, states, issues)
     return IntegrityReport(
         root=str(root),
         states_checked=len(states),
@@ -328,8 +328,31 @@ def _check_chain(
 
 
 def _check_ledger(
-    root: Path, program_root: Path | None, issues: list[IntegrityIssue]
+    root: Path,
+    program_root: Path | None,
+    states: list[ResearchState],
+    issues: list[IntegrityIssue],
 ) -> None:
+    """The ledger must agree with a state the run actually reached.
+
+    Which state depends on how far the run has got. An unspent run's
+    balance is its grant, and equals the funded snapshot's budget
+    because that snapshot *is* the grant. A run that has spent agrees
+    with neither: the funded snapshot is immutable and keeps the grant
+    forever, while the balance tracks whatever the run has committed
+    since. Comparing against the funded snapshot alone reports every run
+    that did any work, which is the wrong way round.
+
+    The check is therefore "some snapshot under this root holds this
+    balance" rather than "the head of this run's chain does", and that
+    is a real weakening. It is forced: the snapshots a run leaves are a
+    sequence of committed heads, not a linked list. One step evolves the
+    state several times — begin the attempt, apply the transition,
+    resolve it — and persists only what it committed, so each snapshot's
+    parent is an intermediate that was never written down. Recovering
+    the order would need the runtime to persist every evolution, which
+    is a cost decision and not this pass's to make.
+    """
     resolved = program_root if program_root is not None else root / "program"
     if not (resolved / "envelopes").is_dir():
         return
@@ -358,20 +381,21 @@ def _check_ledger(
                 )
             )
             continue
-        if balance != run.granted and balance == state.budget:
-            continue  # spent since funding, and the two records agree
-        if balance != state.budget and balance != run.granted:
-            issues.append(
-                IntegrityIssue(
-                    kind=IntegrityIssueKind.LEDGER_ISSUE,
-                    subject_id=run.run_id,
-                    detail=(
-                        f"the ledger replays to {balance}, which is neither "
-                        f"the grant {run.granted} nor the funded state's "
-                        f"{state.budget}"
-                    ),
-                )
+        reached = {snapshot.budget for snapshot in states}
+        if balance in {run.granted, state.budget, *reached}:
+            continue
+        issues.append(
+            IntegrityIssue(
+                kind=IntegrityIssueKind.LEDGER_ISSUE,
+                subject_id=run.run_id,
+                detail=(
+                    f"the ledger replays to {balance}, which is neither the "
+                    f"grant {run.granted}, nor the funded state's "
+                    f"{state.budget}, nor the budget of any of the "
+                    f"{len(states)} snapshot(s) this root holds"
+                ),
             )
+        )
 
 
 # -- helpers -------------------------------------------------------------------
