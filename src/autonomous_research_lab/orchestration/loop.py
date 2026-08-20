@@ -85,7 +85,7 @@ from ..core.proposals import (
     ResultProposal,
     payload_ids,
 )
-from ..core.state import ResearchState
+from ..core.state import ResearchState, recording_lineage
 from ..evidence.store import EvidenceStore, UnknownRecordError
 from ..execution.failure_classifier import diagnose_failure
 from ..persistence.state_store import FileStateStore
@@ -333,7 +333,20 @@ class ResearchRuntime:
         )
 
     def step(self, state: ResearchState) -> StepReport:
-        """One fast-loop iteration, with the slow loop run when due."""
+        """One fast-loop iteration, with the slow loop run when due.
+
+        Every state the iteration derives is persisted, oldest first, so
+        the snapshot store holds a chain rather than a sequence of heads
+        with unreachable parents. The head is written last: a crash
+        leaves a shorter chain, never a state whose ancestry is missing.
+        """
+        with recording_lineage() as derived:
+            report = self._step(state)
+        for successor in derived:
+            self._persist(successor)
+        return report
+
+    def _step(self, state: ResearchState) -> StepReport:
         started = time.monotonic()
         step_notes: list[str] = []
         stats = _StepStats()
@@ -1550,7 +1563,6 @@ class ResearchRuntime:
         halt_reason: str | None,
     ) -> StepReport:
         stats = stats if stats is not None else _StepStats()
-        self._persist(state)
         usage = self.usage.drain() if self.usage is not None else NO_USAGE
         completed = record.completed(
             attempt_id=attempt_id,

@@ -30,6 +30,7 @@ from autonomous_research_lab.execution.local import LocalExecutor
 from autonomous_research_lab.orchestration import loop as runtime_loop
 from autonomous_research_lab.orchestration.director import RuleBasedFrontierDirector
 from autonomous_research_lab.orchestration.loop import ResearchRuntime, StepReport
+from autonomous_research_lab.persistence import FileStateStore
 from autonomous_research_lab.roles.base import (
     ResearchRole,
     RoleInvocation,
@@ -323,6 +324,43 @@ def test_valid_negative_results_commit_normally(tmp_path: Path) -> None:
     assert report.notes == ()  # no engineering note, no debugging noise
     (validation,) = report.validation
     assert validation.passed
+
+
+def test_a_step_persists_every_state_it_derives(tmp_path: Path) -> None:
+    """A snapshot store that only ever sees the head of a step holds
+    states whose parents nobody can find. One step derives several — the
+    attempt begun, each proposal committed, the attempt resolved — and
+    all of them are written, oldest first, so the head is never on disk
+    before its ancestry is.
+    """
+    spec, prediction = _spec_and_prediction(threshold=0.55)
+    engineer = StubEngineer(LocalExecutor(tmp_path / "runs"), value=0.5)
+    runtime, _, _ = _runtime(tmp_path, engineer, SpyCritic())
+    states = FileStateStore(tmp_path / "states")
+    runtime.states = states
+    start = _prepared_state(spec, prediction)
+    states.persist(start)
+
+    report = runtime.step(start)
+
+    stored = {found: states.load(found) for found in states.state_ids()}
+    assert len(stored) > 2, "a step derives more than its own head"
+    assert report.state.id in stored
+    orphans = [
+        state.id
+        for state in stored.values()
+        # The starting state excepted: this fixture builds it in memory
+        # and persists only it, which is the very habit under test —
+        # what must hold is that the step adds no new orphan.
+        if state.id != start.id
+        and state.parent_id is not None
+        and state.parent_id not in stored
+    ]
+    assert orphans == []
+    walked = report.state
+    while walked.id != start.id:
+        assert walked.parent_id is not None
+        walked = stored[walked.parent_id]  # every hop is on disk
 
 
 def test_multiple_result_proposals_are_rejected_transactionally(

@@ -53,8 +53,11 @@ conditions is met, not before.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
-from typing import Any, Protocol, TypeVar
+from typing import Any, Final, Protocol, TypeVar
 
 from .actions import ResearchAction, ResearchActionType
 from .assessment import EpistemicAssessment
@@ -66,6 +69,37 @@ from .hypothesis import Hypothesis
 from .ids import content_id
 from .prediction import Prediction, PredictionTest
 from .question import ResearchQuestion
+
+_LINEAGE: Final[ContextVar[list[ResearchState] | None]] = ContextVar(
+    "lineage", default=None
+)
+
+
+@contextmanager
+def recording_lineage() -> Iterator[list[ResearchState]]:
+    """Collect every successor derived while the block runs.
+
+    A state's ``parent_id`` is only as good as the parent's being
+    somewhere. One step of the loop evolves the state several times —
+    begin the attempt, commit each proposal, resolve the attempt — and a
+    persistence layer that only sees the last of them writes a snapshot
+    whose parent nobody can find. That is not a smaller record; it is a
+    broken one, and a verifier calling it intact would be lying.
+
+    The recorder hangs off :meth:`ResearchState._evolve`, the single seam
+    every mutator goes through, rather than off the eleven places the
+    runtime happens to mutate today. A seam cannot be forgotten by the
+    next person to add a mutation; a list of call sites can.
+
+    Recorders do not nest: an inner block hides its states from an outer
+    one. There is one caller, and it wraps one step.
+    """
+    produced: list[ResearchState] = []
+    token = _LINEAGE.set(produced)
+    try:
+        yield produced
+    finally:
+        _LINEAGE.reset(token)
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,8 +150,17 @@ class ResearchState:
     def _evolve(self, **changes: Any) -> ResearchState:
         """Derive a successor state. The one loosely typed seam in the domain:
         every public method below pins its own field types, so nothing untyped
-        reaches a caller."""
-        return replace(self, parent_id=self.id, id="", **changes)
+        reaches a caller.
+
+        It is also the one place a successor is built, which is why
+        :func:`recording_lineage` listens here: everything that ever
+        becomes somebody's parent passes through this line.
+        """
+        successor = replace(self, parent_id=self.id, id="", **changes)
+        recorder = _LINEAGE.get()
+        if recorder is not None:
+            recorder.append(successor)
+        return successor
 
     def upsert_question(self, question: ResearchQuestion) -> ResearchState:
         return self._evolve(questions=_upsert(self.questions, question))

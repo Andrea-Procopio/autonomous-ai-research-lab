@@ -11,7 +11,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from autonomous_research_lab.core.budget import ResearchBudget
+from autonomous_research_lab.core.budget import ResearchBudget, ResourceCost
 from autonomous_research_lab.core.evidence import Evidence, EvidenceKind
 from autonomous_research_lab.core.experiment import (
     Environment,
@@ -23,13 +23,16 @@ from autonomous_research_lab.core.experiment import (
 from autonomous_research_lab.core.hypothesis import Hypothesis
 from autonomous_research_lab.core.prediction import Comparator, Prediction
 from autonomous_research_lab.core.question import ResearchQuestion
-from autonomous_research_lab.core.state import ResearchState
+from autonomous_research_lab.core.state import ResearchState, recording_lineage
 from autonomous_research_lab.evidence.file_store import FileEvidenceStore
 from autonomous_research_lab.persistence.state_store import FileStateStore
 from autonomous_research_lab.program.authorization import FundingAuthorization
 from autonomous_research_lab.program.directive import RunDirective
 from autonomous_research_lab.program.integrity import (
+    IntegrityIssue,
     IntegrityIssueKind,
+    _check_lineage,
+    _reachable_from_roots,
     verify_run,
 )
 from autonomous_research_lab.program.records import ResearchRun
@@ -107,22 +110,30 @@ def write_run(root: Path) -> tuple[ExperimentResult, Evidence, ResearchState]:
             metrics={"x": 1.0},
         )
     )
-    state = (
-        ResearchState(objective="measure x")
-        .upsert_question(QUESTION)
-        .upsert_hypothesis(HYPOTHESIS)
-        .upsert_prediction(PREDICTION)
-        .add_experiment(SPEC)
-        .record_result(
-            ResultRef(
-                result_id=result.id,
-                spec_id=result.spec_id,
-                status=result.status,
+    seed = ResearchState(objective="measure x")
+    # The whole lineage, not just its end: a snapshot whose parent is
+    # missing is what `_check_lineage` exists to catch, and a fixture
+    # that wrote one would be testing the verifier against a broken run
+    # by accident.
+    with recording_lineage() as derived:
+        state = (
+            seed.upsert_question(QUESTION)
+            .upsert_hypothesis(HYPOTHESIS)
+            .upsert_prediction(PREDICTION)
+            .add_experiment(SPEC)
+            .record_result(
+                ResultRef(
+                    result_id=result.id,
+                    spec_id=result.spec_id,
+                    status=result.status,
+                )
             )
+            .record_evidence(evidence.id)
         )
-        .record_evidence(evidence.id)
-    )
-    FileStateStore(root).persist(state)
+    states = FileStateStore(root)
+    states.persist(seed)
+    for successor in derived:
+        states.persist(successor)
     return result, evidence, state
 
 
@@ -132,7 +143,7 @@ def test_a_written_run_verifies_from_a_cold_start(tmp_path: Path) -> None:
     report = verify_run(tmp_path)
 
     assert report.ok, report.issues
-    assert report.states_checked == 1
+    assert report.states_checked == 7  # the whole lineage, not just its end
     assert report.results_checked == 1
     assert report.evidence_checked == 1
     assert report.blobs_checked == 3  # metrics.json, stdout, stderr
@@ -243,6 +254,79 @@ class TestWhatItCatches:
         assert len(report.of_kind(IntegrityIssueKind.MISSING_BLOB)) == 3
 
 
+class TestLineage:
+    """A committed snapshot claims a parent. The claim has to hold, or a
+    verifier saying "intact" is saying something it cannot know."""
+
+    def test_a_whole_lineage_verifies(self, tmp_path: Path) -> None:
+        write_run(tmp_path)
+
+        report = verify_run(tmp_path)
+
+        assert report.ok, report.issues
+        assert report.states_checked == 7
+
+    def test_a_parent_that_is_not_stored(self, tmp_path: Path) -> None:
+        _, _, state = write_run(tmp_path)
+        assert state.parent_id is not None
+        (tmp_path / "states" / f"{state.parent_id}.json").unlink()
+
+        report = verify_run(tmp_path)
+
+        (issue,) = report.of_kind(IntegrityIssueKind.INCOMPLETE_LINEAGE)
+        assert issue.subject_id == state.id
+        assert "cannot be walked" in issue.detail
+
+    def test_only_the_end_of_a_chain(self, tmp_path: Path) -> None:
+        """What every writer did before the lineage was persisted: keep
+        the head and let its ancestry go."""
+        make_run_dir(tmp_path)
+        seed = ResearchState(objective="measure x")
+        head = seed.upsert_question(QUESTION).upsert_hypothesis(HYPOTHESIS)
+        FileStateStore(tmp_path).persist(head)
+
+        report = verify_run(tmp_path)
+
+        assert not report.ok
+        assert report.of_kind(IntegrityIssueKind.INCOMPLETE_LINEAGE)
+
+    def test_a_ring_is_caught_rather_than_walked_forever(self) -> None:
+        """A stored ring should be unreachable: a state's id covers its
+        parent id, so a cycle would need two hashes each derived from
+        the other. The guard exists anyway, because "cannot happen" and
+        "will hang the verifier if it does" is a poor pair. Built here
+        in memory, past the store that would refuse to write it.
+        """
+        first = ResearchState(objective="a")
+        second = ResearchState(objective="b", parent_id=first.id)
+        object.__setattr__(first, "parent_id", second.id)
+        issues: list[IntegrityIssue] = []
+
+        _check_lineage([first, second], issues)
+
+        assert any("revisits" in issue.detail for issue in issues)
+        assert all(
+            issue.kind is IntegrityIssueKind.INCOMPLETE_LINEAGE
+            for issue in issues
+        )
+
+    def test_cold_reconstruction_reaches_every_state(
+        self, tmp_path: Path
+    ) -> None:
+        """The forward walk, run as its own traversal: from the roots,
+        following children, the reader arrives at the head."""
+        _, _, head = write_run(tmp_path)
+        states = FileStateStore(tmp_path)
+        loaded = [states.load(found) for found in states.state_ids()]
+
+        roots = [state for state in loaded if state.parent_id is None]
+        reached = _reachable_from_roots(loaded)
+
+        assert len(roots) == 1
+        assert head.id in reached
+        assert len(reached) == len(loaded)
+
+
 class TestTheFundedRun:
     def test_a_funded_run_verifies_including_its_ledger(
         self, tmp_path: Path
@@ -282,6 +366,43 @@ class TestTheFundedRun:
         report = verify_run(tmp_path)
 
         assert report.of_kind(IntegrityIssueKind.LEDGER_ISSUE)
+
+    def test_a_run_that_has_spent_still_verifies(
+        self, tmp_path: Path
+    ) -> None:
+        """The funded snapshot keeps the grant forever, so a run that has
+        spent agrees with it no longer. What the balance must agree with
+        is a state the run actually reached."""
+        write_run(tmp_path)
+        program, run = _fund(tmp_path)
+        cost = ResourceCost(wall_clock_seconds=10.0, usd=1.0)
+        program.ledger_for(run.run_id).debit(
+            cost, charge_id="att_1", reason="one attempt"
+        )
+        # Both, as the funding stage does: a charged successor whose
+        # parent is only in the program store has no lineage here.
+        funded = program.state_store().load(run.funded_state_id)
+        states = FileStateStore(tmp_path)
+        states.persist(funded)
+        states.persist(funded.charge(cost))
+
+        report = verify_run(tmp_path)
+
+        assert report.ok, report.issues
+
+    def test_a_balance_no_snapshot_agrees_with_is_reported(
+        self, tmp_path: Path
+    ) -> None:
+        write_run(tmp_path)
+        program, run = _fund(tmp_path)
+        program.ledger_for(run.run_id).debit(
+            ResourceCost(usd=1.0), charge_id="att_1", reason="one attempt"
+        )
+
+        report = verify_run(tmp_path)
+
+        (issue,) = report.of_kind(IntegrityIssueKind.LEDGER_ISSUE)
+        assert "nor the budget of any" in issue.detail
 
     def test_an_unfunded_root_skips_the_ledger_check(
         self, tmp_path: Path

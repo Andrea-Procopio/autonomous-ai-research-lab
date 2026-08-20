@@ -48,19 +48,26 @@
    analysis chain is a DAG with one invariant: retrieved papers and
    everything derived from them have no path into scientific state
    except through admission's governed door.
-10. ``program`` is admission's one consumer — the funded run an
-   admitted state descends into, and the one place that can say whether
-   a whole run is intact. It reads ``core``, ``admission``,
-   ``persistence``, and ``evidence``, and nothing else; of every state
-   mutator it may call only ``fund``, because a funded successor is the
-   last state this side of the loop builds and every evolution after it
-   belongs to orchestration's commit layer. It cannot reach roles,
-   orchestration, execution, or literature, and nothing imports it.
+10. ``program`` is the one stage that may act on an admission — the
+   funded run an admitted state descends into, and the one place that
+   can say whether a whole run is intact. It reads ``core``,
+   ``admission``, ``persistence``, and ``evidence``, and nothing else;
+   of every state mutator it may call only ``fund``, because a funded
+   successor is the last state this side of the loop builds and every
+   evolution after it belongs to orchestration's commit layer. It cannot
+   reach roles, orchestration, execution, or literature, and only the
+   controller imports it.
 11. ``evidence`` stays a foundation, not a consumer: results, evidence
    records, their artifacts, and the derived chain checker depend on
    ``core`` alone. Verifying a run needs snapshots and a ledger too,
    which is exactly why that pass lives one layer up in ``program``
    rather than here.
+12. ``control`` is the composition root: the one package that may import
+   every stage, and the one nothing may import. It sequences stages and
+   records what happened to them; it mutates no state and builds no
+   result or evidence record of its own. Rules 4 through 10 name it as
+   an allowed consumer for exactly this reason — a composition root is
+   the thing they forbid *everywhere else*.
 """
 
 from __future__ import annotations
@@ -80,6 +87,7 @@ SELECTION = SRC / "selection"
 ADMISSION = SRC / "admission"
 PROGRAM = SRC / "program"
 EVIDENCE = SRC / "evidence"
+CONTROL = SRC / "control"
 PROVIDERS = SRC / "runtime" / "providers.py"
 PROVIDER_MODULES = (PROVIDERS, SRC / "runtime" / "muse.py")
 
@@ -312,15 +320,17 @@ def test_literature_imports_no_vendor_sdk() -> None:
 def test_literature_is_imported_only_by_its_analysis_stages() -> None:
     """Only ``mapping`` and ``priorart`` — the deliberate
     literature-analysis stages, both barred from scientific state — may
-    import literature. No orchestration, role, runtime, or evidence
-    module may depend on it: retrieved papers must have no path into
-    scientific state."""
+    *use* literature, and ``control``, which builds the corpus those two
+    read through, may import it. No orchestration, role, runtime, or
+    evidence module may depend on it: retrieved papers must have no path
+    into scientific state."""
     violations: list[str] = []
     for path in sorted(SRC.rglob("*.py")):
         if (
             LITERATURE in path.parents
             or MAPPING in path.parents
             or PRIORART in path.parents
+            or CONTROL in path.parents
         ):
             continue
         tree = ast.parse(path.read_text(), filename=str(path))
@@ -439,10 +449,12 @@ def test_mapping_is_imported_only_by_its_analysis_stages() -> None:
     """Only ``ideation`` — the deliberate idea-generation stage Task 5C
     built — ``priorart`` — the challenge stage that shares its gate
     vocabulary and grounding surface — ``selection`` — the choice
-    stage that reuses the same vocabulary — and ``admission`` — the
-    governed bridge that reuses it again — may import mapping. No
-    orchestration, role, runtime, or evidence module may depend on it:
-    a field map must have no path into scientific state."""
+    stage that reuses the same vocabulary — ``admission`` — the
+    governed bridge that reuses it again — and ``control``, the
+    composition root that starts the stage by handing it a brief, may
+    import mapping. No orchestration, role, runtime, or evidence module
+    may depend on it: a field map must have no path into scientific
+    state."""
     violations: list[str] = []
     for path in sorted(SRC.rglob("*.py")):
         if (
@@ -451,6 +463,7 @@ def test_mapping_is_imported_only_by_its_analysis_stages() -> None:
             or PRIORART in path.parents
             or SELECTION in path.parents
             or ADMISSION in path.parents
+            or CONTROL in path.parents
         ):
             continue
         tree = ast.parse(path.read_text(), filename=str(path))
@@ -570,10 +583,11 @@ def test_ideation_imports_no_vendor_sdk() -> None:
 
 def test_ideation_is_imported_only_by_its_deliberate_stages() -> None:
     """Only ``priorart`` — the challenge stage that reads the portfolio
-    it tries to falsify — and ``selection`` — the choice among the
-    challenge's survivors — may import ideation, both barred from
-    scientific state: candidate ideas reach scientific state only when
-    a later task deliberately builds the proposal path through the
+    it tries to falsify — ``selection`` — the choice among the
+    challenge's survivors — and ``control``, which builds the stage's
+    directive and calls it, may import ideation, none of them able to
+    reach scientific state: candidate ideas reach scientific state only
+    when a later task deliberately builds the proposal path through the
     governed commit."""
     violations: list[str] = []
     for path in sorted(SRC.rglob("*.py")):
@@ -582,6 +596,7 @@ def test_ideation_is_imported_only_by_its_deliberate_stages() -> None:
             or PRIORART in path.parents
             or SELECTION in path.parents
             or ADMISSION in path.parents
+            or CONTROL in path.parents
         ):
             continue
         tree = ast.parse(path.read_text(), filename=str(path))
@@ -818,14 +833,20 @@ def test_selection_imports_no_vendor_sdk() -> None:
         )
 
 
-def test_selection_has_exactly_one_consumer_in_the_package() -> None:
+def test_selection_is_imported_only_by_admission_and_the_controller() -> None:
     """Only ``admission`` — the governed bridge into the initial
-    research state — may import selection: a selection record is a
-    validated model preference, and admission is the one task that may
-    act on it."""
+    research state — may *act* on a selection: a selection record is a
+    validated model preference, and admission is the one task allowed to
+    take it further. ``control`` may import the package too, but only to
+    build the directive and call the stage; the rule that it decides
+    nothing is enforced separately."""
     violations: list[str] = []
     for path in sorted(SRC.rglob("*.py")):
-        if SELECTION in path.parents or ADMISSION in path.parents:
+        if (
+            SELECTION in path.parents
+            or ADMISSION in path.parents
+            or CONTROL in path.parents
+        ):
             continue
         tree = ast.parse(path.read_text(), filename=str(path))
         for node in ast.walk(tree):
@@ -846,8 +867,9 @@ def test_selection_has_exactly_one_consumer_in_the_package() -> None:
 
 def test_priorart_is_imported_only_by_its_deliberate_stages() -> None:
     """Only ``selection`` — the choice among the challenge's survivors —
-    and ``admission`` — which re-verifies the challenged portfolio
-    behind its own door — may import priorart. A prior-art assessment
+    ``admission`` — which re-verifies the challenged portfolio behind
+    its own door — and ``control``, which builds the challenge's
+    directive and calls it, may import priorart. A prior-art assessment
     reaches scientific state only through that chain."""
     violations: list[str] = []
     for path in sorted(SRC.rglob("*.py")):
@@ -855,6 +877,7 @@ def test_priorart_is_imported_only_by_its_deliberate_stages() -> None:
             PRIORART in path.parents
             or SELECTION in path.parents
             or ADMISSION in path.parents
+            or CONTROL in path.parents
         ):
             continue
         tree = ast.parse(path.read_text(), filename=str(path))
@@ -1012,13 +1035,19 @@ def test_admission_imports_no_vendor_sdk() -> None:
         )
 
 
-def test_admission_has_exactly_one_consumer_in_the_package() -> None:
+def test_admission_is_imported_only_by_program_and_the_controller() -> None:
     """Only ``program`` — the funded run an admitted state descends
-    into — may import admission: an admission record is a translated
-    seed, and funding it into a run is the one act that follows."""
+    into — may act on an admission: the record is a translated seed, and
+    funding it into a run is the one act that follows. ``control`` may
+    import the package to build the directive and call the stage, and
+    nothing more."""
     violations: list[str] = []
     for path in sorted(SRC.rglob("*.py")):
-        if ADMISSION in path.parents or PROGRAM in path.parents:
+        if (
+            ADMISSION in path.parents
+            or PROGRAM in path.parents
+            or CONTROL in path.parents
+        ):
             continue
         tree = ast.parse(path.read_text(), filename=str(path))
         for node in ast.walk(tree):
@@ -1148,14 +1177,15 @@ def test_program_imports_no_vendor_sdk() -> None:
         )
 
 
-def test_nothing_in_the_package_imports_program() -> None:
-    """Program is the new leaf. The funded state leaves it the way the
-    admitted state left admission: through the snapshot store and an
-    explicit hand-off at the edge, never through an import of the
-    package by anything upstream of it."""
+def test_program_has_exactly_one_consumer_in_the_package() -> None:
+    """Only ``control`` — the composition root that funds an admission
+    and then runs it — may import program. Nothing upstream of the
+    funded state may: it leaves the package the way the admitted state
+    leaves admission, through the snapshot store and an explicit
+    hand-off at the edge."""
     violations: list[str] = []
     for path in sorted(SRC.rglob("*.py")):
-        if PROGRAM in path.parents:
+        if PROGRAM in path.parents or CONTROL in path.parents:
             continue
         tree = ast.parse(path.read_text(), filename=str(path))
         for node in ast.walk(tree):
@@ -1204,4 +1234,61 @@ def test_evidence_depends_on_core_alone() -> None:
                     if alias.name.startswith(f"{PACKAGE}.")
                     and not alias.name.startswith(f"{PACKAGE}.core")
                 )
+    assert violations == []
+
+
+def test_nothing_in_the_package_imports_control() -> None:
+    """The controller is the composition root and therefore the leaf.
+    It is allowed to import every stage precisely because nothing
+    imports it: the arrow that would let a stage learn its own position
+    in the chain is the one this rule refuses to draw."""
+    violations: list[str] = []
+    for path in sorted(SRC.rglob("*.py")):
+        if CONTROL in path.parents:
+            continue
+        tree = ast.parse(path.read_text(), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+                if "control" in module.split("."):
+                    violations.append(
+                        f"{path.relative_to(SRC)}: imports {module}"
+                    )
+            elif isinstance(node, ast.Import):
+                violations.extend(
+                    f"{path.relative_to(SRC)}: imports {alias.name}"
+                    for alias in node.names
+                    if "control" in alias.name.split(".")
+                )
+    assert violations == []
+
+
+def test_control_sequences_stages_but_never_does_their_work() -> None:
+    """A composition root that started deciding things would be a second
+    implementation of every stage it calls. The controller may hold a
+    state and hand it on; it may not mutate one, and it may not build a
+    result or an evidence record — those belong to the runtime and the
+    stage that owns them."""
+    forbidden = {"ExperimentResult", "Evidence", "EpistemicAssessment"}
+    violations: list[str] = []
+    for path in sorted(CONTROL.rglob("*.py")):
+        tree = ast.parse(path.read_text(), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                if (
+                    isinstance(node.func, ast.Attribute)
+                    and node.func.attr in STATE_MUTATORS
+                ):
+                    violations.append(
+                        f"{path.name}:{node.lineno}: calls "
+                        f".{node.func.attr}(...)"
+                    )
+                if (
+                    isinstance(node.func, ast.Name)
+                    and node.func.id in forbidden
+                ):
+                    violations.append(
+                        f"{path.name}:{node.lineno}: constructs "
+                        f"{node.func.id}"
+                    )
     assert violations == []
