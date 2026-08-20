@@ -69,21 +69,41 @@ end-to-end runs:
   zero truncation and spend that reconciles exactly with the ledger.
   Zero-network replay verified every time. The candidate records stay
   untouched.
+- **Candidate selection over the challenged portfolio.** One guarded
+  door in: the directive names one prior-art run record, and trusted
+  code computes eligibility from that run's `DISTINGUISHED` verdicts
+  alone — no "latest assessment" inference exists. Two gated model
+  calls (a comparative review of every eligible candidate and every
+  pair, then one final choice among the candidates no validated
+  disqualifier removed), under score-free schemas with nowhere to put
+  a stop. Disqualifiers are narrow and attested: both quotes re-found
+  verbatim, in the candidate's own record and in the operator's stated
+  constraint. Three honest outcomes — `SELECTED`,
+  `NO_ELIGIBLE_CANDIDATE` (decided by trusted code, zero calls, zero
+  spend), `NO_DEFENSIBLE_CANDIDATE` (a validated disqualifier per
+  eligible candidate) — structurally distinct and never conflated.
+  Proven live over the 5D.2 portfolio: three eligible, zero
+  disqualifiers, one selection in two calls with zero corrective
+  calls, spend reconciling exactly with the ledger, and every
+  preserved upstream artifact byte-identical before and after. A
+  selection is a model preference validated — never computed — by
+  trusted code, and never proof of novelty.
 
 Nothing a model says becomes scientific state until deterministic code
 has gated, committed, executed, and verified it. Literature-derived
-records never become scientific state at all: maps, inventories, and
-candidate ideas describe and conjecture, carrying their sources, until
-a later task admits findings through the same governed commit as every
-other proposal. Orchestration is not model-driven: a fixed-priority
+records never become scientific state at all: maps, inventories,
+candidate ideas, and selections describe, conjecture, and prefer,
+carrying their sources, until a later task admits findings through the
+same governed commit as every other proposal. Orchestration is not model-driven: a fixed-priority
 director dispatches work, and every model decision passes a
 deterministic gate before it takes effect.
 
 Not built yet: access resolution for metadata-only retrieved works,
-Task 5E candidate selection (its entry rule is defined: a candidate is
-selectable only on a `DISTINGUISHED` assessment), literature-grounded
-findings entering research state, cloud execution, statistician and
-skeptic roles with real inference, and paper writing.
+Task 5F admission of a selected candidate into research state (the
+selection record is its input, and must be treated as a validated
+model preference), literature-grounded findings entering research
+state, cloud execution, statistician and skeptic roles with real
+inference, and paper writing.
 
 Expect interfaces to change.
 
@@ -98,7 +118,8 @@ Expect interfaces to change.
 | `literature` | Bounded search against a real scholarly API (OpenAlex): normalized snapshot records, deterministic deduplication, write-once search provenance, and a replayable local corpus. Depends only on `core`; its one consumer is `mapping`. |
 | `mapping` | What the literature adds up to: model-backed field maps and problem inventories, deterministically gated and write-once, judged by a trusted-code adequacy verdict. Depends on `core`, `literature`, and the provider seam; its one consumer is `ideation`. |
 | `ideation` | What might be worth investigating: CFP-directed candidate generation over the assessed map. Depends on `core`, `mapping`, and the provider seam; its one consumer is `priorart`. |
-| `priorart` | Whether it was already done: the prior-art challenge over the candidate portfolio, with a deterministic fail-closed verdict per candidate. Depends on `core`, `literature`, `mapping`, `ideation`, and the provider seam; nothing imports it. |
+| `priorart` | Whether it was already done: the prior-art challenge over the candidate portfolio, with a deterministic fail-closed verdict per candidate. Depends on `core`, `literature`, `mapping`, `ideation`, and the provider seam; its one consumer is `selection`. |
+| `selection` | Which candidate to pursue, if any: gated two-stage selection over the `DISTINGUISHED` survivors of one named prior-art run, with attested disqualifiers and three honest outcomes. Score-free and write-once. Depends on `core`, `ideation`, `mapping`, `priorart`, and the provider seam; nothing imports it. |
 | `persistence` | Saves every state to disk so a run can be inspected or replayed later. |
 | `runtime` | Bookkeeping around the loop: open work, validation and verification, cost tracking, metrics, the model-provider seam (with the Muse adapter), and the write-once stores for implementation and planning provenance. |
 | `search` | Policies for choosing the next action among candidates. |

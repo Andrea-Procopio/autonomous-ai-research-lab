@@ -94,14 +94,26 @@ human in the loop, producing results that survive scrutiny.
     comparisons, zero truncation, and spend that reconciles exactly
     with the ledger. `DISTINGUISHED` still means only "differentiated
     from the closest works this bounded search found", never novelty.
-    The Task 5E entry rule is defined but not implemented: selectable
-    only on a `DISTINGUISHED` assessment, with honest, distinguishable
-    stops otherwise.
+  - *Task 5E (2026-08-20).* Candidate selection over the challenged
+    portfolio. One door: the directive names one prior-art run record,
+    and trusted code computes eligibility from that run's
+    `DISTINGUISHED` verdicts alone. Two gated model stages under
+    score-free schemas with no stop shape; narrow attested
+    disqualifiers quoting the candidate and the operator's stated
+    constraints verbatim; three structurally distinct outcomes, all
+    proven reachable on closed portfolios. The live run's first
+    attempt failed closed on a Muse HTTP 504 (a typed transport
+    error; nothing but the directive recorded); the rerun selected one
+    candidate over two undisqualified alternatives in two calls with
+    zero corrective calls, spend reconciling exactly with the ledger,
+    and every preserved upstream artifact byte-identical. A selection
+    is a model preference validated — never computed — by trusted
+    code, and never proof of novelty.
   - *Still open:* access resolution for attested material ambiguities
-    on metadata-only works, Task 5E candidate selection, and only
-    after that, findings entering the state as structured objects
-    carrying their sources, through the same governed commit as every
-    other proposal.
+    on metadata-only works, Task 5F admission of the selected
+    candidate, and only after that, findings entering the state as
+    structured objects carrying their sources, through the same
+    governed commit as every other proposal.
 - **Real experiment execution.** ML training runs under the existing
   executor contract: checkpoints, longer timeouts, GPU accounting.
 - **Scientific debugging and experiment verification.** Done in its

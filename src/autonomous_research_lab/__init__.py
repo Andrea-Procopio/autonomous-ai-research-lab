@@ -23,8 +23,24 @@ Package layout (dependencies point downward only):
     The cost-aware layer: the frontier view, deterministic validation,
     reasoning tiers and escalation, runtime metrics, playbooks, and the
     development/held-out evaluation seam.
+``literature``
+    Bounded retrieval from a real scholarly index: snapshot records,
+    deduplication, write-once search provenance, a replayable corpus.
+``mapping``
+    What the literature adds up to: gated field maps and problem
+    inventories, judged by a trusted-code adequacy verdict.
+``ideation``
+    What might be worth investigating: CFP-directed, gated candidate
+    generation over the assessed map.
+``priorart``
+    Whether it was already done: the adversarial challenge with a
+    deterministic fail-closed verdict per candidate.
+``selection``
+    Which candidate to pursue, if any: gated choice among the
+    ``DISTINGUISHED`` survivors of one named challenge, with three
+    honest outcomes — a preference, never proof.
 ``search``
-    Selection policies over evaluated candidates.
+    Selection policies over evaluated action candidates.
 ``roles``
     Specialized agents with their own objectives and authority. Roles receive
     explicit invocations and produce proposals; they never mutate state.

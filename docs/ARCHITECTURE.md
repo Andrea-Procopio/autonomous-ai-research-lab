@@ -1497,21 +1497,143 @@ metadata-only works (an attested material ambiguity still has no
 lawful in-repo path to an abstract), and any separate bar on
 citation-dominated pools, should live evidence ever show one gamed.
 
-**The Task 5E ingress contract (defined, not implemented).** A
-candidate is selectable for experimentation only when its latest
-applicable prior-art assessment is `DISTINGUISHED`. `OVERLAPPING`
-candidates are ineligible, carrying their grounded
-`overlapping_work_ids`. `NOVELTY_UNRESOLVED` candidates are ineligible
-too, carrying their typed reasons — and downstream reporting must
-distinguish *why* no candidate was selectable (grounded overlap,
-insufficient evidence, execution failure before assessment, or a
-mixture) using those existing records rather than new terminal stop
-states. An evidence-limited candidate is never described as
-scientifically indefensible, and an empty selection is an honest stop:
-there is no retrieval-retry loop whose purpose is to manufacture a
-selectable candidate. Selection itself, ranking, and admission to
-`ResearchState` remain future work behind the same governed commit as
-every other proposal.
+**The Task 5E ingress contract (implemented).** A candidate is
+selectable only on a `DISTINGUISHED` assessment. The contract's first
+wording said "latest applicable assessment"; the implementation pins
+something narrower and reproducible, and says so rather than papering
+over the change: no record carries a clock that could define "latest",
+so a `SelectionDirective` names one `PriorArtRunRecord` explicitly and
+eligibility is computed from that run's assessments alone — an
+assessment outside the named run does not exist for that selection,
+which is what makes staleness well-defined. `OVERLAPPING` and
+`NOVELTY_UNRESOLVED` candidates are ineligible and carry their own
+grounded specifics forward, so an empty selection explains itself from
+existing records; an evidence-limited candidate is never described as
+scientifically indefensible, and no retrieval-retry loop exists to
+manufacture a selectable one. The contract's "no new terminal stop
+states" holds as stated: selection's three outcomes are record values
+inside the `selection` package, nothing entered the scientific state
+machine, and admission to `ResearchState` remains future work behind
+the same governed commit as every other proposal. Selection exists as
+*preference* — deliberately not ranking, since no score is expressible
+anywhere in its records. The next chapter describes the layer.
+
+## Candidate selection (Task 5E)
+
+The `selection` package decides which challenged candidate to pursue,
+if any. It consumes `priorart` (the verdicts that define eligibility),
+`ideation` (the immutable portfolio and the governing direction), and
+`mapping` (the shared gate vocabulary) — never `literature`: selection
+runs no retrieval and sees sources only through the records upstream
+stages froze. Nothing imports it; it is the new leaf of the analysis
+DAG, and `priorart` now has exactly one consumer.
+
+One run performs a fixed sequence:
+
+```
+SelectionDirective (names one PriorArtRunRecord; four operator
+                    resource statements; hard ceilings)
+  -> require_challenged_portfolio_for_selection  (before any model call)
+  -> partition_by_verdict          (trusted code: eligible iff
+                                    DISTINGUISHED in the named run)
+  -> zero eligible?                record NO_ELIGIBLE_CANDIDATE —
+                                    zero calls, structurally zero
+                                    spend, every ineligible candidate
+                                    named with its verdict's specifics
+  -> check_selection_coherence     (refuse a directive that cannot
+                                    complete its own promised work)
+  -> stage 1: comparative review   (one gated call: every candidate,
+                                    every pair, attested disqualifiers)
+  -> all eligible disqualified?    record NO_DEFENSIBLE_CANDIDATE —
+                                    no second call
+  -> stage 2: final decision       (one gated call over the remaining
+                                    contenders)
+  -> record SELECTED               (one nested write-once run record)
+```
+
+Each stage gets at most one corrective call carrying the exact
+mechanical rules that fired, never a preferred candidate; a stage-2
+rejection never redoes stage 1. Every rejected payload is preserved.
+The comparative review is one inseparable joint judgment over the whole
+eligible set, so the run record nests it whole: reviews, pairwise
+comparisons, stamps, decision, provenance, and spend are one
+content-addressed write, tamper-loud together.
+
+**The authority split.** This is the first layer where a model judgment
+is the decision: no deterministic rule can compute "most scientifically
+important". The split is explicit. Trusted code decides validity — the
+eligible set, the disqualified set, the exact partition, disqualifier
+evidence, structural coherence, outcome legality, and spend. The model
+decides which non-disqualified eligible candidate wins, and that
+preference is labeled `comparative_preference` in the package's
+`CLAIM_KINDS` — a model preference validated, never computed, by
+trusted code. Task 5F must treat the selection record as exactly that.
+The stage schemas carry no numeric field anywhere: score-free
+justification is structural, like the engineer schema having nowhere to
+put a metric — not a gate detecting score-shaped prose.
+
+**Hard disqualifiers are narrow and attested.** A candidate may be
+disqualified only on five typed grounds — not operationally falsifiable
+within the directive; minimum resource needs exceeding the directive;
+an unmeasurable outcome; no credible baseline or control repairable
+without changing the candidate; outside the governing CFP scope — and
+every disqualifier is the overlap-hypothesis discipline applied to
+resources: it quotes the candidate's own rendered record verbatim and
+the named constraint verbatim (the directive statement for
+compute/data/time/experimental, the recorded direction for scope), and
+the gate re-finds both. Weakness relative to another candidate,
+uncertainty between close candidates, current repository limitations,
+and implementation difficulty are never disqualifiers. Candidates that
+survived the ideation gates carry falsifiers, metrics, baselines, and
+CFP alignment as construction invariants, so every ground but the
+resource conflict is a near-unreachable fail-closed guard, kept
+expressible so a real defect against the directive's stated envelope
+still has a name. An unattested disqualification is a gate rejection —
+and if any eligible candidate lacks a validated disqualifier,
+`NO_DEFENSIBLE_CANDIDATE` is a gate rejection, not an outcome.
+
+**Stops are structural, never a model output.** The decision schema has
+no stop shape, and "selecting" a stamped-disqualified or invented
+candidate is rejected (`disqualified_selection`, `unknown_candidate`).
+The run record's own invariants finish the job:
+`NO_DEFENSIBLE_CANDIDATE` is unconstructible unless the disqualified
+set equals the eligible set with a validated disqualifier behind every
+entry, and `NO_ELIGIBLE_CANDIDATE` is unconstructible with any review,
+any call, or any spend on it. A stop with a defensible candidate
+remaining cannot be recorded, whatever code path produced it — and a
+comparative judgment cannot be disguised as a stop, or a stop as
+judgment.
+
+**What a selection means.** A selection is comparative portfolio
+judgment under a bounded search: the winner is preferred among the
+candidates one named challenge distinguished, under one operator's
+stated constraints — never proof of novelty, and never a fact about
+which idea is best. The candidate records stay untouched and their
+novelty standing stays structurally `UNASSESSED`; the verdicts and the
+selection live beside them. Unselected eligible candidates remain
+immutable, addressable by id, and available to future selection runs —
+not being selected is not a disqualification, and a re-run over the
+same portfolio is a new occurrence with its own durable record.
+
+**The live evidence (2026-08-20).** One selection ran over the
+preserved Task 5D.2 challenge, whose three candidates were all
+`DISTINGUISHED`. The first attempt failed closed on infrastructure —
+the Muse endpoint returned HTTP 504 before any reply, a typed
+transport error that recorded nothing but the directive — and the
+rerun completed as a new occurrence: the preflight passed (worst-case
+stage-1 reply 6,550 of 16,384 tokens, 4 of 4 calls reserved), both
+gated stages accepted on their first attempt (zero corrective calls,
+zero rejected payloads), and the run selected one candidate over two
+undisqualified alternatives, with the decisive tradeoff, one rationale
+per alternative, a first experimental objective, capabilities, and
+risks on the record. Spend was 2 model calls, 7,496 input and 10,833
+output tokens, reconciling exactly with the ledger; all 182 preserved
+upstream files were byte-identical before and after; the nested record
+reloaded identically from a fresh store. No candidate carried a
+disqualifier — the operator's stated GPU envelope accommodates all
+three — so the honest-stop paths went unexercised live and rest on the
+calibration suite, where all three outcomes are proven reachable at
+the default ceilings.
 
 ## Architectural invariants
 
@@ -1539,6 +1661,11 @@ A high refusal rate is not evidence of rigor: every prior-art verdict,
 DISTINGUISHED included, stays demonstrably reachable under evidence
 that should satisfy it, and every blocker fires on its own recorded
 cause.
+A selection is a preference, never a proof: eligibility and
+disqualification are stamped by trusted code from one named prior-art
+run, an honest empty stop needs a validated verbatim disqualifier for
+every eligible candidate, and no numeric score exists anywhere in its
+schemas.
 Every important research decision is reconstructible later.
 ```
 
@@ -1575,7 +1702,13 @@ priorart      whether it was already done: the adversarial prior-art
               bounded retrieval, gated screening and comparison, a
               deterministic fail-closed verdict per candidate,
               write-once  (depends on core, literature, mapping,
-              ideation, and the provider seam; nothing imports it)
+              ideation, and the provider seam; exactly one
+              consumer — selection)
+selection     which candidate to pursue, if any: trusted eligibility
+              from one named challenge, two gated stages, attested
+              disqualifiers, three honest outcomes, one write-once
+              nested record  (depends on core, ideation, mapping,
+              priorart, and the provider seam; nothing imports it)
 search        which move to take
 roles         who does the work, under what contract; the model-backed
               engineer and planner

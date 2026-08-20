@@ -86,8 +86,11 @@ def theme_key(name: str) -> str:
 class NoveltyStatus(StrEnum):
     """Structurally the only value a candidate can carry: novelty is a
     claim about the world's literature, and a bounded generation run has
-    no standing to assess it. Task 5D's prior-art challenge will define
-    the other values when it defines the assessment."""
+    no standing to assess it. Task 5D chose to define no other value —
+    its verdicts live beside the candidate on
+    :class:`~..priorart.assessment.PriorArtAssessment` records, and
+    Task 5E selects on those records, so nothing is ever written onto
+    the candidate."""
 
     UNASSESSED = "unassessed"
 
