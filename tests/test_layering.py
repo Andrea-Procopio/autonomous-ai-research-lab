@@ -557,6 +557,7 @@ def test_ideation_is_imported_only_by_its_deliberate_stages() -> None:
             IDEATION in path.parents
             or PRIORART in path.parents
             or SELECTION in path.parents
+            or ADMISSION in path.parents
         ):
             continue
         tree = ast.parse(path.read_text(), filename=str(path))
@@ -799,7 +800,7 @@ def test_nothing_in_the_package_imports_selection() -> None:
     proposal path through the governed commit."""
     violations: list[str] = []
     for path in sorted(SRC.rglob("*.py")):
-        if SELECTION in path.parents:
+        if SELECTION in path.parents or ADMISSION in path.parents:
             continue
         tree = ast.parse(path.read_text(), filename=str(path))
         for node in ast.walk(tree):
@@ -826,7 +827,11 @@ def test_priorart_has_exactly_one_consumer_in_the_package() -> None:
     commit."""
     violations: list[str] = []
     for path in sorted(SRC.rglob("*.py")):
-        if PRIORART in path.parents or SELECTION in path.parents:
+        if (
+            PRIORART in path.parents
+            or SELECTION in path.parents
+            or ADMISSION in path.parents
+        ):
             continue
         tree = ast.parse(path.read_text(), filename=str(path))
         for node in ast.walk(tree):

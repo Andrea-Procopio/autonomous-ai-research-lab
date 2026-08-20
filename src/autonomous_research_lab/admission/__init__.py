@@ -40,6 +40,17 @@ from .directive import (
     MODEL_CALLS_CEILING,
     AdmissionDirective,
 )
+from .door import (
+    AdmissionInputs,
+    AdmissionRefusedError,
+    require_selected_candidate_for_admission,
+)
+from .gates import check_operationalization
+from .preflight import (
+    AdmissionCallPlan,
+    AdmissionPreflightError,
+    check_admission_coherence,
+)
 from .records import (
     CLAIM_KINDS,
     MAX_ARM_CHARS,
@@ -65,10 +76,14 @@ __all__ = [
     "MAX_REQUIREMENT_CHARS",
     "MECHANICAL_READING",
     "MODEL_CALLS_CEILING",
+    "AdmissionCallPlan",
     "AdmissionConflictError",
     "AdmissionDirective",
+    "AdmissionInputs",
     "AdmissionIntegrityError",
+    "AdmissionPreflightError",
     "AdmissionRecord",
+    "AdmissionRefusedError",
     "AdmissionStore",
     "GroundedSupport",
     "MappingRejection",
@@ -76,4 +91,7 @@ __all__ = [
     "Requirement",
     "RequirementSource",
     "SupportSource",
+    "check_admission_coherence",
+    "check_operationalization",
+    "require_selected_candidate_for_admission",
 ]
