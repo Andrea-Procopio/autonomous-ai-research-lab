@@ -160,8 +160,25 @@ human in the loop, producing results that survive scrutiny.
   concurrent debits cannot overspend. The runtime posts one debit per
   attempt behind a protocol seam and fails closed when the ledger and
   the state disagree. Proven over the preserved Task 5F admission with
-  zero model calls and zero network calls. Still open: a stage
-  controller and CLI that carry a topic through the whole chain.
+  zero model calls and zero network calls.
+- **One command through the chain.** Done (Task 6C, 2026-08-20). A
+  controller walks the seven stages from one config that contains no
+  record ids, and `arl run/resume/status/verify` is the front door. Each
+  stage's identity is its directive's content id, so "has this already
+  been done?" is answerable in a process that did none of it: from the
+  event log if the event is there, from the stage's own store if a crash
+  lost it. `RUNNING` is written before every side effect and a terminal
+  status after it, so a crash is a visible claim rather than a gap.
+  Nothing retries. An honest scientific no ends the investigation as a
+  success and marks the stages that will never run. Proven twice without
+  a model or a network: the preserved 5B.1–5F records replay under one
+  root and fund once with every file byte-identical, and a synthetic
+  brief walks all seven stages — executing real experiments through the
+  ordinary executor — then walks again in seven interrupted pieces to
+  the same admitted state. Still open: a trusted template catalog whose
+  metrics match admitted predictions, without which a live run stops at
+  the funded run; and the snapshot sequence a run leaves is not a linked
+  chain, which weakens two checks (see KNOWN_ISSUES).
 - **Real experiment execution.** ML training runs under the existing
   executor contract: checkpoints, longer timeouts, GPU accounting.
 - **Scientific debugging and experiment verification.** Done in its

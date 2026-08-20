@@ -1948,12 +1948,170 @@ refused rather than reconciled, the completed directive replayed its run
 without a second grant, and all three preserved admission files were
 byte-identical afterwards.
 
-What remains honestly absent: this is a funding bridge, not a stage
-controller. There is no command that carries a topic through the whole
-chain, no durable evidence store behind the in-memory one, and no
-experiment contract wide enough for real ML work — the admitted
-predictions' metrics match no entry in any trusted template catalog, so
-funding a run does not yet make that run executable.
+What remained honestly absent after Task 6A was the walking: a funding
+bridge is not a stage controller. Task 6B gave facts somewhere durable
+to live, and Task 6C, below, walks the chain.
+
+## One command through the chain (Task 6C)
+
+Every stage of the chain existed, was tested, and stored its own durable
+records. Nothing in the package walked them. The walking was done by
+hand in `examples/`, where each live driver pinned the previous stage's
+record id as a module constant and took the previous stage's root as a
+command-line flag — five roots and three pasted ids by the time the
+chain reached admission. That is not a pipeline; it is a person acting
+as one.
+
+`control` is the composition root. It is the one package allowed to
+import every stage, and nothing in the package may import it — the
+position `program` held before it. The asymmetry is the point: the
+stages stay unable to reach each other sideways, and exactly one place
+knows the order.
+
+```
+<root>/
+├── control/
+│   ├── configs/<cfg_…>.json          the run config, verbatim
+│   ├── investigations/<invr_…>.json  one record per `arl run`
+│   └── logs/<inv_…>/000000.json …    the stage event chain
+├── literature/ mapping/ ideation/ priorart/ selection/ admission/
+├── program/                          the run envelope and its ledger
+├── states/ results/ evidence/ blobs/ artifacts/
+└── runs/                             the executor's job directories
+```
+
+### One config, and no ids in it
+
+Everything the live drivers hardcoded lives in one JSON document: the
+brief, the call for papers, each stage's caps, the constraints and
+requirements later stages hold candidates to, the grant, and the
+authority behind it. What the config deliberately cannot hold is an
+identifier. An id names a record some earlier stage produced, and a
+config able to name one would let an operator paste the chain together
+by hand again.
+
+Parsing fails before the first call, by construction: it builds every
+directive the chain will use against placeholder upstream ids and throws
+them away, so each directive's own validation runs its ceilings and
+dates now rather than at stage four with three stages' spend gone.
+Unknown keys are refused, because a key nobody reads is a typo silently
+selecting a default.
+
+The config is stored verbatim, addressed by its own content, and named
+by the investigation. A resumed walk reads it back from that record, not
+from the file: an operator who edits the file and resumes gets the run
+they started, not a hybrid of two.
+
+### The event log, and what it is for
+
+`StageEvent` borrows the budget ledger's mechanism wholesale — sequence
+numbers as filenames, each event naming the one before it, publication
+by hard-linking a scratch file into place. What differs is the question
+it answers. A ledger says what is left; this says where the process died
+and what may be skipped.
+
+Two events per stage carry that: `RUNNING` before the side effect and a
+terminal status after it. So a `RUNNING` with no terminal successor is
+exactly the crash signature. Six statuses, with two distinctions worth
+stating:
+
+- `PENDING` is never written. A stage nobody attempted has no event, and
+  inventing a record for the absence of one would make an empty log lie.
+- `REFUSED` means a *door* said no — an inadequate map, a lineage that
+  will not verify — before any call and any spend. An honest scientific
+  no, such as a selection with no eligible candidate, is a `SUCCEEDED`
+  stage that happens to end the investigation, and the stages that will
+  now never run are marked `SKIPPED`: "did not happen, and never will"
+  is a different fact from "not yet". Filing the system's most valuable
+  outcome as a malfunction would be a poor start.
+
+Replaying the log rebuilds every id the chain produced, which is what
+lets a fresh process continue one. Nothing survives a process here but
+files.
+
+### Doing the work once
+
+Every directive is content-addressed and derived deterministically from
+the config plus the ids upstream, so the idempotency key — the stage
+name and its directive's id — is identical in every process. Before
+running a stage the controller asks two questions:
+
+1. **Does the log hold a succeeded event for this key?** Then adopt what
+   it produced and move on.
+2. **Does the stage's own store hold the work anyway?** It will, exactly
+   when a process died between the side effect and the record of it. The
+   controller writes the missing event instead of buying the work twice.
+
+The second is the audit's reconcile-rather-than-rerun, and it needed no
+change to any stage package: every run record already carries the
+directive it came from.
+
+Nothing retries. A refusal or a failure is a durable fact and a stop;
+`arl resume` re-attempts that stage and only that stage. The bounded
+retries already inside the adapters — OpenAlex's `Retry-After`, the
+provider's deadline — stay where they are, because a controller that
+retried on top of them would hide provider degradation inside a
+scientific run.
+
+### Experimentation is stepwise
+
+The seventh stage is keyed per step by the state it begins from, because
+a step is the smallest thing that is durable alone: the runtime persists
+the successor before the step returns, and the ledger keys its debit by
+the attempt. A crash costs the step in flight and nothing else.
+
+Its reconcile cannot follow parent links, because the snapshots a run
+leaves are a sequence rather than a chain — one step evolves the state
+several times and persists only what it committed, so each snapshot
+names a parent nobody wrote down. What identifies a step that committed
+before the crash is therefore that the log has never mentioned it. Two
+unmentioned snapshots mean two interruptions and no honest way to tell
+which is the head: the walk re-steps and leaves both as preserved
+partials. The same limitation weakens `verify_run`'s ledger check, which
+compares the balance against any snapshot the root holds rather than
+against the head of the run's own chain. Both are recorded in
+[KNOWN_ISSUES](KNOWN_ISSUES.md) rather than papered over.
+
+### Trusted code is not configurable
+
+A lab supplies the instruments: a model provider per stage, a literature
+provider, and a runtime. The third cannot be data. A trusted template is
+source code that will execute in a container, and a catalog described in
+JSON would hand a config file the authority to choose what runs. So the
+CLI imports a lab module (`--lab module:factory`), and the default lab —
+Muse and OpenAlex from the environment — refuses the experimentation
+stage in as many words rather than inventing roles or templates. `arl
+run` without a lab is a legitimate way to carry a topic to a funded run
+and stop.
+
+### What it is proven on
+
+Two deterministic proofs, both in the suite.
+
+The **replay** (`examples/live_task6c.py`) assembles the preserved Task
+5B.1 through 5F records under one root and walks them with a provider
+that raises on every call. Five directives that were hand-authored in
+five different drivers are derived from one config, and every one
+re-derives the content id the preserved record was filed under — that
+byte-for-byte agreement is the mechanism, not a nicety, since a config
+off by a character would look like new work. The walk reaches the same
+records the drivers reached, recognises 45 model calls' worth of work as
+already paid, spends nothing, funds the run once, leaves all 387
+preserved files byte-identical, and verifies from cold.
+
+The **canary** (`examples/canary_chain.py`) carries a synthetic brief
+through all seven stages on fixture instruments in about half a second.
+Its experiments run through the ordinary executor in real subprocesses,
+write real metrics files, become real evidence, and bill a real ledger.
+Walked again in seven pieces — stopping after every stage, resuming with
+a controller that has nothing in memory — it reaches the same admitted
+state and the same funded state, with one run record in every stage
+store and one grant on the ledger.
+
+The canary found two defects the suite could not have: `verify_run`
+reported every run that had done any work (it compared the ledger
+against the funded snapshot, which keeps the grant forever), and the
+snapshot sequence is not a chain. Both are fixed or documented above.
 
 ## Architectural invariants
 

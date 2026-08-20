@@ -140,6 +140,22 @@ end-to-end runs:
   this change it found eight state snapshots and no facts at all; after
   it, the same run verifies intact with the executor's whole run
   directory deleted.
+- **One command through the chain.** `arl run CONFIG --root DIR` carries
+  a topic from a brief to a funded run and, with a lab wired, on into
+  experiments. Seven stages, one config that contains no record ids at
+  all, and a durable event log: `RUNNING` before each stage's side
+  effect, a terminal status after it, so a crash leaves a visible claim
+  rather than a gap. A stage whose work is already on disk is
+  recognised, never repeated — from the log if the event is there, from
+  the stage's own store if a crash lost it. Nothing retries; a refusal
+  or a failure stops the walk, and `arl resume` re-attempts that stage
+  and only that stage. Proven twice, deterministically: the preserved
+  Task 5B.1–5F records replay under one root, reaching the same records
+  five hand-bridged drivers reached, spending nothing and funding once;
+  and a synthetic brief walks all seven stages in half a second,
+  executing real experiments through the ordinary executor. Walked again
+  in seven pieces, stopping and resuming at every boundary, it admits
+  the same state, funds the same run once, and still verifies.
 
 Nothing a model says becomes scientific state until deterministic code
 has gated, committed, executed, and verified it. Literature-derived
@@ -154,13 +170,12 @@ dispatches work, and every model decision passes a deterministic gate
 before it takes effect.
 
 Not built yet: access resolution for metadata-only retrieved works,
-real experiment execution over the funded state (the execution
-requirements admission carries are stated capabilities, not
-implementations, and the admitted predictions' metrics match no
-trusted template yet), one command that carries a topic through the
-whole chain, literature-grounded findings entering research state,
-cloud execution, statistician and skeptic roles with real inference,
-and paper writing.
+real ML experiment execution over a funded state (the controller runs
+the seventh stage, but a live run needs a trusted template whose
+metrics match the admitted predictions, and no such catalog exists —
+the canary supplies its own), literature-grounded findings entering
+research state, cloud execution, statistician and skeptic roles with
+real inference, and paper writing.
 
 Expect interfaces to change.
 
@@ -179,6 +194,7 @@ Expect interfaces to change.
 | `selection` | Which candidate to pursue, if any: gated two-stage selection over the `DISTINGUISHED` survivors of one named prior-art run, with attested disqualifiers and three honest outcomes. Score-free and write-once. Depends on `core`, `ideation`, `mapping`, `priorart`, and the provider seam; its one consumer is `admission`. |
 | `admission` | The governed bridge into research state: one named `SELECTED` run verified through its whole lineage, one gated model call encoding the recorded predictions sign-only, deterministic copies for everything else, and an all-or-nothing state snapshot beside a write-once record. Depends on `core` (uniquely including the state it constructs), `ideation`, `mapping`, `priorart`, `selection`, `persistence`, and the provider seam; nothing imports it. |
 | `program` | A funded run: the bridge from one admitted state to something the runtime may spend against. One named admission, one authorized grant, a funded successor state, an append-only budget ledger that is idempotent by charge id and safe under concurrent debits, and the cold verification of a whole run root. Depends on `core`, `admission`, `persistence`, and `evidence`; nothing imports it. |
+| `control` | The composition root: one command that walks the seven stages of the chain from a config with no ids in it, recording what happened to each in an append-only event log so an interrupted run resumes without repeating or double-paying for anything. The one package that may import every stage, and the one nothing imports. |
 | `persistence` | Saves every state to disk so a run can be inspected or replayed later. |
 | `runtime` | Bookkeeping around the loop: open work, validation and verification, cost tracking, metrics, the model-provider seam (with the Muse adapter), and the write-once stores for implementation and planning provenance. |
 | `search` | Policies for choosing the next action among candidates. |
@@ -187,7 +203,9 @@ Expect interfaces to change.
 | `publication` | Paper writing. Empty for now. |
 
 Dependencies point one way: higher packages import lower ones, never
-the reverse, and `core` imports nothing. A test checks this.
+the reverse, and `core` imports nothing. `control` is the one exception
+and the reason the rule survives: a composition root may import every
+stage precisely because nothing imports it. Tests check all of it.
 
 More detail in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and
 [docs/ROADMAP.md](docs/ROADMAP.md).
@@ -238,7 +256,59 @@ source .venv/bin/activate
 pip install -e ".[dev]"
 ```
 
+## The command line
+
+```bash
+pip install -e .
+arl run CONFIG --root DIR [--lab module:factory] [--stop-after STAGE]
+arl resume [INVESTIGATION] --root DIR
+arl status [INVESTIGATION] --root DIR
+arl verify --root DIR
+```
+
+`run` records the config and walks as far as it can. `resume` picks up
+where a walk stopped, using the config the investigation recorded rather
+than whatever the file says now. `status` prints the stage table.
+`verify` re-checks every durable claim under the root.
+
+Exit codes are for scripts as much as for people: `0` for a walk that
+ended on its own terms — including an honest scientific no, which is a
+result and not a fault — `2` for a refusal, `1` for a failure, an
+unusable config, or a verification that found something.
+
+Without `--lab`, the chain runs on Muse and OpenAlex from the
+environment and stops at the funded run: roles, an executor, and a
+trusted template catalog are code, and a lab module supplies them.
+
 ## Examples
+
+### examples/canary_chain.py
+
+```bash
+python -m examples.canary_chain --run-root /tmp/canary
+python -m examples.canary_chain --run-root /tmp/canary --stop-after selection
+python -m examples.canary_chain --run-root /tmp/canary   # continues
+```
+
+One synthetic brief through all seven stages, with no network, no clock,
+and no model — about half a second, and the same answer every time. The
+instruments are fixtures; the machinery is not, so the experiments run
+through the ordinary executor in real subprocesses and the ledger bills
+one debit per attempt. The second and third commands are the point: the
+walk stops where it was told, and a later process picks it up from the
+durable record with no memory of the first.
+
+### examples/live_task6c.py
+
+```bash
+python -m examples.live_task6c --run-root live_runs/task6c-<date>
+```
+
+Assembles the preserved Task 5B.1–5F records under one root and walks
+them, with a provider that raises on every call. Every completed stage
+is recognised from its own store, funding runs once, the preserved files
+are byte-identical afterwards, and the walk arrives at the records five
+hand-bridged drivers reached. Needs the preserved `live_runs/` roots.
 
 ### examples/runtime_loop.py
 
