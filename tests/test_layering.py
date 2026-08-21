@@ -88,6 +88,7 @@ ADMISSION = SRC / "admission"
 PROGRAM = SRC / "program"
 EVIDENCE = SRC / "evidence"
 CONTROL = SRC / "control"
+ORCHESTRATION = SRC / "orchestration"
 PROVIDERS = SRC / "runtime" / "providers.py"
 PROVIDER_MODULES = (PROVIDERS, SRC / "runtime" / "muse.py")
 
@@ -247,6 +248,24 @@ def test_roles_never_construct_experiment_results() -> None:
     assert violations == []
 
 
+def _submissions_in(path: Path) -> list[str]:
+    """Every place one module reaches for the executor contract itself."""
+    found: list[str] = []
+    tree = ast.parse(path.read_text(), filename=str(path))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            names = {alias.name for alias in node.names}
+            if names & {"Executor", "LocalExecutor"}:
+                found.append(f"{path.name}: imports the executor contract")
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in {"submit", "collect"}
+        ):
+            found.append(f"{path.name}:{node.lineno}: calls {node.func.attr}()")
+    return found
+
+
 def test_roles_never_submit_work() -> None:
     """A role prepares work; trusted code performs it.
 
@@ -258,27 +277,24 @@ def test_roles_never_submit_work() -> None:
     under ``roles`` may import the executor contract or call ``submit``,
     ``status`` or ``collect``: it asks a ``JobRunner`` to run one job and
     is handed the result."""
-    forbidden_calls = {"submit", "collect"}
-    violations: list[str] = []
-    for path in sorted(ROLES.rglob("*.py")):
-        source = path.read_text()
-        tree = ast.parse(source, filename=str(path))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom):
-                names = {alias.name for alias in node.names}
-                if names & {"Executor", "LocalExecutor"}:
-                    violations.append(
-                        f"{path.name}: imports the executor contract"
-                    )
-            elif (
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Attribute)
-                and node.func.attr in forbidden_calls
-            ):
-                violations.append(
-                    f"{path.name}:{node.lineno}: calls {node.func.attr}()"
-                )
+    violations = [
+        problem
+        for path in sorted(ROLES.rglob("*.py"))
+        for problem in _submissions_in(path)
+    ]
     assert violations == []
+
+
+def test_the_debugger_never_submits_work() -> None:
+    """The same rule, for the same reason, one layer up.
+
+    The bounded repair loops were the other exception: the debugger held
+    an executor and submitted its own reruns, so a repair job ran with no
+    attempt open for it and no note of it anywhere. A process killed
+    there lost the job — the spend charged to nothing, the outputs
+    orphaned. It takes a ``JobRunner`` now, and the runtime opens the
+    attempt that answers for the job before handing it over."""
+    assert _submissions_in(ORCHESTRATION / "debug_loop.py") == []
 
 
 def test_literature_depends_on_core_alone() -> None:

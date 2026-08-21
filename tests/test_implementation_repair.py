@@ -35,6 +35,7 @@ from autonomous_research_lab.core.state import ResearchState
 from autonomous_research_lab.evidence.store import InMemoryEvidenceStore
 from autonomous_research_lab.execution.executor import ExperimentJob
 from autonomous_research_lab.execution.local import LocalExecutor
+from autonomous_research_lab.execution.runner import DirectJobRunner
 from autonomous_research_lab.orchestration.debug_loop import (
     ExperimentDebugger,
     ImplementationRepairTrigger,
@@ -266,7 +267,7 @@ def _runtime(
         store=store,
         metrics=sink,
         debugger=ExperimentDebugger(
-            executor=executor,
+            runner=DirectJobRunner(executor),
             strategy=NoExecutionRepair(),
             implementation_strategy=impl_strategy,
         ),
@@ -509,7 +510,7 @@ def test_crashed_reimplementation_transitions_to_execution_repair(
         store=store,
         metrics=sink,
         debugger=ExperimentDebugger(
-            executor=executor,
+            runner=DirectJobRunner(executor),
             strategy=execution,
             implementation_strategy=impl,
         ),
@@ -723,7 +724,7 @@ def test_debug_still_refuses_completed_results(tmp_path: Path) -> None:
     )
     assert completed.succeeded
     debugger = ExperimentDebugger(
-        executor=executor,
+        runner=DirectJobRunner(executor),
         strategy=NoExecutionRepair(),
         implementation_strategy=ImplFix(metrics=FIXED),
     )
@@ -736,7 +737,7 @@ def test_repair_implementation_requires_a_strategy(tmp_path: Path) -> None:
     executor = LocalExecutor(tmp_path / "runs")
     completed = executor.collect(executor.submit(_job(spec, BUGGY, seed=7)))
     debugger = ExperimentDebugger(
-        executor=executor, strategy=NoExecutionRepair()
+        runner=DirectJobRunner(executor), strategy=NoExecutionRepair()
     )
     trigger = ImplementationRepairTrigger(
         result_id=completed.id,
@@ -757,7 +758,7 @@ def test_repair_implementation_session_is_typed_and_audited(
         checks=(OVERFIT_CONTROL.evaluate(completed.metrics),),
     )
     debugger = ExperimentDebugger(
-        executor=executor,
+        runner=DirectJobRunner(executor),
         strategy=NoExecutionRepair(),
         implementation_strategy=ImplFix(metrics=FIXED),
     )
