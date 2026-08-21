@@ -32,6 +32,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
+from typing import Final
 
 from autonomous_research_lab.core.types import ConfigValue
 from autonomous_research_lab.execution.binding import (
@@ -45,6 +46,15 @@ from autonomous_research_lab.execution.local import LocalExecutor
 from .datasets import DATASET_ID_KEY, DATASET_ROOT_KEY, DatasetStore
 
 CONTAINER_DATA_ROOT = "/arl/data"
+
+
+_DEVICE: Final[Mapping[str, str]] = {
+    "host-cpu": "cpu",
+    "host-mps": "mps",
+    "host-cuda": "cuda",
+    "container-cpu": "cpu",
+    "container-cuda": "cuda",
+}
 
 
 class ProfileError(ValueError):
@@ -130,6 +140,13 @@ class ResolvedBackend:
     """Where a job's process will see the named dataset — a host path for
     host backends, ``/arl/data/<name>`` inside a container."""
 
+    device: str
+    """The compute device jobs must use — ``cpu``, ``mps``, or ``cuda``.
+    Explicit and recorded (it reaches ``job.config``), because device
+    choice changes numerics and occupancy billing, and a template
+    auto-detecting a GPU under a profile that declared none would bill a
+    falsehood."""
+
     generated_code_allowed: bool
     """Whether a model-completing engineer may be composed with this
     binding. Containers: always. Hosts: only by the operator's explicit
@@ -161,6 +178,7 @@ def resolve(
             binding=binding,
             executor_factory=lambda root: LocalExecutor(root / "runs"),
             dataset_root_for_job=lambda name: f"{CONTAINER_DATA_ROOT}/{name}",
+            device=_DEVICE[profile.backend],
             generated_code_allowed=True,
         )
     binding = HostPythonBinding(
@@ -171,6 +189,7 @@ def resolve(
         binding=binding,
         executor_factory=lambda root: LocalExecutor(root / "runs"),
         dataset_root_for_job=lambda name: str(profile.datasets_root / name),
+        device=_DEVICE[profile.backend],
         generated_code_allowed=profile.allow_generated_code_on_host,
     )
 
@@ -191,6 +210,9 @@ class DatasetBoundBinding:
     store: DatasetStore
     dataset_name: str
     dataset_root_for_job: Callable[[str], str]
+    device: str = ""
+    """Stamped as ``config["device"]`` when set — the deployment's
+    explicit compute-device decision, on the job's own record."""
 
     def bind(
         self,
@@ -208,6 +230,8 @@ class DatasetBoundBinding:
         stamped[DATASET_ROOT_KEY] = self.dataset_root_for_job(
             self.dataset_name
         )
+        if self.device:
+            stamped["device"] = self.device
         return self.inner.bind(
             spec_id=spec_id,
             source_dir=source_dir,

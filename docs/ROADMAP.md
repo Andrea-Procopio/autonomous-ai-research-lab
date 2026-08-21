@@ -250,14 +250,52 @@ human in the loop, producing results that survive scrutiny.
   thing, and the repairing step's 52 durable writes each get a kill —
   including the two positions where a job finished and nothing had
   recorded it yet.
-- **Real experiment execution.** ML training runs under the existing
-  executor contract. Unblocked: the repair loop journals every job and
-  recovery collects finished ones. What remains is the lab itself —
-  Task 7A's main body: a trusted vision template catalog whose metrics
-  match admitted predictions, dataset manifests, backend-agnostic
-  execution profiles, and the live qualification from a synthetic brief
-  through real training. Checkpoint-resume of a half-trained job is
-  7A.1, designed against a real workload once one exists.
+- **Real experiment execution.** Done (Task 7A, 2026-08-22). The
+  seventh stage's first production instrument: `examples/vision_lab`, a
+  lab for CIFAR-scale representation learning behind every contract the
+  canary proved. Its capability is a closed table of contrasts its
+  templates genuinely compute; every admitted prediction is parsed
+  against it, and what cannot be measured refuses — typed, exit 2,
+  before anything spends — proven against the real preserved Task 5F
+  admission, whose attention-head observables no vision template
+  serves. What can be measured is served by trusted substitution: the
+  admitted metric string is written into the template source by catalog
+  code, so the exact-match contract between admission, the spec, and
+  `metrics.json` holds by construction. Templates are fixed programs —
+  seeding, data, splits, probe, control, and every byte of the metrics
+  file fenced as trusted code a preflight holds byte-identical — with
+  one slot, the encoder architecture, for the engineer's model.
+  Datasets are operator-staged bytes under content-addressed manifests,
+  re-verified by preflight before every launch; execution backends
+  (host CPU/MPS/CUDA, container CPU/CUDA) are deployment data resolving
+  onto the existing binding and executor seams, with the compute device
+  an explicit recorded decision — the first live run caught the
+  template auto-picking the Apple GPU under a profile that declared
+  none, which would have billed a falsehood. Qualified live on
+  2026-08-22: a synthetic vision brief walked all seven stages with
+  zero network and zero model spend, executing three real seeded
+  CIFAR-10 training runs on CPU (~19 s each; probe contrasts +0.040 to
+  +0.060, trained ~49% versus random ~45% top-1, overfit control 1.00),
+  every result `VERIFIED_EVIDENCE` under default governance, three
+  CONSISTENT sign tests, a `SUPPORTED` assessment, an honest stop, and
+  a clean cold verify — then again stopped at funding and resumed, and
+  again killed outright mid-training: the orphaned trainer finished in
+  its own session, the resuming process reaped it from the durable job
+  record, salvage rebuilt and committed the very bundle the dead
+  process would have (journal: `collected after an interrupted step`,
+  `succeeded (rebuilt from the collected job)`, MEASURED 19.8 s), and
+  the run ended with three jobs for three seeds — the killed training
+  run kept as science, nothing re-run, zero conservative charges.
+  Salvage exposed one gate defect the sweep could not: a reaped orphan
+  honestly records `exit_code: None`, and the validation gate read the
+  missing exit as failure; it now accepts completion by the contract's
+  own evidence, with the orphan shape stated in the check's detail.
+  Still open, deliberately: the container backends are documented and
+  policy-tested but this machine qualified the host path — the first
+  Linux/CUDA deployment should re-run the same qualification; the live
+  `ModelBackedPlanner` seat is Task 7B (the catalog already fits its
+  gate, tested); and checkpoint-resume of a half-trained job is 7A.1,
+  designed against a real workload now that one exists.
 - **Scientific debugging and experiment verification.** Done in its
   Phase 1 form: the five-way failure taxonomy (engineering /
   implementation / methodological / analytical / verified), a

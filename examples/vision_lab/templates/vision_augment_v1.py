@@ -37,21 +37,26 @@ N_PROBE_TRAIN = 5_000
 N_PROBE_EVAL = 2_000
 TINY_SUBSET = 128
 ENCODER_EPOCHS = 2
-PROBE_EPOCHS = 20
+PROBE_EPOCHS = 300
 BATCH = 128
 N_CLASSES = 10
 
 
-def device() -> torch.device:
-    if torch.cuda.is_available():
-        return torch.device("cuda")
-    if torch.backends.mps.is_available():
-        return torch.device("mps")
+def device(config: dict[str, object]) -> torch.device:
+    """The deployment's explicit choice, from config — never a guess.
+    A template auto-detecting a GPU under a profile that declared none
+    would bill a falsehood; absent a declaration, CPU is the only
+    device nothing has to be declared for."""
+    declared = config.get("device")
+    if isinstance(declared, str) and declared:
+        return torch.device(declared)
     return torch.device("cpu")
 
 
 def features_of(
-    encoder: nn.Module, loader: DataLoader, where: torch.device
+    encoder: nn.Module,
+    loader: DataLoader[tuple[torch.Tensor, torch.Tensor]],
+    where: torch.device,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     encoder.eval()
     banks, labels = [], []
@@ -68,17 +73,25 @@ def probe_top1(
     eval_features: torch.Tensor,
     eval_labels: torch.Tensor,
 ) -> float:
-    """A multinomial logistic probe, fit and scored deterministically."""
+    """A multinomial logistic probe, fit and scored deterministically.
+
+    Features are standardized on the training split first — standard
+    linear-probe practice, and what lets full-batch optimization
+    actually converge inside the fixed step budget."""
+    mean = train_features.mean(dim=0, keepdim=True)
+    scale = train_features.std(dim=0, keepdim=True).clamp_min(1e-6)
+    train = (train_features - mean) / scale
+    held = (eval_features - mean) / scale
     torch.manual_seed(0)
-    probe = nn.Linear(train_features.shape[1], N_CLASSES)
+    probe = nn.Linear(train.shape[1], N_CLASSES)
     optimizer = torch.optim.Adam(probe.parameters(), lr=1e-2)
     loss_fn = nn.CrossEntropyLoss()
     for _ in range(PROBE_EPOCHS):
         optimizer.zero_grad()
-        loss_fn(probe(train_features), train_labels).backward()
+        loss_fn(probe(train), train_labels).backward()
         optimizer.step()
     with torch.no_grad():
-        chosen = probe(eval_features).argmax(dim=1)
+        chosen = probe(held).argmax(dim=1)
     return float((chosen == eval_labels).float().mean())
 
 
@@ -101,7 +114,7 @@ def main() -> None:
     torch.manual_seed(seed)
     torch.use_deterministic_algorithms(True, warn_only=True)
     torch.set_num_threads(max(1, (os.cpu_count() or 2) - 1))
-    where = device()
+    where = device(config)
 
     plain = torchvision.transforms.ToTensor()
     full = torchvision.datasets.CIFAR10(
@@ -147,7 +160,7 @@ def main() -> None:
                 )
                 loss.backward()
                 optimizer.step()
-                last = float(loss)
+                last = float(loss.detach())
         return last
 
     trained = build_encoder().to(where)

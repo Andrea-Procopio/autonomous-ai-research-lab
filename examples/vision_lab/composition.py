@@ -199,6 +199,7 @@ class VisionLab:
                 store=store,
                 dataset_name=DATASET_NAME,
                 dataset_root_for_job=resolved.dataset_root_for_job,
+                device=resolved.device,
             )
             preflight = (*preflight, DatasetStaged(store))
 

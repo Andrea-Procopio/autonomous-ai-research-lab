@@ -5,6 +5,30 @@ diagnosed to some degree, and not yet fixed. An issue leaves this file
 by being fixed in a commit that references it — never by being
 forgotten.
 
+## Fixed-region violations fail the attempt instead of earning a repair
+
+- **Where:** `examples/vision_lab/science.py::FixedRegionCheck`, running
+  through the engineer's `preflight_checks` seam
+  (`roles/engineer.py::perform`, after the implementation record is
+  durable).
+- **Status:** open; a deliberate v1 trade-off, not a defect. Recorded so
+  the asymmetry is expected rather than rediscovered.
+- **First observed:** 2026-08-21, while designing Task 7A.
+
+The engineer's bounded generation-repair loop fires only on
+`ImplementationRejectedError` — the deterministic source gates (path,
+size, syntax). A completion that alters a fenced fixed region instead
+fails preflight after the record is durable: the attempt fails, honestly
+billed and preserved, and the director sees an engineering note — but
+the model gets no corrective call telling it which bytes it must not
+touch, the feedback that most cheaply fixes exactly this mistake.
+
+Closing it means a small engineer-side seam: let injected validators run
+inside the generation-repair loop, so a fixed-region violation earns the
+same bounded corrective call a syntax error does. That touches
+`roles/engineer.py` and belongs with Task 7B's engineer work, not in a
+drive-by.
+
 ## Timing flakes in the real-deadline Muse tests under heavy load
 
 - **Where:** `tests/test_muse_provider.py`, the tests that use a real
