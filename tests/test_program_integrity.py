@@ -613,9 +613,41 @@ class TestAttemptLinks:
 
         assert any("did not store" in detail for detail in details)
 
-    def test_a_submitted_job_that_left_no_run_directory(
+    def test_a_collected_job_that_left_no_run_directory(
         self, tmp_path: Path
     ) -> None:
+        """An attempt cannot have collected outputs from a job that left
+        nothing behind."""
+        _, _, journal, ledger = self.journalled(tmp_path)
+        journal.record(
+            attempt_id="att_1",
+            phase=AttemptPhase.SUBMITTED,
+            job_id="job_nowhere",
+        )
+        journal.record(
+            attempt_id="att_1",
+            phase=AttemptPhase.OUTPUTS_DURABLE,
+            job_id="job_nowhere",
+        )
+        self.close(journal, ledger)
+        (tmp_path / "runs").mkdir(exist_ok=True)
+
+        details = [issue.detail for issue in self.links(tmp_path)]
+
+        assert any("left no run directory" in detail for detail in details)
+
+    def test_a_submitted_job_that_never_ran_is_not_faulted(
+        self, tmp_path: Path
+    ) -> None:
+        """The note doing its job, not a broken link.
+
+        ``SUBMITTED`` is written *before* the submission precisely so a
+        later process can ask whether the job exists. A crash in between
+        leaves the phase and no run directory, and "it never ran" is a
+        complete answer — nothing was bought, and recovery closes the
+        attempt on exactly that basis. Faulting it would fault the one
+        outcome the phase was ordered that way to produce.
+        """
         _, _, journal, ledger = self.journalled(tmp_path)
         journal.record(
             attempt_id="att_1",
@@ -625,9 +657,7 @@ class TestAttemptLinks:
         self.close(journal, ledger)
         (tmp_path / "runs").mkdir(exist_ok=True)
 
-        details = [issue.detail for issue in self.links(tmp_path)]
-
-        assert any("left no run directory" in detail for detail in details)
+        assert self.links(tmp_path) == ()
 
     def test_another_backend_is_not_faulted_for_the_local_layout(
         self, tmp_path: Path

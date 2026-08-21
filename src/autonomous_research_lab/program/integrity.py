@@ -550,8 +550,8 @@ def _check_attempts(
                                       bundle the store does not hold
     attempt -> successor              a committed phase names a state
                                       that is not stored
-    attempt -> job                    a submitted phase names a job with
-                                      no run directory
+    attempt -> job                    an attempt that collected outputs
+                                      names a job with no run directory
     ================================  ==================================
 
     Plus one whole-run question: nothing may still be open. An attempt
@@ -710,18 +710,31 @@ def _check_phases(
         # The job check is the local executor's layout, and only that
         # one. A run whose jobs live somewhere else has no ``runs``
         # directory here, and this check has nothing to say about it.
+        #
+        # A ``SUBMITTED`` phase with no run directory is not a fault. It
+        # is the note being useful: the phase is written *before* the
+        # submission precisely so a later process can ask whether the job
+        # exists, and "it does not" is a complete answer — nothing was
+        # bought, and recovery closes the attempt on exactly that basis.
+        # What cannot be true is an attempt that says it *collected*
+        # outputs from a job that left nothing behind.
         if (
             event.phase is AttemptPhase.SUBMITTED
             and runs_directory.is_dir()
             and not (runs_directory / event.job_id).is_dir()
+            and journal.event_at(
+                event.attempt_id, AttemptPhase.OUTPUTS_DURABLE
+            )
+            is not None
         ):
             issues.append(
                 IntegrityIssue(
                     kind=IntegrityIssueKind.ATTEMPT_LINK,
                     subject_id=event.attempt_id,
                     detail=(
-                        f"job {event.job_id} was submitted and left no run "
-                        f"directory; nothing can be collected or ruled out"
+                        f"job {event.job_id} was collected and left no run "
+                        f"directory; the outputs this attempt calls durable "
+                        f"are not there"
                     ),
                 )
             )
