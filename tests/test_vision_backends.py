@@ -41,12 +41,18 @@ class TestValidation:
             container_profile(tmp_path, image="pytorch/pytorch").validate()
 
     def test_cuda_needs_linux(self, tmp_path: Path) -> None:
+        """If/else on the platform check, deliberately: mypy prunes the
+        branch for the other platform silently, whereas a guard ending in
+        ``pytest.skip`` leaves provably-unreachable code on Linux and
+        ``warn_unreachable`` refuses it."""
+        profile = container_profile(
+            tmp_path, backend=Backend.CONTAINER_CUDA, gpu_count=1
+        )
         if sys.platform == "linux":
-            pytest.skip("this machine could genuinely run it")
-        with pytest.raises(ProfileError, match="Linux host"):
-            container_profile(
-                tmp_path, backend=Backend.CONTAINER_CUDA, gpu_count=1
-            ).validate()
+            profile.validate()  # genuinely valid where CUDA can exist
+        else:
+            with pytest.raises(ProfileError, match="Linux host"):
+                profile.validate()
 
     def test_mps_needs_darwin(self, tmp_path: Path) -> None:
         profile = ExecutionProfile(
