@@ -2239,6 +2239,14 @@ calls submit or collect. A role holding an executor can launch work
 nobody outside it recorded, and the boundaries either side of a
 submission are exactly where an interrupted run needs a durable note.
 
+The bounded repair loops were the other exception, and Task 6D.1 closed
+it the same way. `ExperimentDebugger` held an executor and ran its own
+reruns; it holds a `JobRunner` now, proposing and rerunning are separate
+calls, and the same layering test covers `debug_loop.py`. The separation
+is what makes the ordering below possible: the runtime asks for a
+proposal, opens the attempt that will answer for the work, and only then
+hands the prepared job over.
+
 ### What is checked, and how
 
 `verify_run` gains an eighth check over six one-to-one links —
@@ -2259,17 +2267,77 @@ crash between `STARTED` and the reservation left an attempt the ledger
 had never heard of, and a crash between a settlement and the snapshot
 that paid it left the two records differing by exactly that debit.
 
-**Known limit, blocking PR4.** A job submitted inside the bounded repair
-loop is covered by its attempt's reservation but is not individually
-journalled, so a crash there abandons the attempt — charging the
-authorization — rather than reattaching to the rerun. The *accounting*
-is sound: nothing is hidden, nothing is paid twice, and the charge is
-marked `CONSERVATIVE_MAX`. The *execution recovery* is not. Under the
-current deterministic executor a lost rerun costs seconds; under PR4 it
-would cost a GPU job, and abandoning one of those is a real loss however
-honestly it is billed. Before PR4 lands, either every repair-loop job
-gets its own journalled attempt, or repairs are disabled for jobs above
-a cost threshold. See `docs/KNOWN_ISSUES.md`.
+## Every rerun is an attempt (Task 6D.1)
+
+Task 6D left one job outside all of this, and the sweep could not see it
+because the step it swept ran no job at all. The canary's first step
+designs an experiment; the step that *executes* one is longer, and the
+part a repair adds was never covered.
+
+Inside that part, the bounded repair loops submitted their own reruns.
+The attempt that answered for a rerun was opened once the result came
+back — after the job had run — so between the submission and that
+moment a job executed with no reservation covering it and nothing
+anywhere recording that it existed. A process killed in that window did
+not merely lose the rerun: the spend was charged to nothing, and the
+outputs sat in the run directory with no id on the record to find them
+by. The parent attempt, meanwhile, recovered perfectly from its own
+bundle, so the run came back looking intact while the money and the work
+had both gone missing.
+
+The fix is an ordering, and the ordering is the same one everything else
+here keeps. The runtime asks the strategy for a proposal, which touches
+nothing. It opens an attempt for that proposal — snapshot, `STARTED`
+naming the job id derived from it, reservation — and only then hands the
+prepared job to the runner, which writes `SUBMITTED` before submitting
+and `OUTPUTS_DURABLE` after collecting. A repair rerun is now an
+occurrence like any other: its own authorization, its own phases, its
+own derived job id, all of it on disk before the job exists.
+
+The id is stamped by trusted code rather than by the strategy that
+proposed the job. What that buys is not tidiness: a job whose id can be
+recomputed from the attempt can be found again by a process holding
+nothing but the journal, and that is not a property a strategy should be
+trusted to keep.
+
+One consequence is worth stating because it changed a number. An
+attempt is authorized before it runs, so it can no longer be authorized
+for what the rerun turned out to cost; where the design carries no
+estimate, the run being repaired supplies one. That is a forecast rather
+than a measurement, which is what a reservation is for.
+
+**What the longer sweep found.** Running the sweep over a step that
+executes and repairs — fifty durable writes, each of them a stopping
+point — exposed two defects that had nothing to do with repair and
+everything to do with jobs, both fixed here:
+
+- *A bundle was written before the facts it names were durable.* Bundles
+  keep results and evidence by reference, and the reference was to
+  something still only in memory: the evidence store received it later,
+  inside the commit. A process killed in between left a bundle that said
+  the step could be finished from disk and a recovery that raised
+  `BundleError` trying. `store_facts` now makes the outputs durable
+  first — the order the design always claimed, finally the order the
+  code runs in.
+- *The verifier faulted a note for doing its job.* `SUBMITTED` is
+  written before the submission precisely so a later process can ask
+  whether the job exists; a crash in between leaves the phase and no run
+  directory, and "it never ran" is a complete answer. The check called
+  that a broken link. It now faults the case that genuinely cannot be
+  true: an attempt claiming it *collected* outputs from a job that left
+  nothing behind.
+
+**What is still not done.** Recovery answers an interrupted rerun; it
+does not collect one. An attempt killed after its job ran is charged its
+authorization and closed with nothing to show, and the next step reruns
+the repair as a new attempt. That is now a *wasted* job rather than a
+lost one — the job id is on the record and the executor's own record of
+it survives, so collecting it is a change to recovery rather than a
+change to the journal — but under PR4 it is still a training run nobody
+reused. Collecting is only sound where the record proves the job was the
+attempt's whole cost, which is true of a repair rerun and not of a step
+whose role also made model calls; that distinction is what the work
+would have to establish.
 
 ## Architectural invariants
 

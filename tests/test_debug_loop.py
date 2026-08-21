@@ -21,6 +21,7 @@ from autonomous_research_lab.execution.failure_classifier import (
     diagnose_failure,
 )
 from autonomous_research_lab.execution.local import LocalExecutor
+from autonomous_research_lab.execution.runner import DirectJobRunner
 from autonomous_research_lab.orchestration.debug_loop import (
     ExperimentDebugger,
     RepairProposal,
@@ -94,7 +95,7 @@ def test_a_repairable_failure_is_repaired_and_fully_audited(
     executor = LocalExecutor(tmp_path / "runs")
     failed = _failed_run(executor, spec)
     strategy = ScriptStrategy(spec, (_CRASH, _OK))
-    debugger = ExperimentDebugger(executor=executor, strategy=strategy)
+    debugger = ExperimentDebugger(runner=DirectJobRunner(executor), strategy=strategy)
 
     session = debugger.debug(spec, failed)
 
@@ -126,7 +127,7 @@ def test_the_debug_loop_stops_at_the_configured_bound(tmp_path: Path) -> None:
     failed = _failed_run(executor, spec)
     strategy = ScriptStrategy(spec, (_CRASH,) * 10)
     debugger = ExperimentDebugger(
-        executor=executor, strategy=strategy, max_attempts=3
+        runner=DirectJobRunner(executor), strategy=strategy, max_attempts=3
     )
 
     session = debugger.debug(spec, failed)
@@ -142,7 +143,7 @@ def test_callers_can_narrow_but_never_widen_the_bound(tmp_path: Path) -> None:
     executor = LocalExecutor(tmp_path / "runs")
     failed = _failed_run(executor, spec)
     debugger = ExperimentDebugger(
-        executor=executor,
+        runner=DirectJobRunner(executor),
         strategy=ScriptStrategy(spec, (_CRASH,) * 10),
         max_attempts=2,
     )
@@ -155,7 +156,7 @@ def test_a_strategy_that_gives_up_stops_the_loop(tmp_path: Path) -> None:
     executor = LocalExecutor(tmp_path / "runs")
     failed = _failed_run(executor, spec)
     debugger = ExperimentDebugger(
-        executor=executor, strategy=ScriptStrategy(spec, ())
+        runner=DirectJobRunner(executor), strategy=ScriptStrategy(spec, ())
     )
     session = debugger.debug(spec, failed)
     assert not session.resolved
@@ -172,7 +173,7 @@ def test_a_completed_result_is_refused_outright(tmp_path: Path) -> None:
     completed = executor.collect(executor.submit(_job(spec, _OK)))
     assert completed.succeeded
     debugger = ExperimentDebugger(
-        executor=executor, strategy=ScriptStrategy(spec, (_OK,))
+        runner=DirectJobRunner(executor), strategy=ScriptStrategy(spec, (_OK,))
     )
     with pytest.raises(ScientificOutcomeError, match="scientific evidence"):
         debugger.debug(spec, completed)
@@ -213,7 +214,7 @@ def test_a_repair_proposal_may_not_switch_experiments(tmp_path: Path) -> None:
             )
 
     debugger = ExperimentDebugger(
-        executor=executor, strategy=Swapping(spec, ())
+        runner=DirectJobRunner(executor), strategy=Swapping(spec, ())
     )
     with pytest.raises(ValueError, match="not the spec being debugged"):
         debugger.debug(spec, failed)

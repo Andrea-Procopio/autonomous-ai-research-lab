@@ -50,6 +50,7 @@ from autonomous_research_lab.evidence.store import InMemoryEvidenceStore
 from autonomous_research_lab.execution.executor import ExperimentJob
 from autonomous_research_lab.execution.failure_classifier import FailureDiagnosis
 from autonomous_research_lab.execution.local import LocalExecutor
+from autonomous_research_lab.execution.runner import DirectJobRunner
 from autonomous_research_lab.orchestration.debug_loop import (
     ExperimentDebugger,
     RepairProposal,
@@ -341,7 +342,9 @@ def _runtime(
         metrics=sink,
         playbook=playbook,
         debugger=(
-            ExperimentDebugger(executor=engineer.executor, strategy=repair)
+            ExperimentDebugger(
+                runner=DirectJobRunner(engineer.executor), strategy=repair
+            )
             if repair is not None
             else None
         ),

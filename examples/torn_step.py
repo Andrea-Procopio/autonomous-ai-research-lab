@@ -17,6 +17,12 @@ Run it at every position and the pattern is the whole point: wherever
 the first process died, the second finds a run that owes nothing, has
 charged each attempt exactly once, and verifies from cold.
 
+``--repair`` tears a longer step instead: the one that runs a job, has
+it fail, and repairs it inside the same step. The rerun is an attempt of
+its own — its own reservation, its own ``STARTED``/``SUBMITTED``, its
+own derived job id, all of it on disk before the job exists — which is
+what lets a killed repair be answered rather than lost.
+
 ``--kill-after`` with no number lists the writes a clean step makes, so
 there is no guessing about which positions exist.
 
@@ -185,10 +191,12 @@ class FaultyLab:
     nothing about the *instruments* changes, only where their writes go.
     """
 
-    def __init__(self, faults: Faults, run_id: str) -> None:
+    def __init__(
+        self, faults: Faults, run_id: str, *, repairs: bool = False
+    ) -> None:
         self.faults = faults
         self.run_id = run_id
-        self._inner = CanaryLab()
+        self._inner = CanaryLab(repairs=repairs)
 
     def model_provider(self, stage: StageName, /) -> ModelProvider:
         return self._inner.model_provider(stage)
@@ -235,28 +243,45 @@ def request_for(root: Path, program: ProgramStore, run_id: str) -> RuntimeReques
     )
 
 
-def one_step(root: Path, from_state: str, faults: Faults) -> Faults:
+def one_step(
+    root: Path, from_state: str, faults: Faults, *, repairs: bool = False
+) -> tuple[Faults, str]:
     program, run_id, _ = funded(root)
-    runtime = FaultyLab(faults, run_id).runtime(
+    runtime = FaultyLab(faults, run_id, repairs=repairs).runtime(
         request_for(root, program, run_id)
     )
-    runtime.step(FileStateStore(root).load(from_state))
-    return faults
+    report = runtime.step(FileStateStore(root).load(from_state))
+    return faults, report.state.id
 
 
-def kill(root: Path, after: int) -> int:
-    program, run_id, head = funded(root)
-    del program, run_id
-    one_step(root, head, Faults(after=after, hard=True))
+def start_of_the_killable_step(root: Path, *, repairs: bool) -> str:
+    """Where the step this driver tears begins.
+
+    Plainly, the funded head: the canary's first step designs the
+    experiment. With ``--repair`` it is one step further on, because the
+    step worth tearing is the one that runs a job — fails, and repairs
+    itself inside the same step. The design is taken cleanly first; it is
+    the setting, not the subject.
+    """
+    _, _, head = funded(root)
+    if not repairs:
+        return head
+    _, designed = one_step(root, head, Faults())
+    return designed
+
+
+def kill(root: Path, after: int, *, repairs: bool) -> int:
+    start = start_of_the_killable_step(root, repairs=repairs)
+    one_step(root, start, Faults(after=after, hard=True), repairs=repairs)
     print("the step finished; nothing was killed")
     return 0
 
 
-def enumerate_writes(root: Path) -> int:
+def enumerate_writes(root: Path, *, repairs: bool) -> int:
     """List the durable writes one clean step makes, in a scratch root."""
     scratch = root / "scratch"
-    _, _, head = funded(scratch)
-    faults = one_step(scratch, head, Faults())
+    start = start_of_the_killable_step(scratch, repairs=repairs)
+    faults, _ = one_step(scratch, start, Faults(), repairs=repairs)
     assert faults.writes is not None
     for position, label in enumerate(faults.writes, 1):
         print(f"  {position:>3}  {label}")
@@ -342,13 +367,21 @@ def main() -> int:
         const=0,
         help="die after this many durable writes; with no number, list them",
     )
+    parser.add_argument(
+        "--repair",
+        action="store_true",
+        help=(
+            "tear the step that runs a job, fails, and repairs itself "
+            "inside itself — the rerun is an attempt of its own"
+        ),
+    )
     arguments = parser.parse_args()
     root = arguments.run_root.resolve()
     if arguments.kill_after is None:
         return resume(root)
     if arguments.kill_after == 0:
-        return enumerate_writes(root)
-    return kill(root, arguments.kill_after)
+        return enumerate_writes(root, repairs=arguments.repair)
+    return kill(root, arguments.kill_after, repairs=arguments.repair)
 
 
 if __name__ == "__main__":

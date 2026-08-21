@@ -295,7 +295,7 @@ def _runtime(
         store=FileEvidenceStore(root),
         debugger=(
             ExperimentDebugger(
-                executor=executor,
+                runner=DirectJobRunner(executor),
                 strategy=PathRepair(repair_to),
                 max_attempts=config.max_debug_attempts,
             )

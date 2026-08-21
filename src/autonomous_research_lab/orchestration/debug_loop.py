@@ -37,29 +37,53 @@ The invariants, enforced structurally rather than promised:
   implementation repair must *earn* its own verification; nothing is
   transferred from the run it replaces.
 
-The debugger holds an executor plus one strategy per entry path; the
-strategies are where a model-backed engineer will eventually sit, and
-rule-based ones sit today. Either way each proposal states its rationale.
+The debugger holds a :class:`~autonomous_research_lab.execution.runner.
+JobRunner` plus one strategy per entry path; the strategies are where a
+model-backed engineer will eventually sit, and rule-based ones sit today.
+Either way each proposal states its rationale.
+
+**Proposing and rerunning are separate calls, and that separation is
+load-bearing.** A repair rerun is a job, and a job that no attempt has
+been opened for is a side effect nobody wrote down first — the one thing
+the attempt journal exists to make impossible. So the debugger proposes
+(:meth:`ExperimentDebugger.propose_repair`,
+:meth:`ExperimentDebugger.propose_reimplementation`) without touching the
+world, the runtime opens the attempt that will answer for the work, and
+:meth:`ExperimentDebugger.rerun` runs the prepared job under that
+attempt's derived id. :meth:`ExperimentDebugger.debug` and
+:meth:`ExperimentDebugger.repair_implementation` still drive the whole
+bounded loop for a caller that has no attempt to open — a test, a demo —
+and are written in terms of the same three calls.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
-from typing import Protocol
+from typing import Final, Protocol
 
 from ..core.experiment import ExperimentResult, ExperimentSpec
-from ..execution.executor import Executor, ExperimentJob
+from ..execution.executor import ExperimentJob, derive_job_id
 from ..execution.failure_classifier import (
     FailureCategory,
     FailureDiagnosis,
     diagnose_failure,
 )
+from ..execution.runner import JobRunner
 from ..runtime.verification import (
     CheckState,
     ValidityDimension,
     VerificationCheck,
 )
+
+NO_FURTHER_FIX: Final = "repair strategy proposed no further fix"
+"""What a strategy declining to propose anything is called, in one place,
+because the runtime and the bounded loops both report it."""
+
+INVALID_IMPLEMENTATION: Final = "implementation invalidity"
+"""What an implementation-repair attempt is answering, said the same way
+wherever it is said — the audit rendering below and the rationale the
+runtime writes onto the attempt's action."""
 
 
 class ScientificOutcomeError(ValueError):
@@ -179,7 +203,7 @@ class DebugAttempt:
         """What this attempt was answering, for audit rendering."""
         if self.diagnosis is not None:
             return str(self.diagnosis.category)
-        return "implementation invalidity"
+        return INVALID_IMPLEMENTATION
 
 
 @dataclass(frozen=True, slots=True)
@@ -217,9 +241,14 @@ class ExperimentDebugger:
     :meth:`repair_implementation` for completed runs indicted by
     implementation-invalidity evidence — share the rerun machinery but not
     their preconditions.
+
+    It holds a runner rather than an executor for the reason the engineer
+    role does: submitting is a side effect, and the boundaries either side
+    of one are where an interrupted run needs a durable note. A runtime
+    that journals those boundaries wraps the runner it passes in.
     """
 
-    executor: Executor
+    runner: JobRunner
     strategy: RepairStrategy
     implementation_strategy: ImplementationRepairStrategy | None = None
     """Absent by default: a debugger without one can repair executions but
@@ -244,17 +273,7 @@ class ExperimentDebugger:
         for a repair, and reruns as a brand-new job. Stops on the first
         valid execution, on a strategy give-up, or at the attempt bound.
         """
-        if failed.succeeded:
-            raise ScientificOutcomeError(
-                f"result {failed.id} is a completed execution; its outcome "
-                f"is scientific evidence and may not be debugged — "
-                f"implementation repair requires an explicit "
-                f"ImplementationRepairTrigger"
-            )
-        if failed.spec_id != spec.id:
-            raise ValueError(
-                f"result {failed.id} ran {failed.spec_id}, not {spec.id}"
-            )
+        self._require_repairable(spec, failed)
         initial_diagnosis = diagnose_failure(failed)
         attempts: list[DebugAttempt] = []
         current = failed
@@ -263,11 +282,11 @@ class ExperimentDebugger:
         stop_reason = f"attempt limit of {limit} reached"
 
         for number in range(1, limit + 1):
-            proposal = self.strategy.propose(spec, current, diagnosis, number)
+            proposal = self.propose_repair(spec, current, diagnosis, number)
             if proposal is None:
-                stop_reason = "repair strategy proposed no further fix"
+                stop_reason = NO_FURTHER_FIX
                 break
-            rerun = self._rerun(spec, proposal)
+            rerun = self.rerun(spec, proposal)
             attempts.append(
                 DebugAttempt(
                     number=number,
@@ -307,28 +326,20 @@ class ExperimentDebugger:
         a completed rerun must earn its own verification afterwards; this
         loop only reports that a rerun completed.
         """
-        if self.implementation_strategy is None:
-            raise RuntimeError(
-                "no implementation repair strategy is configured; a debugger "
-                "without one can never touch a completed run"
-            )
-        if invalid.spec_id != spec.id:
-            raise ValueError(
-                f"result {invalid.id} ran {invalid.spec_id}, not {spec.id}"
-            )
+        self._require_reimplementable(spec, invalid)
         attempts: list[DebugAttempt] = []
         current = invalid
         limit = self._limit(max_attempts)
         stop_reason = f"attempt limit of {limit} reached"
 
         for number in range(1, limit + 1):
-            proposal = self.implementation_strategy.propose(
+            proposal = self.propose_reimplementation(
                 spec, current, trigger, number
             )
             if proposal is None:
-                stop_reason = "repair strategy proposed no further fix"
+                stop_reason = NO_FURTHER_FIX
                 break
-            rerun = self._rerun(spec, proposal)
+            rerun = self.rerun(spec, proposal)
             attempts.append(
                 DebugAttempt(
                     number=number,
@@ -354,20 +365,102 @@ class ExperimentDebugger:
             attempts, resolved=False, stop_reason=stop_reason,
         )
 
-    def _limit(self, max_attempts: int | None) -> int:
-        if max_attempts is None:
-            return self.max_attempts
-        return min(self.max_attempts, max_attempts)
+    # -- the three calls the loops are made of -------------------------------
 
-    def _rerun(
-        self, spec: ExperimentSpec, proposal: RepairProposal
+    def propose_repair(
+        self,
+        spec: ExperimentSpec,
+        failed: ExperimentResult,
+        diagnosis: FailureDiagnosis,
+        attempt_number: int,
+    ) -> RepairProposal | None:
+        """Ask for the next execution repair, and touch nothing.
+
+        The preconditions are checked here rather than only at the entry
+        points, because this is the call a runtime makes directly: a
+        completed run reaching the strategy through *any* route would make
+        "the result was disappointing" a repair criterion.
+        """
+        self._require_repairable(spec, failed)
+        return self.strategy.propose(spec, failed, diagnosis, attempt_number)
+
+    def propose_reimplementation(
+        self,
+        spec: ExperimentSpec,
+        invalid: ExperimentResult,
+        trigger: ImplementationRepairTrigger,
+        attempt_number: int,
+    ) -> RepairProposal | None:
+        """Ask for the next reimplementation, and touch nothing."""
+        strategy = self._require_reimplementable(spec, invalid)
+        return strategy.propose(spec, invalid, trigger, attempt_number)
+
+    def rerun(
+        self,
+        spec: ExperimentSpec,
+        proposal: RepairProposal,
+        *,
+        attempt_id: str = "",
     ) -> ExperimentResult:
+        """Run one proposed repair as the work of ``attempt_id``.
+
+        The job the strategy proposed carries an id it minted for itself,
+        and when an attempt is named that id is *replaced* by the one
+        derived from the attempt. Trusted code stamps it rather than
+        trusting each strategy to, because the property being enforced is
+        not a strategy's to keep: a job whose id can be recomputed from
+        the attempt can be found again by a process that holds nothing but
+        the journal, which is the difference between reattaching to an
+        interrupted rerun and paying for it a second time.
+
+        An empty ``attempt_id`` means nobody is accounting for this rerun
+        — a test, a demo — and the proposal's own job id stands.
+        """
         if proposal.job.spec_id != spec.id:
             raise ValueError(
                 f"repair proposal targets {proposal.job.spec_id}, "
                 f"not the spec being debugged ({spec.id})"
             )
-        return self.executor.collect(self.executor.submit(proposal.job))
+        job = proposal.job
+        if attempt_id:
+            job = replace(job, id=derive_job_id(attempt_id))
+        return self.runner.run(job, attempt_id)
+
+    # -- preconditions --------------------------------------------------------
+
+    def _require_repairable(
+        self, spec: ExperimentSpec, failed: ExperimentResult
+    ) -> None:
+        if failed.succeeded:
+            raise ScientificOutcomeError(
+                f"result {failed.id} is a completed execution; its outcome "
+                f"is scientific evidence and may not be debugged — "
+                f"implementation repair requires an explicit "
+                f"ImplementationRepairTrigger"
+            )
+        if failed.spec_id != spec.id:
+            raise ValueError(
+                f"result {failed.id} ran {failed.spec_id}, not {spec.id}"
+            )
+
+    def _require_reimplementable(
+        self, spec: ExperimentSpec, invalid: ExperimentResult
+    ) -> ImplementationRepairStrategy:
+        if self.implementation_strategy is None:
+            raise RuntimeError(
+                "no implementation repair strategy is configured; a debugger "
+                "without one can never touch a completed run"
+            )
+        if invalid.spec_id != spec.id:
+            raise ValueError(
+                f"result {invalid.id} ran {invalid.spec_id}, not {spec.id}"
+            )
+        return self.implementation_strategy
+
+    def _limit(self, max_attempts: int | None) -> int:
+        if max_attempts is None:
+            return self.max_attempts
+        return min(self.max_attempts, max_attempts)
 
     def _session(
         self,

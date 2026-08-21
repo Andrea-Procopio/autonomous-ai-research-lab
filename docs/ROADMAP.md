@@ -202,19 +202,38 @@ human in the loop, producing results that survive scrutiny.
   files. A conservative charge is recorded as one: the closing event
   carries `CONSERVATIVE_MAX` rather than claiming a measurement nobody
   took, which also keeps a crash from reading as a budget breach.
-  **Blocking PR4:** a job submitted inside the bounded repair loop is
-  covered by its attempt's reservation but is not individually
-  journalled, so a crash there abandons the attempt rather than
-  reattaching to the rerun. The accounting is sound and the execution
-  recovery is not, which is tolerable for a deterministic executor and
-  not for a GPU one.
+- **Every rerun is an attempt.** Done (Task 6D.1, 2026-08-21). Task 6D
+  swept the canary's *design* step, which runs no job, so it never saw
+  the one job left outside all of this: the bounded repair loops
+  submitted their own reruns, and the attempt that answered for a rerun
+  was opened only once the result came back. In between, a job ran with
+  no reservation covering it and nothing recording that it existed — a
+  crash there charged the spend to nothing and orphaned the outputs,
+  while the parent attempt recovered from its own bundle and the run
+  came back looking intact. The debugger takes a `JobRunner` now,
+  proposing and rerunning are separate calls, and the runtime opens the
+  attempt — snapshot, `STARTED`, reservation — before the prepared job
+  is handed over, so every rerun carries its own authorization, its own
+  phases and its own derived job id, on disk before the job exists. The
+  proof is the sweep the old one was missing: a step that executes,
+  fails and repairs itself makes fifty durable writes, and the suite
+  kills it after every one of them, plus four cross-process kills over
+  the rerun's own writes. Running it exposed two defects that had
+  nothing to do with repair and everything to do with jobs, both fixed:
+  a commit bundle was written before the facts it names were durable, so
+  recovery raised rather than finishing the step, and the verifier
+  faulted a `SUBMITTED` note whose job never ran — which is the note
+  working, not a broken link. Still open: recovery *answers* an
+  interrupted rerun and does not *collect* it.
 - **Real experiment execution.** ML training runs under the existing
-  executor contract: checkpoints, longer timeouts, GPU accounting.
-  Blocked on the repair-loop gap above: either every repair-loop job
-  gets its own journalled attempt, or repairs are disabled for jobs
-  above a cost threshold. Abandoning an unreattachable GPU job and
-  charging it in full is safe accounting and inadequate execution
-  recovery.
+  executor contract: checkpoints, longer timeouts, GPU accounting. No
+  longer blocked on the repair loop — every repair-loop job is
+  journalled now — but one gap is worth closing first: recovery charges
+  an interrupted job its authorization and closes it, rather than
+  collecting the outputs it can now name. That is a wasted training run
+  rather than a lost one, which is what Task 6D.1 bought; collecting is
+  sound only where the record proves the job was the attempt's whole
+  cost, and establishing that distinction is the work.
 - **Scientific debugging and experiment verification.** Done in its
   Phase 1 form: the five-way failure taxonomy (engineering /
   implementation / methodological / analytical / verified), a

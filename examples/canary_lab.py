@@ -34,7 +34,7 @@ import json
 import re
 import sys
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Final
 
@@ -46,7 +46,10 @@ from autonomous_research_lab.core.assessment import (
     EpistemicAssessment,
 )
 from autonomous_research_lab.core.claim import Claim, EvidenceLink, EvidenceRelation
-from autonomous_research_lab.core.experiment import ExperimentSpec
+from autonomous_research_lab.core.experiment import (
+    ExperimentResult,
+    ExperimentSpec,
+)
 from autonomous_research_lab.core.prediction import Consistency, PredictionTest
 from autonomous_research_lab.core.proposals import (
     AssessmentProposal,
@@ -56,10 +59,12 @@ from autonomous_research_lab.core.proposals import (
     ResultProposal,
 )
 from autonomous_research_lab.core.state import ResearchState
+from autonomous_research_lab.core.types import ConfigValue
 from autonomous_research_lab.execution.executor import (
     ExperimentJob,
     job_id_for_attempt,
 )
+from autonomous_research_lab.execution.failure_classifier import FailureDiagnosis
 from autonomous_research_lab.execution.local import LocalExecutor
 from autonomous_research_lab.execution.runner import (
     DirectJobRunner,
@@ -72,6 +77,10 @@ from autonomous_research_lab.literature.retrieval import (
     LiteratureQuery,
     LiteratureSource,
     RetrievedSearch,
+)
+from autonomous_research_lab.orchestration.debug_loop import (
+    ExperimentDebugger,
+    RepairProposal,
 )
 from autonomous_research_lab.orchestration.director import RuleBasedFrontierDirector
 from autonomous_research_lab.orchestration.loop import ResearchRuntime
@@ -925,10 +934,18 @@ class CanaryScientist(ResearchRole):
 
 
 class CanaryEngineer(ResearchRole):
-    """Prepares the designed experiment; trusted code runs it."""
+    """Prepares the designed experiment; trusted code runs it.
 
-    def __init__(self, runner: JobRunner) -> None:
+    ``skip_metrics`` makes the job it prepares fail — the run exits
+    cleanly and writes no metrics — which is how the lab produces work
+    for the bounded repair loop to fix. The failure is in the *job*, not
+    in the role: the engineer prepares one either way and never learns
+    what became of it.
+    """
+
+    def __init__(self, runner: JobRunner, *, skip_metrics: bool = False) -> None:
         self._runner = runner
+        self._skip_metrics = skip_metrics
 
     @property
     def name(self) -> RoleName:
@@ -952,17 +969,61 @@ class CanaryEngineer(ResearchRole):
         seed = next(
             (value for value in spec.seeds if value not in used), spec.seeds[0]
         )
-        job = ExperimentJob(
-            spec_id=spec.id,
-            command=(sys.executable, str(EXPERIMENT)),
-            config={"metric": spec.metrics[0]},
-            seed=seed,
-            timeout_seconds=120.0,
-            required_artifacts=("metrics.json",),
-            id=job_id_for_attempt(invocation.attempt_id),
+        job = _canary_job(
+            spec, seed=seed, skip_metrics=self._skip_metrics
         )
-        result = self._runner.run(job, invocation.attempt_id)
+        result = self._runner.run(
+            replace(job, id=job_id_for_attempt(invocation.attempt_id)),
+            invocation.attempt_id,
+        )
         return (ResultProposal(result=result, proposer="executor:local"),)
+
+
+def _canary_job(
+    spec: ExperimentSpec, *, seed: int, skip_metrics: bool
+) -> ExperimentJob:
+    """The one job this lab knows how to run, prepared twice: once as the
+    engineer asks for it, and once as the repair strategy asks for it
+    again without whatever broke it."""
+    config: dict[str, ConfigValue] = {"metric": spec.metrics[0]}
+    if skip_metrics:
+        config["skip_metrics"] = True
+    return ExperimentJob(
+        spec_id=spec.id,
+        command=(sys.executable, str(EXPERIMENT)),
+        config=config,
+        seed=seed,
+        timeout_seconds=120.0,
+        required_artifacts=("metrics.json",),
+    )
+
+
+class CanaryRepair:
+    """The one repair this lab can propose: run it again, properly.
+
+    A real strategy diagnoses; this one knows the only fault its own
+    experiment can have. What it is here to exercise is not the fix but
+    the accounting around it — a rerun is a job, and a job needs an
+    attempt of its own to answer for it.
+    """
+
+    def propose(
+        self,
+        spec: ExperimentSpec,
+        failed: ExperimentResult,
+        diagnosis: FailureDiagnosis,
+        attempt_number: int,
+    ) -> RepairProposal | None:
+        del failed, attempt_number
+        return RepairProposal(
+            job=_canary_job(
+                spec, seed=spec.seeds[0], skip_metrics=False
+            ),
+            rationale=(
+                f"diagnosis was {diagnosis.category}: rerun the experiment "
+                f"without the flag that suppressed its metrics"
+            ),
+        )
 
 
 class CanaryAnalyst(ResearchRole):
@@ -1036,6 +1097,16 @@ def _verdict(tests: Sequence[PredictionTest]) -> AssessmentVerdict:
 class CanaryLab:
     """Instruments with no outside world behind them."""
 
+    repairs: bool = False
+    """Whether the experiment fails the first time and is repaired.
+
+    Off by default, because the ordinary canary is a walk that works and
+    every count taken of it assumes so. On, the engineer prepares a job
+    that writes no metrics, the bounded repair loop reruns it properly,
+    and the step makes the extra durable writes a repair costs — which
+    is what the fault sweep needs something to sweep over.
+    """
+
     def model_provider(self, _stage: StageName) -> ModelProvider:
         return CanaryModel()
 
@@ -1043,21 +1114,27 @@ class CanaryLab:
         return CanaryLiterature()
 
     def runtime(self, request: RuntimeRequest) -> ResearchRuntime:
+        # One runner, journalling both boundaries of every submission,
+        # shared by the role that prepares the first job and the debugger
+        # that prepares the second. A repair rerun is a job like any
+        # other and is recorded like any other.
+        runner = JournalingJobRunner(
+            inner=DirectJobRunner(LocalExecutor(request.root / "runs")),
+            journal=request.journal,
+        )
         return ResearchRuntime(
             # No verification component is wired, so governance is switched
             # off explicitly rather than inferred from its absence: the
             # ablated lab is a stated configuration, never an accident.
-            config=RuntimeConfig(verification_governance_enabled=False),
+            config=RuntimeConfig(
+                verification_governance_enabled=False,
+                max_debug_attempts=1,
+            ),
             director=RuleBasedFrontierDirector(),
             roles={
                 RoleName.RESEARCH_DIRECTOR: CanaryScientist(),
                 RoleName.RESEARCH_ENGINEER: CanaryEngineer(
-                    JournalingJobRunner(
-                        inner=DirectJobRunner(
-                            LocalExecutor(request.root / "runs")
-                        ),
-                        journal=request.journal,
-                    )
+                    runner, skip_metrics=self.repairs
                 ),
                 RoleName.RESULT_ANALYST: CanaryAnalyst(),
             },
@@ -1066,6 +1143,11 @@ class CanaryLab:
             ledger=request.ledger,
             journal=request.journal,
             bundles=request.bundles,
+            debugger=(
+                ExperimentDebugger(runner=runner, strategy=CanaryRepair())
+                if self.repairs
+                else None
+            ),
         )
 
 

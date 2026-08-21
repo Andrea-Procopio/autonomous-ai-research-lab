@@ -148,16 +148,23 @@ from ..runtime.verification_store import (
 )
 from .critic_trigger import CriticTrigger
 from .debug_loop import (
-    DebugAttempt,
+    INVALID_IMPLEMENTATION,
+    NO_FURTHER_FIX,
     ExperimentDebugger,
     ImplementationRepairTrigger,
+    RepairProposal,
     is_debuggable,
 )
 from .director import Deliberation, FrontierDirector, deliberation_record
 from .routing import expected_proposals, route
 from .synthesis import SynthesisReview, SynthesisTrigger
 from .trajectory import JsonlTrajectoryLogger
-from .transitions import TransitionError, commit, commit_bundle
+from .transitions import (
+    TransitionError,
+    commit,
+    commit_bundle,
+    store_facts,
+)
 
 _READER = "runtime:deterministic-reader:v1"
 
@@ -1160,9 +1167,10 @@ class ResearchRuntime:
                 )
                 return state, invocations, tuple(reruns), False
             if current.succeeded:
-                session = self.debugger.repair_implementation(
-                    spec, current, trigger, max_attempts=1
+                proposal = self.debugger.propose_reimplementation(
+                    spec, current, trigger, number
                 )
+                basis = INVALID_IMPLEMENTATION
             else:
                 # The previous reimplementation crashed: that is an
                 # execution failure, diagnosed and repaired as one — while
@@ -1180,20 +1188,27 @@ class ResearchRuntime:
                         "failure"
                     )
                     return state, invocations, tuple(reruns), False
-                session = self.debugger.debug(spec, current, max_attempts=1)
-            if not session.attempts:
+                proposal = self.debugger.propose_repair(
+                    spec, current, diagnosis, number
+                )
+                basis = str(diagnosis.category)
+            if proposal is None:
                 step_notes.append(
-                    f"implementation repair stopped: {session.stop_reason}"
+                    f"implementation repair stopped: {NO_FURTHER_FIX}"
                 )
                 return state, invocations, tuple(reruns), False
-            (attempt_record,) = session.attempts
             invocations += 1  # the repair proposal is reasoning-seat work
             stats.implementation_debug_attempts += 1
-            retry = attempt_record.result
-            reruns.append(retry)
-            state, committed, exhausted = self._commit_debug_attempt(
-                state, spec, attempt_record, number, step_notes
+            state, retry, committed, exhausted = self._repair_attempt(
+                state,
+                spec,
+                proposal,
+                repairing=current,
+                basis=basis,
+                number=number,
+                step_notes=step_notes,
             )
+            reruns.append(retry)
             if exhausted:
                 return state, invocations, tuple(reruns), True
             if retry.succeeded and committed:
@@ -1266,6 +1281,7 @@ class ResearchRuntime:
         invocations = 0
         reruns: list[ExperimentResult] = []
         current = result
+        current_diagnosis = diagnosis
         for number in range(1, self.config.max_debug_attempts + 1):
             if not state.budget.can_afford(spec.estimated_cost):
                 step_notes.append(
@@ -1273,18 +1289,24 @@ class ResearchRuntime:
                     f"insufficient budget"
                 )
                 return state, invocations, tuple(reruns), False
-            session = self.debugger.debug(spec, current, max_attempts=1)
-            if not session.attempts:
-                step_notes.append(f"debugging stopped: {session.stop_reason}")
+            proposal = self.debugger.propose_repair(
+                spec, current, current_diagnosis, number
+            )
+            if proposal is None:
+                step_notes.append(f"debugging stopped: {NO_FURTHER_FIX}")
                 return state, invocations, tuple(reruns), False
-            (attempt_record,) = session.attempts
             invocations += 1  # the repair proposal is reasoning-seat work
             stats.debug_attempts += 1
-            retry = attempt_record.result
-            reruns.append(retry)
-            state, committed, exhausted = self._commit_debug_attempt(
-                state, spec, attempt_record, number, step_notes
+            state, retry, committed, exhausted = self._repair_attempt(
+                state,
+                spec,
+                proposal,
+                repairing=current,
+                basis=str(current_diagnosis.category),
+                number=number,
+                step_notes=step_notes,
             )
+            reruns.append(retry)
             if exhausted:
                 return state, invocations, tuple(reruns), True
             if retry.succeeded and committed:
@@ -1306,28 +1328,56 @@ class ResearchRuntime:
                 # engineering failure of the process; stop and surface it.
                 return state, invocations, tuple(reruns), False
             current = retry
+            current_diagnosis = diagnose_failure(retry)
         step_notes.append(
             f"debugging stopped after {self.config.max_debug_attempts} "
             f"attempt(s) without a valid execution of {spec.id}"
         )
         return state, invocations, tuple(reruns), False
 
-    def _commit_debug_attempt(
+    def _repair_attempt(
         self,
         state: ResearchState,
         spec: ExperimentSpec,
-        record: DebugAttempt,
+        proposal: RepairProposal,
+        *,
+        repairing: ExperimentResult,
+        basis: str,
         number: int,
         step_notes: list[str],
-    ) -> tuple[ResearchState, bool, bool]:
-        """Commit one repair rerun as its own auditable, billed attempt.
-        Returns the state, whether the rerun committed cleanly, and whether
-        the budget was exhausted paying for it."""
+    ) -> tuple[ResearchState, ExperimentResult, bool, bool]:
+        """Run one repair rerun as its own recoverable attempt, and commit
+        it. Returns the state, what the rerun produced, whether it
+        committed cleanly, and whether the budget was exhausted paying for
+        it.
+
+        The order here is the whole point of the method. The attempt is
+        opened — snapshot, journal, reservation — *before* the job is
+        submitted, so the rerun runs under an authorization of its own and
+        its job id is on disk before the job exists. It used to be the
+        other way round: the debugger submitted, and the attempt that
+        answered for the job was opened once the result came back. That
+        left a window in which a job could run with nothing anywhere
+        recording that it had, and a process killed inside it lost the job
+        outright — the spend was never charged to anything, and the
+        outputs sat in the run directory with nothing on the record to
+        find them by. Under a deterministic executor that cost seconds.
+        Under a trainer it would cost the training.
+
+        What the attempt is authorized to spend is the spec's estimate,
+        or — where the design carries none — what the run being repaired
+        actually cost, which is the closest thing to a forecast anyone
+        has. Both are knowable *before* the job runs, which is the
+        property the order above depends on: the old fallback was the
+        rerun's own cost, and a number that only exists afterwards cannot
+        authorize anything.
+        """
+        assert self.debugger is not None  # the callers hold one
         action = ResearchAction(
             action_type=ResearchActionType.DEBUG,
             rationale=(
                 f"repair attempt {number} for {spec.id}: "
-                f"{record.basis} — {record.repair_rationale}"
+                f"{basis} — {proposal.rationale}"
             ),
             targets=(spec.id,),
         )
@@ -1335,12 +1385,14 @@ class ResearchRuntime:
         estimated = (
             spec.estimated_cost
             if not spec.estimated_cost.is_zero
-            else record.result.cost
+            else repairing.cost
         )
         state = state.begin_attempt(attempt)
         self._open_attempt(attempt.id, state, estimated)
-        result = record.result
-        proposal = ResultProposal(result=result, proposer="runtime:debug-loop:v1")
+        result = self.debugger.rerun(spec, proposal, attempt_id=attempt.id)
+        produced = ResultProposal(
+            result=result, proposer="runtime:debug-loop:v1"
+        )
         committed = True
         try:
             if result.spec_id != spec.id:
@@ -1349,15 +1401,15 @@ class ResearchRuntime:
                     f"not {spec.id}",
                     reports=(),
                 )
-            _gate_results(state, action, (proposal,), (result,))
+            _gate_results(state, action, (produced,), (result,))
             bundle = CommitBundle(
                 attempt_id=attempt.id,
                 outcome=ActionOutcome(
                     status=AttemptStatus.SUCCEEDED,
-                    produced=payload_ids(proposal),
+                    produced=payload_ids(produced),
                     actual_cost=result.cost,
                 ),
-                proposals=(proposal,),
+                proposals=(produced,),
             )
         except ValidationGateError as exc:
             committed = False
@@ -1376,7 +1428,7 @@ class ResearchRuntime:
         )
         if overrun_note is not None:
             step_notes.append(overrun_note)
-        return state, committed, exhausted
+        return state, result, committed, exhausted
 
     def _critic_reasons(
         self, state: ResearchState, result: ExperimentResult
@@ -1745,6 +1797,13 @@ class ResearchRuntime:
     ) -> None:
         """Put the whole effect of an attempt on disk before applying it.
 
+        The facts go first. A bundle names its results and evidence rather
+        than copying them, so a bundle stored while they are still in
+        memory says the step can be finished from disk by a process that
+        then cannot finish it — which is the one record this mechanism
+        must never write. ``store_facts`` closes that window, and it is
+        idempotent, so the commit below stores nothing a second time.
+
         ``replacing`` is the commit-rejected path: the first bundle was
         stored and then refused, and the failure bundle that answers for
         it is a second effect for one attempt. The journal records one
@@ -1754,6 +1813,7 @@ class ResearchRuntime:
         """
         if self.bundles is None:
             return
+        store_facts(bundle, self.store)
         bundle_id = self.bundles.record(bundle)
         if self.journal is None or replacing:
             return
