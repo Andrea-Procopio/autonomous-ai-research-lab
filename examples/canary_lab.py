@@ -33,7 +33,7 @@ from __future__ import annotations
 import json
 import re
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Final
@@ -1107,6 +1107,13 @@ class CanaryLab:
     is what the fault sweep needs something to sweep over.
     """
 
+    runner_middleware: Callable[[JobRunner], JobRunner] | None = None
+    """A wrapper slipped between the executor and the journalling runner.
+    The fault harness uses it to tick a durable-write position the moment
+    a job's outputs exist on disk — the exact window collect-finished
+    recovery answers — without the canary itself changing at all when no
+    middleware is given."""
+
     def model_provider(self, _stage: StageName) -> ModelProvider:
         return CanaryModel()
 
@@ -1118,10 +1125,10 @@ class CanaryLab:
         # shared by the role that prepares the first job and the debugger
         # that prepares the second. A repair rerun is a job like any
         # other and is recorded like any other.
-        runner = JournalingJobRunner(
-            inner=DirectJobRunner(LocalExecutor(request.root / "runs")),
-            journal=request.journal,
-        )
+        inner: JobRunner = DirectJobRunner(LocalExecutor(request.root / "runs"))
+        if self.runner_middleware is not None:
+            inner = self.runner_middleware(inner)
+        runner = JournalingJobRunner(inner=inner, journal=request.journal)
         return ResearchRuntime(
             # No verification component is wired, so governance is switched
             # off explicitly rather than inferred from its absence: the

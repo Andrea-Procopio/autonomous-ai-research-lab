@@ -7,8 +7,8 @@ the next step correctly refused to guess which was true. This is what
 answers that question instead of guessing — the attempt journal, read
 before the chain steps again.
 
-Every open attempt gets one of two answers, and which one depends on a
-single fact: whether its commit bundle reached disk.
+Every open attempt gets one of three answers, and which one depends on
+what survives on disk: its commit bundle, its finished job, or neither.
 
 **The bundle is durable.** Then the whole effect of the attempt survives
 — the proposals, the outcome, and what it cost — and applying it again
@@ -18,7 +18,17 @@ closes the attempt as ``COMPLETED``. Nothing is lost and nothing is
 re-run. This is the expensive case, and it is the one that recovers
 completely.
 
-**The bundle is not durable.** Then nothing on disk says what the attempt
+**The bundle is not durable, but the attempt's job finished.** The
+journal wrote the job id down before submitting, the executor's own
+record proves the job ran to completion, and everything the live step
+would have added after collection is deterministic — one result
+proposal, the deterministic gate, a bundle costing what the result
+cost. Salvage rebuilds exactly that and the attempt completes with a
+measured settlement, nothing re-run. This needs a collector wired in
+(``jobs=``); without one, or where the job cannot be proven finished,
+the conservative arm below answers instead.
+
+**Neither is durable.** Then nothing on disk says what the attempt
 cost, and something almost certainly was spent: a model call, a job, or
 both. Recovery settles the reservation *in full* and closes the attempt
 as ``ABANDONED``. That can overcharge — an attempt killed a millisecond
@@ -51,18 +61,45 @@ down before the crash.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Final
+from dataclasses import dataclass, replace
+from typing import Final, Protocol
 
-from ..core.attempt import AttemptPhase, SettlementBasis
+from ..core.attempt import (
+    ActionOutcome,
+    AttemptPhase,
+    AttemptStatus,
+    SettlementBasis,
+)
 from ..core.budget import NO_COST, ResearchBudget, ResourceCost
+from ..core.commit import CommitBundle
+from ..core.experiment import ExperimentResult
+from ..core.proposals import ResultProposal, payload_ids
 from ..core.state import recording_lineage
 from ..evidence.store import EvidenceStore
-from ..orchestration.transitions import commit_bundle, reconcile_charge
+from ..orchestration.loop import ValidationGateError, gate_results
+from ..orchestration.transitions import (
+    commit_bundle,
+    reconcile_charge,
+    store_facts,
+)
 from ..persistence.commit_store import CommitBundleStore
 from ..persistence.state_store import FileStateStore
 from ..program.journal import AttemptEvent, RunJournal
 from ..program.ledger import BudgetLedger
+
+
+class FinishedJobs(Protocol):
+    """The one question salvage asks: did this job finish, and with what
+    full result?
+
+    Deliberately not a submission channel. The protocol has no ``submit``,
+    so "recovery never resubmits a job" stays structural — recovery holds
+    nothing that could. ``None`` means the job cannot be proven finished,
+    and the conservative arm answers for the attempt exactly as before.
+    """
+
+    def finished(self, job_id: str, /) -> ExperimentResult | None: ...
+
 
 _RECOVERABLE: Final = frozenset(
     {AttemptPhase.BUNDLE_DURABLE, AttemptPhase.COMMITTED}
@@ -161,11 +198,15 @@ def recover(
     states: FileStateStore,
     evidence: EvidenceStore,
     fallback_state_id: str,
+    jobs: FinishedJobs | None = None,
 ) -> RecoveryReport:
     """Answer every attempt the journal left open.
 
     ``fallback_state_id`` is where the run continues if nothing was
     interrupted, or if what was interrupted produced no successor.
+    ``jobs``, when wired, lets an attempt whose job *finished* be
+    collected and completed rather than conservatively abandoned; absent,
+    every answer is exactly what it was before the collector existed.
     Running this twice does nothing the second time: the journal's
     terminal phases and the ledger's one-answer-per-hold rule both make
     the second pass find nothing to answer.
@@ -181,6 +222,7 @@ def recover(
             states=states,
             evidence=evidence,
             resume_from=resume_from,
+            jobs=jobs,
         )
         recoveries.append(recovery)
         resume_from = recovery.state_id
@@ -206,6 +248,7 @@ def _answer(
     states: FileStateStore,
     evidence: EvidenceStore,
     resume_from: str,
+    jobs: FinishedJobs | None,
 ) -> Recovery:
     events = journal.events_for(attempt_id)
     began = events[0]
@@ -221,6 +264,20 @@ def _answer(
             states=states,
             evidence=evidence,
         )
+    if jobs is not None:
+        salvaged = _collect(
+            attempt_id,
+            began=began,
+            last=last,
+            jobs=jobs,
+            journal=journal,
+            ledger=ledger,
+            bundles=bundles,
+            states=states,
+            evidence=evidence,
+        )
+        if salvaged is not None:
+            return salvaged
     return _abandon(
         attempt_id,
         began=began,
@@ -291,6 +348,124 @@ def _finish(
         detail=(
             f"{attempt_id} was interrupted at {last.phase}; its bundle was "
             f"applied and it settled {cost.usd} usd"
+        ),
+    )
+
+
+def _collect(
+    attempt_id: str,
+    *,
+    began: AttemptEvent,
+    last: AttemptEvent,
+    jobs: FinishedJobs,
+    journal: RunJournal,
+    ledger: BudgetLedger,
+    bundles: CommitBundleStore,
+    states: FileStateStore,
+    evidence: EvidenceStore,
+) -> Recovery | None:
+    """Finish an attempt whose *job* finished, though its record did not.
+
+    The window this answers: the journal shows ``SUBMITTED`` (perhaps
+    ``OUTPUTS_DURABLE``) and no durable bundle, and the executor's own
+    record proves the job ran to completion — the submitter died between
+    the work being done and the work being written down. Everything the
+    live step would have added after collection is deterministic for a
+    job-running attempt: one result proposal, the deterministic gate, a
+    bundle whose cost is the result's own. So salvage rebuilds exactly
+    that, stores the facts before the bundle that names them, and hands
+    the rest to the ordinary durable-bundle arm — same successor, same
+    MEASURED settlement, nothing re-run.
+
+    The soundness predicate, checked in order and refused (``None``, the
+    conservative arm) on any miss: the submitted job id equals the one
+    ``STARTED`` pre-registered before anything ran; the collector returns
+    a terminal result for that exact job; and any ``OUTPUTS_DURABLE``
+    event already on record agrees about which result the job produced.
+    A gate-refused result salvages the
+    same *failed* bundle the live step would have built — still measured,
+    still no successor science, and the run outputs stay preserved.
+
+    The loop's other gates are vacuous here and deliberately not re-run:
+    no role output is being admitted, only a result the trusted executor
+    recorded, proposed by recovery under its own name.
+    """
+    submitted = journal.event_at(attempt_id, AttemptPhase.SUBMITTED)
+    if submitted is None:
+        return None
+    if not began.job_id or submitted.job_id != began.job_id:
+        return None
+    result = jobs.finished(submitted.job_id)
+    if result is None or result.job_id != submitted.job_id:
+        return None
+    outputs = journal.event_at(attempt_id, AttemptPhase.OUTPUTS_DURABLE)
+    if outputs is not None and dict(outputs.produced).get("result") != result.id:
+        return None
+
+    origin = states.load(began.state_id)
+    attempt = next(
+        (found for found in origin.attempts if found.id == attempt_id), None
+    )
+    if attempt is None:
+        return None
+    cost = result.cost if not result.cost.is_zero else began.reserved
+    proposal = ResultProposal(result=result, proposer="recovery:collect:v1")
+    try:
+        gate_results(origin, attempt.action, (proposal,), (result,))
+        bundle = CommitBundle(
+            attempt_id=attempt_id,
+            outcome=ActionOutcome(
+                status=AttemptStatus.SUCCEEDED,
+                produced=payload_ids(proposal),
+                actual_cost=cost,
+            ),
+            proposals=(proposal,),
+        )
+    except ValidationGateError as exc:
+        bundle = CommitBundle(
+            attempt_id=attempt_id,
+            outcome=ActionOutcome(
+                status=AttemptStatus.FAILED,
+                error=str(exc),
+                actual_cost=cost,
+            ),
+        )
+
+    # Facts before the bundle that names them, a durability claim only
+    # after the bytes exist, and every phase idempotent — a crash anywhere
+    # in here lands on a position a second pass answers the same way.
+    store_facts(bundle, evidence)
+    if bundle.proposals:
+        journal.record(
+            attempt_id=attempt_id,
+            phase=AttemptPhase.OUTPUTS_DURABLE,
+            job_id=submitted.job_id,
+            produced=(("result", result.id),),
+            detail="collected after an interrupted step",
+        )
+    bundle_id = bundles.record(bundle)
+    journal.record(
+        attempt_id=attempt_id,
+        phase=AttemptPhase.BUNDLE_DURABLE,
+        bundle_id=bundle_id,
+        detail=f"{bundle.outcome.status} (rebuilt from the collected job)",
+    )
+    finished = _finish(
+        attempt_id,
+        began=began,
+        last=last,
+        journal=journal,
+        ledger=ledger,
+        bundles=bundles,
+        states=states,
+        evidence=evidence,
+    )
+    return replace(
+        finished,
+        detail=(
+            f"{attempt_id} was interrupted at {last.phase}; its job "
+            f"{submitted.job_id} had finished, so it was collected and the "
+            f"attempt completed with its measured cost"
         ),
     )
 

@@ -531,7 +531,7 @@ class ResearchRuntime:
                 # record.
                 self._gate_promotions(proposals)
                 self._gate_analysis(state, proposals)
-                validation = _gate_results(
+                validation = gate_results(
                     state, action, proposals, executed_results
                 )
                 bundle = CommitBundle(
@@ -1401,7 +1401,7 @@ class ResearchRuntime:
                     f"not {spec.id}",
                     reports=(),
                 )
-            _gate_results(state, action, (produced,), (result,))
+            gate_results(state, action, (produced,), (result,))
             bundle = CommitBundle(
                 attempt_id=attempt.id,
                 outcome=ActionOutcome(
@@ -1934,7 +1934,7 @@ def _check_contract(
         )
 
 
-def _gate_results(
+def gate_results(
     state: ResearchState,
     action: ResearchAction,
     proposals: tuple[Proposal, ...],

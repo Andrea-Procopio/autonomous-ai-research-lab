@@ -20,6 +20,13 @@ The default lab covers the six analysis-and-funding stages from the
 environment and refuses the seventh. That refusal is a first-class
 outcome, not an error: ``arl run`` without ``--lab`` is a legitimate way
 to carry a topic to a funded run and stop.
+
+One convention is baked into the chain rather than this seam: recovery's
+finished-job collector reads the local executor's layout under
+``root/runs`` — the same convention the verifier checks. A lab whose
+executor keeps jobs elsewhere loses salvage, never correctness (the
+conservative arm answers instead); letting a lab supply its own
+collector is the extension point the remote-executor era will need.
 """
 
 from __future__ import annotations

@@ -13,6 +13,7 @@ all of them passing is the claim.
 from __future__ import annotations
 
 import contextlib
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -23,9 +24,10 @@ from autonomous_research_lab.control.controller import Controller
 from autonomous_research_lab.control.lab import RuntimeRequest
 from autonomous_research_lab.control.recovery import RecoveryReport, recover
 from autonomous_research_lab.control.stage import Fact, StageName
-from autonomous_research_lab.core.attempt import AttemptPhase
+from autonomous_research_lab.core.attempt import AttemptPhase, SettlementBasis
 from autonomous_research_lab.evidence.file_store import FileEvidenceStore
 from autonomous_research_lab.execution.executor import derive_job_id
+from autonomous_research_lab.execution.salvage import LocalFinishedJobs
 from autonomous_research_lab.persistence.state_store import FileStateStore
 from autonomous_research_lab.program.integrity import IntegrityReport, verify_run
 from autonomous_research_lab.program.records import EntryKind
@@ -87,6 +89,7 @@ class Funded:
             states=FileStateStore(self.root),
             evidence=FileEvidenceStore(self.root),
             fallback_state_id=self.head,
+            jobs=LocalFinishedJobs(self.root / "runs"),
         )
 
     def verify(self) -> IntegrityReport:
@@ -281,6 +284,105 @@ def test_a_recovered_repairing_run_takes_another_step(
     assert set(funded.jobs()) <= funded.submitted()
 
 
+# -- the job that finished before its record did --------------------------------
+#
+# The window between a job finishing and OUTPUTS_DURABLE landing is where
+# collect-finished recovery earns its keep: the work is bought, the outputs
+# are on disk, and nothing in the journal says so yet. The harness ticks a
+# position the moment a job returns, so the sweep can stop exactly there.
+
+
+def positions_labelled(tmp_path: Path, prefix: str) -> list[int]:
+    """Where in a clean repairing step the writes matching ``prefix``
+    land. The canary is deterministic, so a measuring run's positions
+    hold for every later run."""
+    funded = Funded(tmp_path / "positions", repairs=True)
+    faults = funded.step(funded.at_the_experiment())
+    assert faults.writes is not None
+    return [
+        index + 1
+        for index, label in enumerate(faults.writes)
+        if label.startswith(prefix)
+    ]
+
+
+def test_a_finished_job_is_collected_not_abandoned(tmp_path: Path) -> None:
+    """Killed the instant its job finished, before anything recorded that
+    it had: the attempt completes with the job's measured cost, and no
+    conservative charge appears anywhere."""
+    (position, *_rest) = positions_labelled(tmp_path, "job ")
+    funded = Funded(tmp_path, repairs=True)
+    funded.step(funded.at_the_experiment(), after=position)
+
+    funded.recover()
+
+    journal = funded.program.journal_for(funded.run.run_id)
+    assert journal.open_attempts() == ()
+    events = journal.events()
+    assert not any(e.phase is AttemptPhase.ABANDONED for e in events)
+    assert not any(
+        e.basis is SettlementBasis.CONSERVATIVE_MAX for e in events
+    )
+    # The settlement is the job's own recorded cost, to the byte.
+    (submitted,) = [e for e in events if e.phase is AttemptPhase.SUBMITTED]
+    (completed,) = [
+        e
+        for e in events
+        if e.phase is AttemptPhase.COMPLETED
+        and e.attempt_id == submitted.attempt_id
+    ]
+    record = json.loads(
+        (funded.root / "runs" / submitted.job_id / "job.json").read_text()
+    )
+    assert completed.settled.wall_clock_seconds == pytest.approx(
+        record["result"]["cost"]["wall_clock_seconds"]
+    )
+    assert completed.basis is SettlementBasis.MEASURED
+    assert funded.verify().ok, funded.verify().issues
+
+
+def test_a_collected_attempt_is_not_re_run(tmp_path: Path) -> None:
+    """The point of collecting: the work is kept, so continuing does not
+    buy it twice."""
+    (position, *_rest) = positions_labelled(tmp_path, "job ")
+    funded = Funded(tmp_path, repairs=True)
+    funded.step(funded.at_the_experiment(), after=position)
+    report = funded.recover()
+    journal = funded.program.journal_for(funded.run.run_id)
+    salvaged = journal.attempts()
+
+    funded.step(report.state_id)
+
+    # The salvaged attempt's history is untouched; new work is new
+    # attempts with new jobs, and nothing was submitted twice.
+    for attempt_id in salvaged:
+        assert journal.last_for(attempt_id) is not None
+        last = journal.last_for(attempt_id)
+        assert last is not None and last.phase.is_terminal
+    assert len(funded.debits()) == len(set(funded.debits()))
+    assert set(funded.jobs()) <= funded.submitted()
+    assert funded.verify().ok, funded.verify().issues
+
+
+def test_a_kill_after_outputs_durable_salvages_the_same_way(
+    tmp_path: Path,
+) -> None:
+    """One phase later — the outputs are recorded, the bundle is not —
+    the same collection finishes the attempt."""
+    (position, *_rest) = positions_labelled(tmp_path, "outputs_durable")
+    funded = Funded(tmp_path, repairs=True)
+    funded.step(funded.at_the_experiment(), after=position)
+
+    funded.recover()
+
+    journal = funded.program.journal_for(funded.run.run_id)
+    assert journal.open_attempts() == ()
+    assert not any(
+        e.phase is AttemptPhase.ABANDONED for e in journal.events()
+    )
+    assert funded.verify().ok, funded.verify().issues
+
+
 # -- and again with nothing shared but files -----------------------------------
 
 REPO = Path(__file__).resolve().parent.parent
@@ -330,18 +432,18 @@ def test_one_process_dies_and_another_finishes_the_step(
     assert "intact" in resumed.stdout
 
 
-@pytest.mark.parametrize("after", [16, 18, 20, 22])
+@pytest.mark.parametrize("after", [18, 20, 21, 23])
 def test_a_killed_repair_rerun_is_answered_by_the_next_process(
     tmp_path: Path, after: int
 ) -> None:
-    """The same two processes, over the four writes a repair rerun makes.
+    """The same two processes, over the writes a repair rerun makes.
 
-    Those four positions are the ones that had no answer before: the
-    rerun's job ran inside its parent's attempt with nothing written down
-    about it, so a process killed here left a job on disk that nothing on
-    the record named. Now the rerun is an attempt, and the process that
-    arrives afterwards says so — it settles the rerun and the parent
-    separately, and the run still verifies.
+    These positions had no answer before the rerun was an attempt; two of
+    them (the job finished, the outputs recorded) now have a *better*
+    answer than abandonment — the next process finds the finished job on
+    disk, collects it, and completes the attempt with its measured cost.
+    Either way both open attempts are settled separately, and the run
+    still verifies.
     """
     root = tmp_path / "run"
 

@@ -223,17 +223,41 @@ human in the loop, producing results that survive scrutiny.
   a commit bundle was written before the facts it names were durable, so
   recovery raised rather than finishing the step, and the verifier
   faulted a `SUBMITTED` note whose job never ran — which is the note
-  working, not a broken link. Still open: recovery *answers* an
-  interrupted rerun and does not *collect* it.
+  working, not a broken link. The one residue — recovery *answered* an
+  interrupted rerun but did not *collect* it — is closed by Task 7A's
+  salvage arm below.
+- **Collect-finished recovery and GPU accounting.** Done (Task 7A,
+  2026-08-21, first slice). A job now declares how many GPUs it
+  occupies and the executor bills `gpu_hours` as wall clock times that
+  occupancy — a measurement of occupancy, never of utilization, and the
+  record says which. The durable job record carries what finishing the
+  books needs — start time, pid, timeout, required artifacts, the
+  environment captured once before launch — so a cold process can reap
+  an orphan whose submitter provably died, deciding success from the
+  contract's own evidence. And recovery collects: an attempt whose job
+  finished before the crash is completed with the job's measured cost
+  instead of conservatively abandoned. The soundness predicate is all
+  journal: the submitted job id must equal the one `STARTED`
+  pre-registered, the executor's record must be terminal for exactly
+  that job, and any `OUTPUTS_DURABLE` event must agree about which
+  result it produced — anything unprovable keeps the conservative
+  answer. Salvage rebuilds precisely what the live step would have
+  built (one result proposal, the deterministic gate, a bundle costing
+  what the result cost), so a gate-refused result commits the same
+  failed bundle live execution would have. The sweep grew to cover it:
+  the simulated crash is a `BaseException` now, because a crash the
+  runtime could catch as a role failure was quietly testing the wrong
+  thing, and the repairing step's 52 durable writes each get a kill —
+  including the two positions where a job finished and nothing had
+  recorded it yet.
 - **Real experiment execution.** ML training runs under the existing
-  executor contract: checkpoints, longer timeouts, GPU accounting. No
-  longer blocked on the repair loop — every repair-loop job is
-  journalled now — but one gap is worth closing first: recovery charges
-  an interrupted job its authorization and closes it, rather than
-  collecting the outputs it can now name. That is a wasted training run
-  rather than a lost one, which is what Task 6D.1 bought; collecting is
-  sound only where the record proves the job was the attempt's whole
-  cost, and establishing that distinction is the work.
+  executor contract. Unblocked: the repair loop journals every job and
+  recovery collects finished ones. What remains is the lab itself —
+  Task 7A's main body: a trusted vision template catalog whose metrics
+  match admitted predictions, dataset manifests, backend-agnostic
+  execution profiles, and the live qualification from a synthetic brief
+  through real training. Checkpoint-resume of a half-trained job is
+  7A.1, designed against a real workload once one exists.
 - **Scientific debugging and experiment verification.** Done in its
   Phase 1 form: the five-way failure taxonomy (engineering /
   implementation / methodological / analytical / verified), a

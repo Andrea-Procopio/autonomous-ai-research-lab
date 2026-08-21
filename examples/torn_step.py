@@ -49,6 +49,9 @@ from autonomous_research_lab.core.evidence import Evidence
 from autonomous_research_lab.core.experiment import ExperimentResult
 from autonomous_research_lab.core.state import ResearchState
 from autonomous_research_lab.evidence.file_store import FileEvidenceStore
+from autonomous_research_lab.execution.executor import ExperimentJob
+from autonomous_research_lab.execution.runner import JobRunner
+from autonomous_research_lab.execution.salvage import LocalFinishedJobs
 from autonomous_research_lab.literature.retrieval import LiteratureProvider
 from autonomous_research_lab.orchestration.loop import ResearchRuntime
 from autonomous_research_lab.persistence.commit_store import CommitBundleStore
@@ -68,8 +71,17 @@ KILLED = 9
 part of the system returns it."""
 
 
-class SimulatedCrashError(RuntimeError):
-    """The simulated crash. Carries the write it came after."""
+class SimulatedCrashError(BaseException):
+    """The simulated crash. Carries the write it came after.
+
+    A ``BaseException``, deliberately: a crash is not a failure a program
+    observes, and nothing in the system may be allowed to catch and
+    absorb it. Derived from ``RuntimeError`` it would be swallowed by the
+    runtime's role-failure handling — ``except Exception`` around
+    ``perform`` — and every position inside a role invocation would
+    quietly test "the role raised" instead of "the process died". The
+    hard variant (``os._exit``) needs no such care, which is the point of
+    having both."""
 
 
 @dataclass
@@ -171,6 +183,28 @@ class FaultyJournal(RunJournal):
         return event
 
 
+@dataclass
+class FaultyRunner:
+    """Ticks the moment a job's outputs exist on disk.
+
+    The window between a job finishing and ``OUTPUTS_DURABLE`` landing is
+    exactly where collect-finished recovery earns its keep, and without a
+    tick there the sweep cannot stop in it. Sits *inside* the journalling
+    runner, so the order of ticks matches the order of durable facts:
+    submitted, job's outputs, outputs recorded.
+    """
+
+    inner: JobRunner
+    faults: Faults
+
+    def run(
+        self, job: ExperimentJob, attempt_id: str = "", /
+    ) -> ExperimentResult:
+        result = self.inner.run(job, attempt_id)
+        self.faults.tick(f"job {job.id} finished")
+        return result
+
+
 class FaultyBundles(CommitBundleStore):
     def __init__(self, root: Path | str, faults: Faults) -> None:
         super().__init__(root)
@@ -206,6 +240,10 @@ class FaultyLab:
 
     def runtime(self, request: RuntimeRequest, /) -> ResearchRuntime:
         program = request.root / "program"
+        self._inner = replace(
+            self._inner,
+            runner_middleware=lambda inner: FaultyRunner(inner, self.faults),
+        )
         return self._inner.runtime(
             replace(
                 request,
@@ -306,6 +344,7 @@ def resume(root: Path) -> int:
         states=FileStateStore(root),
         evidence=FileEvidenceStore(root),
         fallback_state_id=head,
+        jobs=LocalFinishedJobs(root / "runs"),
     )
     print(f"recovery: {report.summary()}")
     for answered in report.recoveries:
