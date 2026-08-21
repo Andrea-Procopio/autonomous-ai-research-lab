@@ -23,7 +23,9 @@ from autonomous_research_lab.control.controller import Controller
 from autonomous_research_lab.control.lab import RuntimeRequest
 from autonomous_research_lab.control.recovery import RecoveryReport, recover
 from autonomous_research_lab.control.stage import Fact, StageName
+from autonomous_research_lab.core.attempt import AttemptPhase
 from autonomous_research_lab.evidence.file_store import FileEvidenceStore
+from autonomous_research_lab.execution.executor import derive_job_id
 from autonomous_research_lab.persistence.state_store import FileStateStore
 from autonomous_research_lab.program.integrity import IntegrityReport, verify_run
 from autonomous_research_lab.program.records import EntryKind
@@ -36,8 +38,10 @@ from faults import Faults, FaultyLab, SimulatedCrashError
 class Funded:
     """A canary walked to a funded run, ready to take one step."""
 
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, *, repairs: bool = False) -> None:
         self.root = root
+        self.repairs = repairs
+        self.reached = ""
         walk(root, stop_after=StageName.FUNDING)
         controller = Controller(root)
         (investigation,) = controller.investigations.investigations()
@@ -61,12 +65,19 @@ class Funded:
     def step(self, from_state: str, *, after: int | None = None) -> Faults:
         """One step, stopped after the ``after``-th durable write."""
         faults = Faults(after=after)
-        lab = FaultyLab(faults, self.run.run_id)
+        lab = FaultyLab(faults, self.run.run_id, repairs=self.repairs)
         runtime = lab.runtime(self.request())
         state = FileStateStore(self.root).load(from_state)
+        self.reached = from_state
         with contextlib.suppress(SimulatedCrashError):
-            runtime.step(state)
+            self.reached = runtime.step(state).state.id
         return faults
+
+    def at_the_experiment(self) -> str:
+        """One clean step past the funded head, which is the design, so
+        the next step is the one that runs a job."""
+        self.step(self.head)
+        return self.reached
 
     def recover(self) -> RecoveryReport:
         return recover(
@@ -88,6 +99,24 @@ class Funded:
     def jobs(self) -> list[str]:
         runs = self.root / "runs"
         return sorted(p.name for p in runs.iterdir()) if runs.is_dir() else []
+
+    def submitted(self) -> set[str]:
+        """Every job the journal says was handed to the executor."""
+        journal = self.program.journal_for(self.run.run_id)
+        return {
+            event.job_id
+            for event in journal.events()
+            if event.phase is AttemptPhase.SUBMITTED
+        }
+
+    def attempts_that_submitted(self) -> dict[str, str]:
+        """Which attempt submitted which job."""
+        journal = self.program.journal_for(self.run.run_id)
+        return {
+            event.attempt_id: event.job_id
+            for event in journal.events()
+            if event.phase is AttemptPhase.SUBMITTED
+        }
 
 
 def a_clean_step(tmp_path: Path) -> int:
@@ -169,6 +198,89 @@ def test_an_uninterrupted_step_needs_no_recovery(tmp_path: Path) -> None:
     assert funded.verify().ok
 
 
+# -- the step that repairs itself ----------------------------------------------
+#
+# The sweep above walks the *design* step, which runs no job. A step that
+# executes one is longer, and the part of it that was never swept is the
+# part a repair adds: a rerun submitted from inside the bounded repair
+# loop. That rerun used to run with no attempt open for it and no note of
+# it anywhere, so a process killed there lost the job outright — the
+# spend charged to nothing, the outputs orphaned in the run directory
+# with nothing on the record to find them by.
+
+
+def a_repairing_step(tmp_path: Path) -> int:
+    """How many durable writes a step that fails and repairs itself
+    makes."""
+    funded = Funded(tmp_path / "measure", repairs=True)
+    return funded.step(funded.at_the_experiment()).count
+
+
+def test_a_repair_rerun_is_an_attempt_of_its_own(tmp_path: Path) -> None:
+    """The fix, stated as the record it leaves.
+
+    Two jobs run in this step — the experiment that fails and the rerun
+    that fixes it — and each is submitted by a different attempt, under
+    an id derived from that attempt, written down before the job exists.
+    """
+    funded = Funded(tmp_path, repairs=True)
+
+    funded.step(funded.at_the_experiment())
+
+    submitted = funded.attempts_that_submitted()
+    assert len(submitted) == 2, submitted
+    for attempt_id, job_id in submitted.items():
+        assert job_id == derive_job_id(attempt_id)
+    # Both jobs really ran, and each is one the journal named first.
+    assert set(funded.jobs()) == set(submitted.values())
+    # Each attempt holds its own money and answers for it exactly once.
+    assert len(funded.debits()) == len(set(funded.debits()))
+    assert set(submitted) <= set(funded.debits())
+    assert funded.verify().ok, funded.verify().issues
+
+
+@pytest.mark.parametrize("after", range(1, 51))
+def test_a_repairing_step_stopped_at_any_write_recovers(
+    tmp_path: Path, after: int
+) -> None:
+    funded = Funded(tmp_path, repairs=True)
+    total = funded.step(funded.at_the_experiment(), after=after).count
+    if total < after:
+        pytest.skip(f"a repairing step makes fewer than {after} writes")
+
+    report = funded.recover()
+
+    journal = funded.program.journal_for(funded.run.run_id)
+    assert journal.open_attempts() == ()
+    assert len(funded.debits()) == len(set(funded.debits()))
+    assert funded.verify().ok, funded.verify().issues
+    assert report.state_id
+    # The claim this sweep exists for: wherever it died, no job ran that
+    # the journal had not already written down. A job on disk that no
+    # attempt submitted is work the run paid for and cannot account for.
+    assert set(funded.jobs()) <= funded.submitted()
+
+
+@pytest.mark.parametrize("after", range(1, 51))
+def test_a_recovered_repairing_run_takes_another_step(
+    tmp_path: Path, after: int
+) -> None:
+    """Recovering is for continuing, here too."""
+    funded = Funded(tmp_path, repairs=True)
+    if funded.step(funded.at_the_experiment(), after=after).count < after:
+        pytest.skip(f"a repairing step makes fewer than {after} writes")
+    report = funded.recover()
+
+    funded.step(report.state_id)
+
+    assert funded.program.journal_for(
+        funded.run.run_id
+    ).open_attempts() == ()
+    assert len(funded.debits()) == len(set(funded.debits()))
+    assert funded.verify().ok, funded.verify().issues
+    assert set(funded.jobs()) <= funded.submitted()
+
+
 # -- and again with nothing shared but files -----------------------------------
 
 REPO = Path(__file__).resolve().parent.parent
@@ -216,3 +328,35 @@ def test_one_process_dies_and_another_finishes_the_step(
     assert resumed.returncode == 0, resumed.stdout + resumed.stderr
     assert "the two records agree: True" in resumed.stdout
     assert "intact" in resumed.stdout
+
+
+@pytest.mark.parametrize("after", [16, 18, 20, 22])
+def test_a_killed_repair_rerun_is_answered_by_the_next_process(
+    tmp_path: Path, after: int
+) -> None:
+    """The same two processes, over the four writes a repair rerun makes.
+
+    Those four positions are the ones that had no answer before: the
+    rerun's job ran inside its parent's attempt with nothing written down
+    about it, so a process killed here left a job on disk that nothing on
+    the record named. Now the rerun is an attempt, and the process that
+    arrives afterwards says so — it settles the rerun and the parent
+    separately, and the run still verifies.
+    """
+    root = tmp_path / "run"
+
+    killed = torn_step(root, "--repair", "--kill-after", str(after))
+    assert killed.returncode == KILLED, killed.stderr
+
+    resumed = torn_step(root)
+
+    assert resumed.returncode == 0, resumed.stdout + resumed.stderr
+    assert "the two records agree: True" in resumed.stdout
+    assert "intact" in resumed.stdout
+    # Two attempts were open, not one: the step's own and the rerun's,
+    # and both got an answer. Which answer depends on where it died —
+    # released before anything was held, abandoned once something was,
+    # finished from a durable bundle — and that it got one at all is the
+    # part that is new.
+    assert "open attempts ['att_" in resumed.stdout
+    assert resumed.stdout.count(" -> ") == 2, resumed.stdout

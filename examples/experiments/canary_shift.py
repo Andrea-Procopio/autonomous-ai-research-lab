@@ -10,6 +10,9 @@ reasoning.
 Contract with the executor:
   reads  ARL_RUN_DIR, ARL_CONFIG, ARL_SEED
   writes $ARL_RUN_DIR/metrics.json
+
+``skip_metrics`` in the config makes the run exit without writing them,
+which is how the canary produces a failure worth repairing.
 """
 
 from __future__ import annotations
@@ -33,6 +36,16 @@ def main() -> None:
     metric = config.get("metric")
     if not isinstance(metric, str) or not metric:
         raise SystemExit("the canary experiment needs a metric name in config")
+
+    if config.get("skip_metrics"):
+        # The one repairable failure the canary can produce on demand: a
+        # process that exits cleanly and writes nothing. The executor
+        # records "wrote no metrics.json", the classifier calls that a
+        # repairable missing-metrics failure, and the repair strategy
+        # reruns the same experiment without this flag. Nothing about the
+        # science changes — the point is to have a *failure* that a
+        # bounded repair loop can genuinely fix.
+        return
 
     rng = random.Random(seed)
     treatment = 0.70 + rng.uniform(-0.02, 0.02)
