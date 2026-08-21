@@ -416,6 +416,52 @@ class TestAStepWhoseEventWasLost:
         assert report.state_id == crash.head.id
 
 
+class TestAdoptingTheRecordedSettlement:
+    """A crash between the live settlement and the closing journal event
+    leaves the debit on the ledger with the state-budget *delta* — which
+    floating point can hold one ulp away from the bundle's own cost.
+    The movement that happened is authoritative; recovery adopts it."""
+
+    def test_a_settled_charge_is_adopted_not_rederived(
+        self, tmp_path: Path
+    ) -> None:
+        crash = Crash(tmp_path)
+        crash.bundle_durable()
+        # What the dying step actually posted: the bundle's cost, one
+        # ulp adrift — exactly what (before - (before - cost)) can give.
+        drifted = ResourceCost(
+            usd=SPENT.usd + 1e-13, model_tokens=SPENT.model_tokens
+        )
+        crash.ledger.settle(
+            drifted,
+            charge_id=crash.attempt.id,
+            reason=f"attempt {crash.attempt.id}",
+        )
+
+        (recovery,) = crash.run().recoveries
+
+        assert recovery.resolution is AttemptPhase.COMPLETED
+        assert recovery.basis is SettlementBasis.MEASURED
+        assert recovery.settled == drifted  # the ledger's figure, adopted
+        # And twice is once.
+        assert crash.run().recoveries == ()
+
+    def test_a_released_charge_is_adopted_too(self, tmp_path: Path) -> None:
+        """The live step can release (a zero delta) and die before the
+        journal closes; recovery must not try to debit over the release."""
+        crash = Crash(tmp_path)
+        crash.bundle_durable()
+        crash.ledger.release(
+            charge_id=crash.attempt.id,
+            reason=f"attempt {crash.attempt.id}",
+        )
+
+        (recovery,) = crash.run().recoveries
+
+        assert recovery.resolution is AttemptPhase.COMPLETED
+        assert recovery.settled.is_zero
+
+
 class Answers:
     """A collector with a script: one job id it will call finished."""
 

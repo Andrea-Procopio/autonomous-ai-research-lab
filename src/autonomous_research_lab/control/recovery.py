@@ -86,6 +86,7 @@ from ..persistence.commit_store import CommitBundleStore
 from ..persistence.state_store import FileStateStore
 from ..program.journal import AttemptEvent, RunJournal
 from ..program.ledger import BudgetLedger
+from ..program.records import EntryKind
 
 
 class FinishedJobs(Protocol):
@@ -324,6 +325,19 @@ def _finish(
             state_id=successor_id,
             detail="applied the stored bundle after an interrupted step",
         )
+    # A crash can land between the live step's settlement and the journal
+    # event that would have closed the attempt. The money already moved,
+    # and the movement on the ledger is the charge that happened — the
+    # bundle's figure can differ from it in the last unit of precision,
+    # because the live step posts the state-budget delta rather than the
+    # raw cost, and a ledger is exact. Recovery adopts the recorded
+    # movement; only where nothing answered the reservation does it
+    # settle the bundle's own figure.
+    already = ledger.entry_for_charge(attempt_id, kind=EntryKind.DEBIT)
+    if already is not None:
+        cost = already.amount
+    elif ledger.entry_for_charge(attempt_id, kind=EntryKind.RELEASE) is not None:
+        cost = NO_COST
     settlement = ledger.settle(
         cost, charge_id=attempt_id, reason=f"attempt {attempt_id}"
     )
