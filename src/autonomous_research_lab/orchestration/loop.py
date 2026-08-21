@@ -159,7 +159,12 @@ from .director import Deliberation, FrontierDirector, deliberation_record
 from .routing import expected_proposals, route
 from .synthesis import SynthesisReview, SynthesisTrigger
 from .trajectory import JsonlTrajectoryLogger
-from .transitions import TransitionError, commit, commit_bundle
+from .transitions import (
+    TransitionError,
+    commit,
+    commit_bundle,
+    store_facts,
+)
 
 _READER = "runtime:deterministic-reader:v1"
 
@@ -1792,6 +1797,13 @@ class ResearchRuntime:
     ) -> None:
         """Put the whole effect of an attempt on disk before applying it.
 
+        The facts go first. A bundle names its results and evidence rather
+        than copying them, so a bundle stored while they are still in
+        memory says the step can be finished from disk by a process that
+        then cannot finish it — which is the one record this mechanism
+        must never write. ``store_facts`` closes that window, and it is
+        idempotent, so the commit below stores nothing a second time.
+
         ``replacing`` is the commit-rejected path: the first bundle was
         stored and then refused, and the failure bundle that answers for
         it is a second effect for one attempt. The journal records one
@@ -1801,6 +1813,7 @@ class ResearchRuntime:
         """
         if self.bundles is None:
             return
+        store_facts(bundle, self.store)
         bundle_id = self.bundles.record(bundle)
         if self.journal is None or replacing:
             return

@@ -134,6 +134,30 @@ def commit_bundle(
     return working.resolve_attempt(attempt.resolved(bundle.outcome))
 
 
+def store_facts(bundle: CommitBundle, store: EvidenceStore) -> None:
+    """Make every fact a bundle refers to durable, before the bundle is.
+
+    A bundle keeps results and evidence *by reference* — a second copy is
+    a second thing to keep in agreement — which means a stored bundle is
+    only as readable as the facts it names. Writing it while they are
+    still in memory produces the one record this whole mechanism must
+    never write: a claim that the step can be finished from disk, by a
+    process that then cannot finish it. Recovery loads the bundle, the
+    store has never heard of the result, and a step that was two
+    instructions from committing turns out not to be recoverable at all.
+
+    Results before evidence, because evidence names a result and the store
+    refuses one whose result it does not hold. Recording is idempotent by
+    id, so the commit that follows finds them and stores nothing twice.
+    """
+    for proposal in bundle.proposals:
+        if isinstance(proposal, ResultProposal):
+            store.record_result(proposal.result)
+    for proposal in bundle.proposals:
+        if isinstance(proposal, EvidenceProposal):
+            store.record_evidence(proposal.evidence)
+
+
 def reconcile_charge(
     state: ResearchState, cost: ResourceCost
 ) -> ResearchState:
