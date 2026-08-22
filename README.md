@@ -238,7 +238,7 @@ Expect interfaces to change.
 | `search` | Policies for choosing the next action among candidates. |
 | `roles` | Interfaces for the agents, including the model-backed engineer and planner. A role receives a task and returns proposals. It never edits state directly. |
 | `orchestration` | The main loop: pick an action, route it to a role, validate what comes back, commit it, log everything. |
-| `publication` | The evidence packet — flat, checked-not-copied mirrors of everything a manuscript may claim — the manuscript (one gated model call writes five prose sections behind deterministic number/citation/structure gates; trusted code assembles everything else), and the faithfulness reviewer (findings grounded in verbatim quotes and record ids or refused; the verdict derived by trusted code; one bounded revise cycle recorded as its own succession fact). Depends on `core`, `evidence`, and `runtime`; its one consumer is `control` (enforced by the layering tests). |
+| `publication` | The evidence packet — flat, checked-not-copied mirrors of everything a manuscript may claim — the manuscript (one gated model call writes five prose sections behind deterministic number/citation/structure gates; trusted code assembles everything else), and the faithfulness reviewer (findings grounded in verbatim quotes and record ids or refused; the verdict derived by trusted code; one bounded revise cycle recorded as its own succession fact), and venue rendering (the approved draft typeset into an operator-staged, hash-pinned conference kit; the venue is deployment configuration and never enters a record). Depends on `core`, `evidence`, and `runtime`; its one consumer is `control` (enforced by the layering tests). |
 
 Dependencies point one way: higher packages import lower ones, never
 the reverse, and `core` imports nothing. `control` is the one exception
@@ -305,6 +305,7 @@ arl verify --root DIR
 arl packet [INVESTIGATION] --root DIR [--out DIR]
 arl manuscript [INVESTIGATION] --root DIR [--lab module:factory] [--model NAME] [--out DIR]
 arl review [INVESTIGATION] --root DIR [--lab module:factory] [--model NAME] [--out DIR] [--review-only]
+arl render [INVESTIGATION] --root DIR (--venue NAME | --venue-config FILE) [--kits DIR] [--out DIR] [--pdf]
 ```
 
 `run` records the config and walks as far as it can. `resume` picks up
@@ -324,7 +325,23 @@ gated model call judge whether the prose claims anything the packet
 does not record — every finding grounded in a verbatim quote and a
 record id, or refused. A REVISE verdict triggers at most one
 revision-and-re-review cycle; a standing REVISE exits 1 with the
-findings printed.
+findings printed. `render` typesets the approved draft for a venue:
+`main.tex` and `references.bib` into a write-once submission tree
+beside the staged kit's verified files — refused while the standing
+review is anything but approved. `--pdf` compiles when a LaTeX
+toolchain is installed; the PDF is a derived artifact, never a record.
+
+Venue kits are operator-staged and hash-pinned, like datasets:
+
+```bash
+python -m examples.stage_venue_kit --kits-root ~/arl-kits \
+    --venue neurips --from-zip <official styles .zip or URL> [--sha256 HEX]
+arl render --root DIR --venue neurips --kits ~/arl-kits
+```
+
+The built-in `plain` venue needs no kit and compiles anywhere a TeX
+exists; venue package names track the year's kit, and a venue JSON
+(`--venue-config`) overrides any field.
 
 Exit codes are for scripts as much as for people: `0` for a walk that
 ended on its own terms — including an honest scientific no, which is a
