@@ -60,7 +60,10 @@ select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF", "ARG", "PTH"]
 known-first-party = ["autonomous_research_lab", "examples"]
 
 [tool.mypy]
-python_version = "3.11"
+# No python_version pin: each CI job checks under its own interpreter,
+# so the 3.12 job accepts the PEP 695 stubs its own resolved packages
+# ship (numpy via the figures extra), while the 3.11 job still guards
+# the lowest supported version.
 files = ["src", "tests", "examples"]
 strict = true
 warn_unused_ignores = true
