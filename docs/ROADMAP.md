@@ -445,6 +445,26 @@ human in the loop, producing results that survive scrutiny.
   ICLR styles as deployment configuration), 8E the venue simulator
   (conference-readiness scoring with ensemble + meta-review, feeding
   prose revision under the same gates), and signing.
+- **Venue LaTeX kits.** Done (Task 8D, 2026-08-22). The approved
+  draft typesets for whichever conference the deployment config names
+  — and only the approved draft: rendering refuses while the standing
+  faithfulness review is anything but APPROVED. Venue kits are
+  operator-staged and hash-pinned exactly like datasets (archive
+  hashed before extraction, write-once content-id manifests, staged
+  files re-verified at every render); the built-in plain venue
+  compiles with the bare article class and keeps CI honest with zero
+  staged files. The .tex prints exactly the number strings the packet
+  prints, prose is escaped in one pass with citations split out first,
+  and the submission tree is write-once — the PDF a toolchain derives
+  from it is explicitly not a record. Qualified live, 2026-08-22: the
+  official NeurIPS 2025 style kit staged from media.neurips.cc
+  (sha256-pinned), the real CIFAR-10 draft rendered into it anonymous
+  and self-contained, and into the plain venue; no LaTeX toolchain is
+  installed on the qualification host, so compilation was policy-
+  tested only (the command plan is pure data) — the first --pdf run
+  awaits a TeX install. Still open: 8E the venue simulator, rendered
+  figures, full venue-macro fidelity (\icmltitle and friends —
+  --venue-config is the escape hatch), and signing.
 - **Trajectory analysis.** The decision log (`DecisionRecord` + JSONL)
   exists. Horizon 1 adds the analysis code that reads it: utility
   calibration, cost prediction error, failure-mode tallies, feeding

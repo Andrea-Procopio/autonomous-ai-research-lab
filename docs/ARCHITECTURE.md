@@ -2609,6 +2609,54 @@ answers. Conference-readiness scoring — an impression instrument — is
 a separate, later seat (8E), and its feedback will drive prose
 revision under these same gates, never past them.
 
+## Venue rendering (Task 8D)
+
+A venue is where a manuscript is typeset, and nothing more. The
+execution backends' doctrine, transposed: deployment data, parsed from
+JSON, validated loudly at composition time, and never written into any
+scientific record. Retargeting a paper from NeurIPS to ICML changes
+rendering only — the packet, the manuscript, and the review it rode on
+are byte-for-byte the same records either way.
+
+**The gate is the review.** `arl render` refuses unless the standing
+draft's faithfulness review is APPROVED — no review, or a standing
+REVISE, is a typed refusal, because an unapproved draft is not the
+lab's word. What renders is therefore always: gated prose, grounded
+review, checked packet.
+
+**Kits are staged like datasets.** The conference's official style
+files are operator-staged into a kits directory by
+`examples/stage_venue_kit.py` — the archive hashed before extraction,
+a `--sha256` pin refusing a mismatch, every staged file recorded in a
+write-once, content-id-carrying manifest — and rendering verifies the
+staged files against that manifest, refusing a kit that is missing,
+tampered, or never staged. Machine paths (the kits directory) arrive
+as explicit arguments, never guessed from the environment. The
+built-in `plain` venue uses the bare `article` class with zero staged
+files and zero packages, so it compiles anywhere a TeX exists and
+keeps the whole path testable without one.
+
+**Two invariants carry across formats.** Numbers: the `.tex` prints
+exactly the `:g` strings the packet's own renderers print, through one
+shared helper — no `siunitx`, no separators, no re-rounding — so
+"trusted code prints only what the packet prints" holds in every
+format. Authorship: the lab never fabricates human authorship — an
+anonymous venue gets "Anonymous Authors" and no attribution; a
+non-anonymous one gets an institutional author name and an attribution
+section carrying exactly the sentence the manuscript's assembly
+prints. Prose is escaped in a single `str.translate` pass (no
+backslash-ordering hazard), and citations are split out on the strict
+source-id pattern before escaping, so a cite key's underscore
+survives.
+
+The submission tree — `main.tex`, `references.bib`, the verified kit
+files beside them — is write-once, byte-compared forever; re-rendering
+an unchanged record is a no-op. The PDF a toolchain makes from it is a
+**derived artifact**, exempt from write-once (toolchains embed
+timestamps): the `.tex` is the record, the PDF is not, and `--pdf`
+with no toolchain installed is a failure naming what to install, not a
+shrug.
+
 ## Architectural invariants
 
 The list this pass was made against; each is enforced by at least one
@@ -2737,7 +2785,7 @@ control       the composition root: one command over the seven stages,
               the stage event log, and the recovery that finishes a
               step a killed process left half done  (may import every
               stage; nothing imports it)
-publication   the evidence packet, the gated manuscript, the reviewer
+publication   the packet, the manuscript, the reviewer, venue kits
 ```
 
 Dependencies point downward only; `core` imports nothing from its
