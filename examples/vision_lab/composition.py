@@ -43,6 +43,7 @@ from autonomous_research_lab.execution.runner import DirectJobRunner
 from autonomous_research_lab.literature.openalex import OpenAlexProvider
 from autonomous_research_lab.literature.retrieval import LiteratureProvider
 from autonomous_research_lab.orchestration.director import (
+    FrontierDirector,
     RuleBasedFrontierDirector,
 )
 from autonomous_research_lab.orchestration.loop import ResearchRuntime
@@ -50,12 +51,15 @@ from autonomous_research_lab.orchestration.trajectory import (
     JsonlTrajectoryLogger,
 )
 from autonomous_research_lab.program.store import ProgramStore
-from autonomous_research_lab.roles.base import RoleName
+from autonomous_research_lab.roles.base import ResearchRole, RoleName
 from autonomous_research_lab.roles.engineer import (
     ImplementationTemplate,
     ModelBackedEngineer,
 )
-from autonomous_research_lab.roles.planner import TemplateCatalog
+from autonomous_research_lab.roles.planner import (
+    ModelBackedPlanner,
+    TemplateCatalog,
+)
 from autonomous_research_lab.runtime.config import RuntimeConfig
 from autonomous_research_lab.runtime.implementation_store import (
     ImplementationStore,
@@ -66,6 +70,7 @@ from autonomous_research_lab.runtime.muse import (
     MUSE_SPARK_1_2,
     MuseSparkProvider,
 )
+from autonomous_research_lab.runtime.planning_store import PlanningStore
 from autonomous_research_lab.runtime.preflight import (
     DEFAULT_PREFLIGHT_CHECKS,
     PreflightCheck,
@@ -88,9 +93,11 @@ from .backends import (
 )
 from .catalog import catalog_for, entry_for_metric, fill_slot
 from .datasets import DatasetStaged, DatasetStore
+from .direction import VisionDirector, VisionDirectorRole
 from .measure import require_measurable
 from .science import (
     FixedRegionCheck,
+    FixedRegionReview,
     VisionAnalyst,
     VisionControls,
     VisionScientist,
@@ -146,6 +153,12 @@ class VisionLab:
     the scripted provider serves a trusted fixture completion — the
     engineer's contract stays the production one, its trust story does
     not."""
+
+    planner: bool = True
+    """Whether the model-backed planner shares the director seat. On,
+    the composite director hands consultations to the planner once
+    verified evidence exists (see ``direction.py``); off, the run keeps
+    the purely deterministic 7A arc."""
 
     def model_provider(self, stage: StageName, /) -> ModelProvider:
         del stage
@@ -215,13 +228,40 @@ class VisionLab:
             binding=binding,
             template=catalog.entries[0].template,
             template_resolver=_resolver(catalog),
+            completion_review=FixedRegionReview(),
             preflight_checks=preflight,
         )
+        scientist = VisionScientist(catalog)
+        director: FrontierDirector
+        seat: ResearchRole
+        if self.planner:
+            plans = PlanningStore(request.root / "planning")
+            planner_role = ModelBackedPlanner(
+                provider=(
+                    VisionScriptedModel()
+                    if self.scripted
+                    else MuseSparkProvider()
+                ),
+                model=(
+                    SCRIPTED_MODEL_NAME if self.scripted else MUSE_SPARK_1_2
+                ),
+                ledger=usage,
+                store=plans,
+                catalog=catalog,
+                # The live lesson from Task 4: Muse truncates planning
+                # replies at the default budget.
+                max_output_tokens=8192,
+            )
+            director = VisionDirector(plans=plans)
+            seat = VisionDirectorRole(scientist, planner_role)
+        else:
+            director = RuleBasedFrontierDirector()
+            seat = scientist
         return ResearchRuntime(
             config=RuntimeConfig(),
-            director=RuleBasedFrontierDirector(),
+            director=director,
             roles={
-                RoleName.RESEARCH_DIRECTOR: VisionScientist(catalog),
+                RoleName.RESEARCH_DIRECTOR: seat,
                 RoleName.RESEARCH_ENGINEER: engineer,
                 RoleName.RESULT_ANALYST: VisionAnalyst(),
             },

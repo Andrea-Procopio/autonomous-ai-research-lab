@@ -27,6 +27,7 @@ from autonomous_research_lab.roles.planner import (
     TemplateCatalog,
     check_decision,
 )
+from autonomous_research_lab.runtime.planning_store import PlanningStore
 from examples.vision_chain import walk
 from examples.vision_lab import ci_lab
 from examples.vision_lab.catalog import (
@@ -163,6 +164,50 @@ class TestTheCatalog:
             catalog_for((admitted(augment),), trainer="stub")
 
 
+class TestFixedRegionReview:
+    """The fixed-region judgment where it can still be fixed: inside the
+    engineer's repair loop (the engineer-side mechanics are pinned in
+    tests/test_engineer_role.py; this holds the lab's reviewer to the
+    lab's own templates)."""
+
+    def test_a_faithful_completion_passes(self) -> None:
+        from autonomous_research_lab.runtime.implementation_store import (
+            SourceFile,
+        )
+        from examples.vision_lab.composition import STUB_SLOT as SLOT
+        from examples.vision_lab.science import FixedRegionReview
+
+        catalog = catalog_for((admitted(ENCODER_METRIC),), trainer="stub")
+        (entry,) = catalog.entries
+        completed = fill_slot(entry.template.source, SLOT)
+
+        review = FixedRegionReview().review(
+            entry.template, (SourceFile("experiment.py", completed),)
+        )
+
+        assert review == ""
+
+    def test_a_tampered_fixed_region_is_named(self) -> None:
+        from autonomous_research_lab.runtime.implementation_store import (
+            SourceFile,
+        )
+        from examples.vision_lab.composition import STUB_SLOT as SLOT
+        from examples.vision_lab.science import FixedRegionReview
+
+        catalog = catalog_for((admitted(ENCODER_METRIC),), trainer="stub")
+        (entry,) = catalog.entries
+        tampered = fill_slot(entry.template.source, SLOT).replace(
+            "TRAIN_STEPS = 5", "TRAIN_STEPS = 50"
+        )
+
+        review = FixedRegionReview().review(
+            entry.template, (SourceFile("experiment.py", tampered),)
+        )
+
+        assert "fixed region" in review
+        assert "build_encoder" in review
+
+
 class TestThePlannerGateFit:
     """Task 7B prep: the per-run catalog is something ``check_decision``
     can hold a planner to."""
@@ -255,35 +300,55 @@ class TestTheWholeWalk:
 
         assert result.ok
         assert str(result.outcome) == "ended"
-        assert "no open scientific work remains" in result.detail
+        # The walk no longer peters out on an empty frontier: the planner
+        # ends it, with a typed reason, through its own dispatched stop.
+        assert "planner stop: question_resolved" in result.detail
 
         report = verify_run(
             tmp_path / "run", program_root=tmp_path / "run" / "program"
         )
         assert report.ok, report.issues
 
-        # The science that walk recorded: every seeded run verified,
-        # every sign test consistent, the claim assessed SUPPORTED.
+        # The science that walk recorded: three bootstrap runs on the
+        # admitted sign, plus the planner's sharpened effect-size claim
+        # at a fresh seed — every run verified, every test consistent,
+        # both claims assessed SUPPORTED.
         states = FileStateStore(tmp_path / "run")
         loaded = [states.load(found) for found in states.state_ids()]
         head = max(loaded, key=lambda state: len(state.attempts))
-        assert len(head.prediction_tests) == 3
+        assert len(head.prediction_tests) == 4
         assert all(
             str(test.consistency) == "consistent"
             for test in head.prediction_tests
         )
         assert any(
-            str(found.verdict) == "supported" for found in head.assessments
+            "ge 0.01" in test.detail for test in head.prediction_tests
         )
+        supported = [
+            found
+            for found in head.assessments
+            if str(found.verdict) == "supported"
+        ]
+        assert len(supported) == 2
         verifications = tmp_path / "run" / "verifications"
         records = [
             json.loads(path.read_text())
             for path in verifications.glob("*.json")
         ]
-        assert len(records) == 3
+        assert len(records) == 4
         assert all(
             record["standing"] == "verified_evidence" for record in records
         )
+        # And the planning record: one sharpened experiment, one stop,
+        # both dispatched, no consultation rejected.
+        plans = PlanningStore(tmp_path / "run" / "planning")
+        decisions = plans.records()
+        assert sorted(str(r.action) for r in decisions) == [
+            "new_experiment",
+            "stop",
+        ]
+        assert all(plans.is_dispatched(r.id) for r in decisions)
+        assert plans.rejected() == ()
 
     def test_the_walk_survives_a_stop_and_a_resume(
         self, tmp_path: Path
