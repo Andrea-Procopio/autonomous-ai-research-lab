@@ -2510,6 +2510,53 @@ absence explicitly rather than implying an omission; manuscript
 generation and the reviewer role (8B/8C) will consume the packet, and
 nothing model-authored enters it.
 
+## Manuscript generation (Task 8B)
+
+The first model-authored document, and the packet is what makes it
+safe to author: the manuscript's rule is that **a model may phrase, and
+only phrase**. `publication/manuscript.py` holds the pure half — the
+flat records, the assembly, and three deterministic gates over the
+model's five prose sections (abstract, introduction, method narrative,
+discussion, limitations):
+
+- the **number gate**: a word containing a digit is admissible iff the
+  packet's own renderings — the markdown and the JSON, tokenized the
+  same way — already contain that exact word. There is no formatter
+  list and no whitelist: rounded values, unit conversions, recomputed
+  percentages, and obfuscations like `3x` are unknown by construction,
+  while quoting `p=0.03125` or a result id exactly as printed passes.
+- the **citation gate**: every bracketed span must be a well-formed
+  source id from the packet's bibliography. `[Smith 2020]` and markdown
+  links are malformed by the same rule.
+- the **structure gate**: no prose line may open a heading, and no
+  section may be empty. Trusted code owns the document's shape.
+
+Semantics are deliberately not gated: whether the discussion overclaims
+is the reviewer role's question (8C), asked against the claim-evidence
+graph. A weaker semantic check here would only train prose to pass it.
+
+`publication/author.py` makes the one gated call, borrowing the
+admission door's discipline verbatim: budget checked before every call,
+accounting on the ledger exactly once whether the call succeeds or
+fails, gate rejections and schema violations treated identically — the
+draft preserved as a rejected payload, one corrective call carrying
+exactly the mechanical rules that fired, then a typed refusal. The
+assembled document reuses the packet's own line renderers byte for
+byte, so the results and references sections of a manuscript are the
+packet's, not a restatement.
+
+Two decisions worth stating. The call **never charges the run's
+grant**: the run is settled and its packet already states the balance —
+the manuscript's spend is durable in its own provenance record and in
+every preserved rejection. And **replay is the composition root's
+job**: a manuscript's content id includes its call provenance (a
+response id is an occurrence, not content), so `control/manuscript.py`
+answers a re-run from the store's packet-id lookup with zero model
+calls. `StageName` gained a `MANUSCRIPT` seat for the lab's provider
+routing, but not a place in `CHAIN_ORDER` — a manuscript is exported
+from a finished run, never walked to, and a config naming it as
+`stop_after` is refused.
+
 ## Architectural invariants
 
 The list this pass was made against; each is enforced by at least one
@@ -2638,7 +2685,7 @@ control       the composition root: one command over the seven stages,
               the stage event log, and the recovery that finishes a
               step a killed process left half done  (may import every
               stage; nothing imports it)
-publication   reporting  (empty)
+publication   the evidence packet and the gated manuscript
 ```
 
 Dependencies point downward only; `core` imports nothing from its
