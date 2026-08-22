@@ -378,6 +378,28 @@ human in the loop, producing results that survive scrutiny.
   current judgment (frontier re-opening plus `supersedes` wiring), the
   model-backed statistician and reviewer behind the same seat, and
   provenance checking of claims (the Verifier).
+- **Publication evidence packet.** Done (Task 8A, 2026-08-22). The
+  `publication` package holds its first content — a deterministic
+  export, checked rather than copied: `arl packet` verifies the run
+  from cold, walks the citation chain back to the cited literature
+  (every store re-derives its own content ids on load, so a doctored
+  record refuses to load and the export fails naming it), re-derives
+  the statistician's figures from the immutable record with the m and
+  alpha the assessment pinned, and refuses to write anything a
+  manuscript could cite that the record does not support. The packet
+  is flat mirrors only — strings and numbers, each element carrying
+  the record and artifact ids it points back at — written write-once
+  as `packet/<packet_id>.json` and `.md`, named by a content id, so
+  re-exporting an unchanged run is a byte-identical no-op. All claims
+  in the head state are included; an unassessed claim is marked, never
+  dropped. A walk that stopped before funding has no research state
+  and gets a typed refusal, not a file. Qualified live on the real
+  CIFAR-10 root, 2026-08-22: both claims exported
+  re-derived-and-matched (SUPPORTED, n=5, p=0.03125; PLAUSIBLE, n=1,
+  adjusted threshold 0.025), two cited sources resolved, six result
+  rows each naming its verified result. Still open: rendered figures
+  (the packet currently states their absence), manuscript generation
+  and the reviewer role (8B/8C), and packet signing.
 - **Trajectory analysis.** The decision log (`DecisionRecord` + JSONL)
   exists. Horizon 1 adds the analysis code that reads it: utility
   calibration, cost prediction error, failure-mode tallies, feeding
