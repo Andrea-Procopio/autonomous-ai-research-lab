@@ -973,6 +973,15 @@ def _manuscript_prose(request: ModelRequest) -> str:
     return json.dumps(payload)
 
 
+def _manuscript_review(request: ModelRequest) -> str:
+    """The fixture draft is computed from the packet, so it is faithful
+    by construction, and the honest review of a faithful draft is an
+    empty findings list — exactly what the instruction demands. The
+    REVISE path is exercised at unit level, where the draft can lie."""
+    del request
+    return json.dumps({"findings": []})
+
+
 ANSWERERS: Final = {
     "mapping_queries": _mapping_queries,
     "mapping_screening": _mapping_screening,
@@ -989,4 +998,5 @@ ANSWERERS: Final = {
     "admission_operationalization": _admission_operationalization,
     "planning_decision": _planning_decision,
     "manuscript_prose": _manuscript_prose,
+    "manuscript_review": _manuscript_review,
 }
