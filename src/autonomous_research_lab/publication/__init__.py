@@ -28,12 +28,37 @@ This package deliberately imports nothing from the analysis chain — the
 layering tests hold every stage store to its named consumers — so the
 schema here is flat data, and the composition root does the reading.
 
-Still deliberately absent: venue LaTeX kits (8D), the venue simulator
-that scores conference-readiness (8E — an impression instrument, kept
-separate from this reviewer by design), rendered figures, and signing.
+* the **venue rendering** (:mod:`.latex`, :mod:`.kits`) — the approved
+  draft typeset for a conference. The venue is deployment
+  configuration: a builtin spec or a venue JSON picks the LaTeX kit,
+  operator-staged and hash-pinned; trusted code renders ``main.tex``
+  and ``references.bib`` printing exactly the number strings the
+  packet prints; and nothing venue-shaped enters any record.
+
+Still deliberately absent: the venue simulator that scores
+conference-readiness (8E — an impression instrument, kept separate
+from the faithfulness reviewer by design), rendered figures, full
+venue-macro fidelity, and signing.
 """
 
 from .author import AUTHOR_INSTRUCTION, PROSE_SCHEMA, ManuscriptAuthor
+from .kits import (
+    KitConflictError,
+    KitIntegrityError,
+    KitManifest,
+    KitStore,
+    UnknownKitError,
+)
+from .latex import (
+    VENUES,
+    VenueError,
+    VenueSpec,
+    bibtex_entries,
+    escape,
+    prose_to_latex,
+    render_latex,
+    venue_from,
+)
 from .manuscript import (
     PROSE_SECTIONS,
     Manuscript,
@@ -87,10 +112,15 @@ __all__ = [
     "PROSE_SCHEMA",
     "PROSE_SECTIONS",
     "REVIEWER_INSTRUCTION",
+    "VENUES",
     "AmbiguousHeadError",
     "EvidencePacket",
     "FaithfulnessReviewer",
     "FiguresMismatchError",
+    "KitConflictError",
+    "KitIntegrityError",
+    "KitManifest",
+    "KitStore",
     "Manuscript",
     "ManuscriptAuthor",
     "ManuscriptConflictError",
@@ -110,15 +140,23 @@ __all__ = [
     "ReviewStore",
     "ReviewVerdict",
     "RevisionRecord",
+    "UnknownKitError",
+    "VenueError",
+    "VenueSpec",
     "assemble",
+    "bibtex_entries",
     "derive_verdict",
     "deterministic_findings",
+    "escape",
     "gate_prose",
     "ground_findings",
     "head_for",
     "known_renderings",
+    "prose_to_latex",
+    "render_latex",
     "render_markdown",
     "require_reportable",
     "review_schema",
     "to_json",
+    "venue_from",
 ]
