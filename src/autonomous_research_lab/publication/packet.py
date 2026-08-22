@@ -470,6 +470,83 @@ def figure_set(verdict: AssessmentVerdict, stats: FamilyStatistics) -> FigureSet
 # -- rendering ----------------------------------------------------------------
 
 
+def science_lines(science: RegisteredScience) -> list[str]:
+    """The registered-science block, minus its heading. Shared with the
+    manuscript, byte for byte: previously exported files pin these
+    renderings, and a restatement would be the drift this package warns
+    against."""
+    lines = [
+        f"**Question** ({science.question_id}): {science.question}",
+        f"**Hypothesis** ({science.hypothesis_id}): {science.hypothesis}",
+        f"**Mechanical reading**: {science.mechanical_reading}",
+        "",
+    ]
+    for admitted in science.admitted_predictions:
+        lines.append(
+            f"- *{admitted.prediction_text}* — {admitted.base_metric}: "
+            f"{admitted.expected_higher_arm} over "
+            f"{admitted.expected_lower_arm}, {admitted.condition}"
+        )
+    return lines
+
+
+def finding_lines(finding: ClaimFinding) -> list[str]:
+    """One claim's finding block: statement, verdict, rationale, rows."""
+    lines = [
+        f"### {finding.statement}",
+        f"Claim {finding.claim_id} — {finding.figures_check}",
+    ]
+    if finding.assessment is not None:
+        lines.append(
+            f"**{finding.assessment.verdict.upper()}** "
+            f"({finding.assessment.method}, "
+            f"assessment {finding.assessment.assessment_id})"
+        )
+        lines.append(f"> {finding.assessment.rationale}")
+    for row in finding.evidence_rows:
+        metrics = ", ".join(
+            f"{name}={value:g}" for name, value in row.metrics
+        )
+        lines.append(
+            f"- {row.evidence_id} ({row.relation}, {row.standing}) ← "
+            f"result {row.result_id}, seed {row.seed}: {metrics}"
+        )
+    return lines
+
+
+def reference_lines(bibliography: Bibliography) -> list[str]:
+    """The bibliography block, minus its heading."""
+    lines = [
+        f"Cited by candidate {bibliography.candidate_id} — "
+        f"*{bibliography.candidate_title}*"
+    ]
+    for entry in bibliography.entries:
+        authors = ", ".join(entry.authors)
+        year = entry.year if entry.year is not None else "n.d."
+        lines.append(
+            f"- {authors} ({year}). {entry.title}. {entry.venue}. "
+            f"{entry.doi or entry.url} [{entry.source_id}]"
+        )
+    return lines
+
+
+def table_lines(tables: tuple[TableRow, ...]) -> list[str]:
+    """The per-seed result table, header included."""
+    lines = [
+        "| spec | seed | result | standing | metrics |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    for table_row in tables:
+        metrics = ", ".join(
+            f"{name}={value:g}" for name, value in table_row.metrics
+        )
+        lines.append(
+            f"| {table_row.spec_id} | {table_row.seed} | "
+            f"{table_row.result_id} | {table_row.standing} | {metrics} |"
+        )
+    return lines
+
+
 def render_markdown(packet: EvidencePacket) -> str:
     """A human-readable statement of the packet. The JSON is the record;
     this is the reading copy, derived from the same object."""
@@ -497,40 +574,13 @@ def render_markdown(packet: EvidencePacket) -> str:
         "",
         "## Registered science",
         "",
-        f"**Question** ({packet.science.question_id}): "
-        f"{packet.science.question}",
-        f"**Hypothesis** ({packet.science.hypothesis_id}): "
-        f"{packet.science.hypothesis}",
-        f"**Mechanical reading**: {packet.science.mechanical_reading}",
-        "",
     ]
-    for admitted in packet.science.admitted_predictions:
-        lines.append(
-            f"- *{admitted.prediction_text}* — {admitted.base_metric}: "
-            f"{admitted.expected_higher_arm} over "
-            f"{admitted.expected_lower_arm}, {admitted.condition}"
-        )
+    lines.extend(science_lines(packet.science))
     lines.append("")
     lines.append("## Findings")
     for finding in packet.claims:
         lines.append("")
-        lines.append(f"### {finding.statement}")
-        lines.append(f"Claim {finding.claim_id} — {finding.figures_check}")
-        if finding.assessment is not None:
-            lines.append(
-                f"**{finding.assessment.verdict.upper()}** "
-                f"({finding.assessment.method}, "
-                f"assessment {finding.assessment.assessment_id})"
-            )
-            lines.append(f"> {finding.assessment.rationale}")
-        for row in finding.evidence_rows:
-            metrics = ", ".join(
-                f"{name}={value:g}" for name, value in row.metrics
-            )
-            lines.append(
-                f"- {row.evidence_id} ({row.relation}, {row.standing}) ← "
-                f"result {row.result_id}, seed {row.seed}: {metrics}"
-            )
+        lines.extend(finding_lines(finding))
     lines.append("")
     lines.append("## Planner decisions")
     for decision in packet.planner_decisions:
@@ -542,30 +592,11 @@ def render_markdown(packet: EvidencePacket) -> str:
     if packet.bibliography is not None:
         lines.append("")
         lines.append("## References")
-        lines.append(
-            f"Cited by candidate {packet.bibliography.candidate_id} — "
-            f"*{packet.bibliography.candidate_title}*"
-        )
-        for entry in packet.bibliography.entries:
-            authors = ", ".join(entry.authors)
-            year = entry.year if entry.year is not None else "n.d."
-            lines.append(
-                f"- {authors} ({year}). {entry.title}. {entry.venue}. "
-                f"{entry.doi or entry.url} [{entry.source_id}]"
-            )
+        lines.extend(reference_lines(packet.bibliography))
     lines.append("")
     lines.append("## Result table")
     lines.append("")
-    lines.append("| spec | seed | result | standing | metrics |")
-    lines.append("| --- | --- | --- | --- | --- |")
-    for table_row in packet.tables:
-        metrics = ", ".join(
-            f"{name}={value:g}" for name, value in table_row.metrics
-        )
-        lines.append(
-            f"| {table_row.spec_id} | {table_row.seed} | "
-            f"{table_row.result_id} | {table_row.standing} | {metrics} |"
-        )
+    lines.extend(table_lines(packet.tables))
     lines.append("")
     lines.append(
         "Figures: none — nothing in this run rendered plots, and the "
