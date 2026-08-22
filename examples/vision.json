@@ -1,0 +1,51 @@
+{
+  "label": "vision: a synthetic brief to real representation learning",
+  "model": "vision-scripted-1",
+  "brief": {
+    "topic": "visual representation learning: what training explains",
+    "cutoff_date": "2026-08-21",
+    "recent_window_start": "2026-01-01",
+    "workshop_hints": [
+      "workshop scope: visual representation learning and efficient pretraining"
+    ],
+    "max_queries_per_family": 1,
+    "results_per_query": 10,
+    "max_screened_sources": 10,
+    "max_extracted_sources": 8,
+    "max_model_calls": 16,
+    "refinement_rounds": 0
+  },
+  "cfp": {
+    "source_url": "https://example.invalid/vision-workshop",
+    "supplied_at": "2026-08-21",
+    "text": "Workshop on Learned Visual Representations. A synthetic call, invented for a fixture. A call for work on how visual representations are learned and on how much of their quality training explains. Topics of interest: visual representation learning, efficient pretraining, evaluation with linear probes, and evaluation practices. Submissions are limited to 9 pages. Papers are evaluated on novelty, significance, technical quality, and clarity.\n"
+  },
+  "ideation": {"max_candidates": 2, "max_model_calls": 4},
+  "prior_art": {
+    "results_per_query": 3,
+    "max_screened_per_candidate": 20,
+    "max_compared_works": 3,
+    "max_model_calls": 24
+  },
+  "selection": {
+    "compute_constraint": "One CPU core or one small GPU.",
+    "data_constraint": "A locally staged CIFAR-10 copy; no downloads at run time.",
+    "time_constraint": "Individual runs under ten minutes.",
+    "experimental_constraint": "Seeded, containerized where generated code runs live, torch and torchvision only."
+  },
+  "admission": {
+    "scheduling_requirement": "Jobs run one at a time on one machine.",
+    "job_duration_requirement": "Individual jobs bounded to ten minutes.",
+    "checkpoint_requirement": "State-dict checkpoints as run artifacts; no mid-job resume at this size."
+  },
+  "funding": {
+    "granted": {
+      "wall_clock_seconds": 7200.0,
+      "gpu_hours": 2.0,
+      "usd": 5.0,
+      "model_tokens": 200000
+    },
+    "authority": "Lab operator: vision allocation for the first production chain."
+  },
+  "experimentation": {"max_steps": 10}
+}

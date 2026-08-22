@@ -78,13 +78,25 @@ def validate_result(
             detail=f"result claims spec {result.spec_id}, validated against {spec.id}",
         )
     )
+    # An orphaned run's exit code is honestly None — the submitter died
+    # before observing it, and the executor's reap decided COMPLETED from
+    # the contract's own evidence (metrics that parse, declared artifacts
+    # present). Requiring a watched exit here would refuse every salvaged
+    # job for carrying the truthful record of how it was recovered.
+    exit_ok = result.exit_code == 0 or (
+        result.exit_code is None and result.failure_reason is None
+    )
     checks.append(
         ValidationCheck(
             name="process_completed",
-            passed=result.status is ExperimentStatus.COMPLETED
-            and result.exit_code == 0,
+            passed=result.status is ExperimentStatus.COMPLETED and exit_ok,
             detail=result.failure_reason
-            or f"status {result.status}, exit code {result.exit_code}",
+            or (
+                f"status {result.status}, exit unobserved (orphaned run "
+                f"finalized from its own evidence)"
+                if result.exit_code is None
+                else f"status {result.status}, exit code {result.exit_code}"
+            ),
         )
     )
 

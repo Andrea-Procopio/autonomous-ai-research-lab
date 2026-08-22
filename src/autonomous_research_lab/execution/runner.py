@@ -25,14 +25,8 @@ import time
 from dataclasses import dataclass
 from typing import Final, Protocol
 
-from ..core.budget import ResourceCost
 from ..core.experiment import ExperimentResult
-from .executor import (
-    Executor,
-    ExperimentJob,
-    JobNotFinishedError,
-    UnknownJobError,
-)
+from .executor import Executor, ExperimentJob
 
 DEFAULT_POLL_SECONDS: Final = 0.05
 
@@ -64,33 +58,3 @@ class DirectJobRunner:
         while not self.executor.status(job_id).is_terminal:
             time.sleep(self.poll_seconds)
         return self.executor.collect(job_id)
-
-
-@dataclass(frozen=True, slots=True)
-class ExecutorJobFacts:
-    """The two questions recovery asks about a job, and nothing else.
-
-    Deliberately narrow. Recovery lives in the composition root and must
-    decide whether an interrupted attempt bought anything; it needs to
-    know whether the job exists and what it cost, not what it measured.
-    Handing it a result would hand it the science too.
-    """
-
-    executor: Executor
-
-    def exists(self, job_id: str, /) -> bool:
-        """Whether the executor has ever heard of this job."""
-        try:
-            self.executor.status(job_id)
-        except UnknownJobError:
-            return False
-        return True
-
-    def cost_of(self, job_id: str, /) -> ResourceCost | None:
-        """What the job cost, or ``None`` when it cannot be collected —
-        a job whose process died leaves a record saying it began and
-        nothing saying how it ended."""
-        try:
-            return self.executor.collect(job_id).cost
-        except (UnknownJobError, JobNotFinishedError):
-            return None

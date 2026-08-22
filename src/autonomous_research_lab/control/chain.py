@@ -40,6 +40,7 @@ from ..admission.admitter import CandidateAdmitter
 from ..admission.door import AdmissionRefusedError
 from ..admission.store import AdmissionStore
 from ..evidence.file_store import FileEvidenceStore
+from ..execution.salvage import LocalFinishedJobs
 from ..ideation.generator import IdeaGenerator
 from ..ideation.store import IdeationStore
 from ..literature.corpus import LiteratureCorpus
@@ -698,7 +699,12 @@ class ExperimentationStage:
 
         Now the journal says. Every attempt it left open is settled and
         closed before the chain steps again, so what this returns is a
-        state the run genuinely owes nothing from.
+        state the run genuinely owes nothing from. An attempt whose job
+        finished before the crash is collected and completed rather than
+        conservatively abandoned — the collector reads the local
+        executor's layout under ``root/runs``, the same convention the
+        verifier checks; a lab running jobs elsewhere simply salvages
+        nothing and keeps the conservative answers.
         """
         run_id = context.facts.require(Fact.RUN_ID)
         report = recover(
@@ -708,6 +714,7 @@ class ExperimentationStage:
             states=context.stores.states,
             evidence=context.stores.evidence,
             fallback_state_id=plan.subject_id,
+            jobs=LocalFinishedJobs(context.stores.root / "runs"),
         )
         if not report.anything_to_do:
             return None

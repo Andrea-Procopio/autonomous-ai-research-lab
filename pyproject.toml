@@ -23,6 +23,10 @@ dependencies = []
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "ruff>=0.6", "mypy>=1.11"]
+# Host-backend training only. Container backends get torch from the
+# pinned image, never from the host environment; staging a dataset
+# needs neither. See docs/EXECUTION.md.
+vision = ["torch>=2.4,<3", "torchvision>=0.19,<1"]
 
 [project.scripts]
 arl = "autonomous_research_lab.control.cli:main"
@@ -57,3 +61,10 @@ files = ["src", "tests", "examples"]
 strict = true
 warn_unused_ignores = true
 warn_unreachable = true
+
+# Templates are trusted source the engineer's model completes; they run
+# inside a torch-equipped image or a [vision] host env, never in the
+# lab's own process. CI has no torch, so its imports resolve to Any.
+[[tool.mypy.overrides]]
+module = ["torch", "torch.*", "torchvision", "torchvision.*"]
+ignore_missing_imports = true

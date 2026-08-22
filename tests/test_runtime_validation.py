@@ -95,6 +95,42 @@ def test_result_from_a_different_spec_is_caught() -> None:
     assert any(c.name == "result_matches_spec" for c in report.failures)
 
 
+def test_an_orphaned_success_passes_with_its_honest_record() -> None:
+    """A reaped run's exit code is None — the submitter died before
+    observing it — and the executor decided COMPLETED from the contract's
+    own evidence. The gate must not refuse the truthful record of how the
+    job was recovered."""
+    report = validate_result(
+        SPEC,
+        _result(
+            metrics={"accuracy": 0.95, "loss": 0.1}, exit_code=None
+        ),
+    )
+    check = next(c for c in report.checks if c.name == "process_completed")
+    assert check.passed
+    assert "unobserved" in check.detail
+
+
+def test_an_unobserved_exit_with_a_failure_reason_still_fails() -> None:
+    """An orphan the reaper called FAILED carries its reason; the missing
+    exit code excuses nothing."""
+    failed = ExperimentResult(
+        spec_id=SPEC.id,
+        job_id="job_test",
+        status=ExperimentStatus.FAILED,
+        command=("run",),
+        environment=ENV,
+        metrics={},
+        seed=7,
+        exit_code=None,
+        failure_reason="orphaned: the submitting process died; no metrics",
+    )
+    report = validate_result(SPEC, failed)
+    check = next(c for c in report.checks if c.name == "process_completed")
+    assert not check.passed
+    assert "orphaned" in check.detail
+
+
 def test_failed_process_is_caught() -> None:
     report = validate_result(
         SPEC,
