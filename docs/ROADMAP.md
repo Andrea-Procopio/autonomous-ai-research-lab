@@ -296,6 +296,40 @@ human in the loop, producing results that survive scrutiny.
   `ModelBackedPlanner` seat is Task 7B (the catalog already fits its
   gate, tested); and checkpoint-resume of a half-trained job is 7A.1,
   designed against a real workload now that one exists.
+- **The live planner seat.** Done (Task 7B, 2026-08-22). The hand-off
+  7A promised: once the deterministic follow-through is done and
+  verified findings exist, the model-backed planner shares the
+  director's seat — it may pre-register new science under
+  `check_decision`, and it may end the investigation with a typed
+  reason. The composite director routes by what the pure rule-based
+  director would do: structural and analytical work is returned as-is;
+  execution work is delegated to the planning director exactly when a
+  planning record owns it (so dispatch bookkeeping lands on planner
+  work and stays off bootstrap work, and a bare replication gap never
+  becomes an unintended billed consultation); a rule-based stop becomes
+  a consultation when findings exist and no earlier consultation ended
+  in terminal rejection — a guard read from the planning store, because
+  the frontier's failed-attempt view goes blind to a failed
+  consultation once any other has succeeded. The planning director is
+  called at most once per step and never speculatively. The engineer's
+  fixed-region judgment moved into the generation-repair loop as an
+  injected `CompletionReview`, so a completion that edits trusted
+  measurement code earns one corrective call naming exactly what it
+  must not touch; the preflight check remains as backstop. Qualified
+  live on 2026-08-22 with real training: after the three bootstrap runs
+  (contrasts +0.040/+0.044/+0.060), the scripted planner pre-registered
+  an effect-size floor of 0.01 on the admitted contrast and ran it
+  through the same trusted template at a fresh seed — observed +0.069,
+  CONSISTENT — then stopped with `question_resolved`, citing its
+  evidence; four verified results, two SUPPORTED assessments, both
+  planning decisions dispatched, zero rejected consultations, and a
+  clean cold verify. Building it caught the one reference rule the 7A
+  gate-fit test had not covered: a stop decision must still name its
+  question. Still open, deliberately: the live Muse-backed planner is
+  wired (`lab()`) but needs an operator key; folding the composite's
+  structural-work fallback into `PlanningDirector` itself is a later
+  src task; richer planner storylines (ablations, replications) await a
+  campaign that needs them.
 - **Scientific debugging and experiment verification.** Done in its
   Phase 1 form: the five-way failure taxonomy (engineering /
   implementation / methodological / analytical / verified), a

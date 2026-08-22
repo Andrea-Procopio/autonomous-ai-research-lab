@@ -2377,22 +2377,40 @@ GPU occupancy so a reservation covers what the executor will bill.
 (`# ARL-FIXED-BEGIN/END`) cover seeding, data loading, splits, the
 probe, the positive control, and every byte that writes
 `metrics.json`; the one slot is the encoder architecture the engineer's
-model completes. `FixedRegionCheck` — a lab-side preflight injected
-through the engineer's existing `preflight_checks` seam — refuses any
-completion that edits a fixed byte, after the rejected payload is
-preserved and before anything executes. Trusted measurement stays
+model completes. `FixedRegionReview` — an injected
+`CompletionReview` running inside the engineer's bounded
+generation-repair loop — rejects a completion that edits a fixed byte
+before anything persists, and the rejection's exact words become the
+one corrective call the model gets. `FixedRegionCheck`, the same
+judgment as a preflight, stays as the backstop: the review gives
+feedback, the check refuses execution. Trusted measurement stays
 trusted because nothing else can touch it.
 
-**The model holds one seat.** The scientist that designs the experiment
-copies the admitted metric verbatim from the prediction into a spec the
-catalog serves, and the analyst maps prediction tests to a verdict —
-both trusted code, canary-pattern, because the funded state already
-committed to the question. `RuleBasedFrontierDirector` walks the arc:
-design, run, replicate across the declared seeds, synthesize, assess,
-stop. The `ModelBackedPlanner` takes the scientist's seat in Task 7B —
-its gate demands cited admissible evidence, which a fresh funded state
-cannot supply, and the deterministic designer is the honest bootstrap
-(the catalog already fits `check_decision`; the fit is tested).
+**The model earns its seats.** The scientist that designs the bootstrap
+experiment copies the admitted metric verbatim into a spec the catalog
+serves, and the analyst maps prediction tests to a verdict — both
+trusted code, because the funded state already committed to the
+question and the planner's gate demands cited admissible evidence a
+fresh funded state cannot supply. Since Task 7B the composite director
+(`direction.py`) hands the seat onward: it consults the pure rule-based
+director first and returns its structural work as-is; delegates
+execution work to the `PlanningDirector` exactly when a planning record
+owns it (dispatch bookkeeping on planner work, rule-based economics on
+bootstrap work — and a bare replication gap is never delegated, because
+the planning director would fall through to an unintended billed
+consultation); and turns a rule-based stop into a planner consultation
+when verified findings exist and no earlier consultation ended in
+terminal rejection — a guard read from the planning store, because the
+frontier's failed-attempt view goes blind to a failed consultation once
+any other has succeeded. The planning director is called at most once
+per step, never speculatively: its deliberation writes dispatch
+bookkeeping, and a discarded call would bill work nobody dispatched.
+One seat role spans both halves — the deterministic scientist for
+design and synthesis, the `ModelBackedPlanner` for exactly the
+consultation. In the qualified arc the planner did what a good one
+would: pre-registered an effect-size floor on the admitted sign-only
+contrast, ran it through the same trusted template at a fresh seed, and
+stopped with a typed `question_resolved`, citing its evidence.
 
 **Execution is backend-agnostic by deployment data.** An
 `ExecutionProfile` (operator JSON: host-cpu, host-mps, host-cuda,
