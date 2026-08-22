@@ -42,6 +42,9 @@ from autonomous_research_lab.core.state import ResearchState
 from autonomous_research_lab.evidence.file_store import FileEvidenceStore
 from autonomous_research_lab.execution.runner import DirectJobRunner
 from autonomous_research_lab.literature.openalex import OpenAlexProvider
+from autonomous_research_lab.literature.resolution import (
+    AccessResolvingProvider,
+)
 from autonomous_research_lab.literature.retrieval import LiteratureProvider
 from autonomous_research_lab.orchestration.director import (
     FrontierDirector,
@@ -172,7 +175,7 @@ class VisionLab:
     def literature_provider(self) -> LiteratureProvider:
         if self.scripted:
             return VisionScriptedLiterature()
-        return OpenAlexProvider()
+        return AccessResolvingProvider(OpenAlexProvider())
 
     def runtime(self, request: RuntimeRequest, /) -> ResearchRuntime:
         state = _funded_state(request)

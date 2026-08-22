@@ -39,6 +39,7 @@ from typing import Protocol, cast
 
 from ..evidence.store import EvidenceStore
 from ..literature.openalex import OpenAlexProvider
+from ..literature.resolution import AccessResolvingProvider
 from ..literature.retrieval import LiteratureProvider
 from ..orchestration.loop import ResearchRuntime
 from ..persistence import FileStateStore
@@ -111,7 +112,7 @@ class DefaultLab:
         return MuseSparkProvider()
 
     def literature_provider(self) -> LiteratureProvider:
-        return OpenAlexProvider()
+        return AccessResolvingProvider(OpenAlexProvider())
 
     def runtime(self, request: RuntimeRequest) -> ResearchRuntime:
         raise ExperimentationUnavailableError(
