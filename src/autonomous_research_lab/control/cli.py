@@ -1,6 +1,6 @@
 """``arl`` — the front door.
 
-Seven verbs, and no state of their own::
+Eight verbs, and no state of their own::
 
     arl run CONFIG --root DIR [--lab module:factory] [--stop-after STAGE]
     arl resume [INVESTIGATION] --root DIR [--lab module:factory]
@@ -11,6 +11,8 @@ Seven verbs, and no state of their own::
         [--model NAME] [--out DIR]
     arl review [INVESTIGATION] --root DIR [--lab module:factory]
         [--model NAME] [--out DIR] [--review-only]
+    arl render [INVESTIGATION] --root DIR (--venue NAME | --venue-config FILE)
+        [--kits DIR] [--out DIR] [--pdf]
 
 ``run`` records the config and walks as far as it can. ``resume`` picks
 up exactly where a walk stopped, using the config the investigation
@@ -32,7 +34,12 @@ that draft: trusted code and one gated model call judge whether the
 prose claims anything the packet does not record, every finding
 grounded in a verbatim quote and a record id or refused. A REVISE
 verdict triggers at most one revision-and-re-review cycle; a standing
-REVISE after it exits 1 with the findings printed.
+REVISE after it exits 1 with the findings printed. ``render`` typesets
+the approved draft for a venue: trusted code renders ``main.tex`` and
+``references.bib`` into a write-once submission tree beside the staged
+kit's verified files — refused while the standing review is anything
+but approved. ``--pdf`` additionally compiles when a LaTeX toolchain is
+installed; the PDF is a derived artifact, never a record.
 
 Exit codes are meant to be read by a script as well as a person: ``0``
 for a walk that ended on its own terms, including an honest scientific
@@ -53,6 +60,8 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from ..program.integrity import verify_run
+from ..publication.kits import KitIntegrityError
+from ..publication.latex import VenueError
 from ..publication.manuscript import ManuscriptError, NothingToReportError
 from ..publication.packet import PacketError
 from ..publication.review import (
@@ -67,6 +76,7 @@ from .investigation import InvestigationStore
 from .lab import Lab, LabError, load_lab
 from .manuscript import author_manuscript
 from .packet import build_packet, write_packet
+from .render import NotApprovedError, RenderError, render_submission
 from .review import review_manuscript
 from .stage import CHAIN_ORDER, MissingFactError, StageName, StageStatus
 
@@ -103,6 +113,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _manuscript(arguments)
         if arguments.command == "review":
             return _review(arguments)
+        if arguments.command == "render":
+            return _render(arguments)
         return _verify(arguments)
     except (ConfigError, ControllerError, LabError) as error:
         print(f"FATAL: {error}")
@@ -336,6 +348,59 @@ def _review(arguments: argparse.Namespace) -> int:
     return OK
 
 
+def _render(arguments: argparse.Namespace) -> int:
+    root = Path(arguments.root).resolve()
+    if not _exists(root):
+        return FAILED
+    investigation_id = _chosen(root, arguments.investigation)
+    if investigation_id is None:
+        return FAILED
+    try:
+        result = render_submission(
+            root,
+            investigation_id,
+            venue=arguments.venue,
+            venue_config=(
+                Path(arguments.venue_config).resolve()
+                if arguments.venue_config
+                else None
+            ),
+            kits_root=(
+                Path(arguments.kits).resolve() if arguments.kits else None
+            ),
+            out_dir=Path(arguments.out).resolve() if arguments.out else None,
+            pdf=arguments.pdf,
+        )
+    except (
+        MissingFactError,
+        NothingToReportError,
+        NothingToReviewError,
+        NotApprovedError,
+    ) as error:
+        print(f"REFUSED: {error}")
+        return REFUSED
+    except (
+        PacketError,
+        ManuscriptError,
+        ReviewError,
+        VenueError,
+        RenderError,
+        KitIntegrityError,
+    ) as error:
+        print(f"FATAL: {error}")
+        return FAILED
+    print(f"venue         {result.venue.name}")
+    print(f"manuscript    {result.manuscript.manuscript_id}")
+    print(f"review        {result.review.review_id} (approved)")
+    print(f"submission    {result.submission_dir}")
+    print(f"tex           {result.tex_path}")
+    print(f"bib           {result.bib_path}")
+    if result.pdf_path is not None:
+        print(f"pdf           {result.pdf_path}")
+    print(f"replayed      {str(result.replayed).lower()}")
+    return OK
+
+
 # -- helpers ------------------------------------------------------------------
 
 
@@ -493,6 +558,34 @@ def _parser() -> argparse.ArgumentParser:
         "--review-only",
         action="store_true",
         help="record the verdict without the revise cycle",
+    )
+
+    render = commands.add_parser(
+        "render", help="typeset the approved draft for a venue"
+    )
+    render.add_argument("investigation", nargs="?", help="investigation id")
+    _add_root(render)
+    chosen_venue = render.add_mutually_exclusive_group(required=True)
+    chosen_venue.add_argument(
+        "--venue", help="a builtin venue name (plain, neurips, icml, iclr)"
+    )
+    chosen_venue.add_argument(
+        "--venue-config", type=Path, help="a venue spec as JSON"
+    )
+    render.add_argument(
+        "--kits",
+        type=Path,
+        help="the staged-kits directory (required for kit venues)",
+    )
+    render.add_argument(
+        "--out",
+        type=Path,
+        help="submission tree root (default: ROOT/submission)",
+    )
+    render.add_argument(
+        "--pdf",
+        action="store_true",
+        help="also compile with the installed LaTeX toolchain",
     )
     return parser
 
