@@ -2452,6 +2452,64 @@ can serve the engineer a trusted fixture completion of the template's
 slot, which is how the CI walk and the qualification walk keep the
 production engineer contract without a live model.
 
+## The evidence packet (Task 8A)
+
+`publication/` holds the first slice of the publication vertical: the
+evidence packet, a deterministic export of everything a manuscript may
+later claim. The rule it exists to enforce is **checked, not copied** —
+nothing enters the packet by being restated; everything is either
+verified against its own digest or re-derived from the record and held
+to what the record says.
+
+The layering forces a two-module split, and the split is the design:
+
+- `publication/packet.py` — the schema and the pure checks. Flat mirror
+  dataclasses only: strings and numbers, no types from the analysis
+  chain (the seven imported-only-by rules bar `publication` from
+  literature through program, and the composition-root rule bars
+  `control` from constructing `Evidence` — so no packet class is named
+  that either). `replication_family` restates the statistician's family
+  rule on the state's own tuples; `check_statistician_assessment`
+  parses the Bonferroni denominator and alpha out of the recorded
+  rationale — the statistician pins both at assessment time, and the
+  head state can legitimately imply larger ones — re-runs
+  `assess_family`, and requires the re-rendered figures to equal the
+  recorded rationale byte for byte. The duplication of the family rule
+  across the boundary is self-guarding: drift fails the export loudly.
+- `control/packet.py` — the walker. The composition root alone may read
+  every store, so it resolves the investigation, requires the stage
+  log's `STATE_ID` fact (a walk that stopped before funding has no
+  research state; the answer is a typed refusal, exit 2, not a file),
+  gates on `verify_run`, and walks the cold citation chain: run
+  envelope → admission record → selected candidate → cited literature
+  sources. The analysis-chain stores are outside `verify_run`'s scope
+  by design — their loaders re-derive every content id and refuse a
+  doctored record themselves, and the walker maps that refusal, or a
+  read that returns nothing, to a named export failure.
+
+What the packet carries: provenance (run, grant, spend against the
+ledger, the cold-verify counts), the registered science with its
+admission quotes, one finding per claim in the head state — **all** of
+them; an unassessed claim is marked `not-assessed`, never dropped,
+because silent omission is the selective reporting the packet exists to
+prevent — with the assessment verbatim and its figures either
+`re-derived-and-matched` (the statistician's method) or
+`restated-from-record` (any other), evidence rows down to artifact
+digests, the planner's decisions, the bibliography, and per-seed result
+tables where every row names its result id and verification standing.
+Admissibility at export is always governance-on: the durable
+verification records decide, regardless of how the lab was configured.
+
+The packet's own id is a content id over everything in it, and the two
+files (`packet/<packet_id>.json`, `.md`) are write-once: re-exporting an
+unchanged run reproduces the same bytes under the same names, and a
+name collision with different bytes refuses. The `packet/` directory is
+invisible to `verify_run`, so exporting changes nothing the verifier
+checks. Rendered figures do not exist yet, and the packet states that
+absence explicitly rather than implying an omission; manuscript
+generation and the reviewer role (8B/8C) will consume the packet, and
+nothing model-authored enters it.
+
 ## Architectural invariants
 
 The list this pass was made against; each is enforced by at least one

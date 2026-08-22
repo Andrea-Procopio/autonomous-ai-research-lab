@@ -20,7 +20,7 @@ from autonomous_research_lab.control.chain import (
     StageOutcome,
     StagePlan,
 )
-from autonomous_research_lab.control.cli import FAILED, OK, main
+from autonomous_research_lab.control.cli import FAILED, OK, REFUSED, main
 from autonomous_research_lab.control.config import RunConfig
 from autonomous_research_lab.control.controller import Controller
 from autonomous_research_lab.control.lab import LabError, load_lab
@@ -287,3 +287,39 @@ class TestARootThatIsNotThere:
 
         assert code == FAILED
         assert not missing.exists()
+
+
+class TestPacket:
+    """The verb's conventions only — a root with real science to export
+    is walked (once) in test_publication_packet.py."""
+
+    def test_a_walk_without_a_research_state_is_refused(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        prepared(tmp_path)
+
+        code = main(["packet", "--root", str(tmp_path)])
+
+        assert code == REFUSED
+        assert "REFUSED" in capsys.readouterr().out
+
+    def test_several_investigations_are_a_question_not_a_guess(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        first = prepared(tmp_path, label="first")
+        second = prepared(tmp_path, label="second")
+
+        code = main(["packet", "--root", str(tmp_path)])
+
+        printed = capsys.readouterr().out
+        assert code == FAILED
+        assert first in printed
+        assert second in printed
+
+    def test_a_missing_root_is_named(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        code = main(["packet", "--root", str(tmp_path / "nowhere")])
+
+        assert code == FAILED
+        assert "no run root" in capsys.readouterr().out
