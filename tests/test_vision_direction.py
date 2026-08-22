@@ -10,9 +10,13 @@ from autonomous_research_lab.core.assessment import (
     AssessmentVerdict,
     EpistemicAssessment,
 )
-from autonomous_research_lab.core.budget import ResearchBudget
+from autonomous_research_lab.core.budget import ResearchBudget, ResourceCost
 from autonomous_research_lab.core.evidence import Evidence, EvidenceKind
-from autonomous_research_lab.core.experiment import ExperimentSpec
+from autonomous_research_lab.core.experiment import (
+    ExperimentSpec,
+    ExperimentStatus,
+    ResultRef,
+)
 from autonomous_research_lab.core.hypothesis import Hypothesis
 from autonomous_research_lab.core.prediction import Comparator, Prediction
 from autonomous_research_lab.core.question import ResearchQuestion
@@ -306,4 +310,68 @@ class TestScriptedDecisions:
         assert payload["evidence_ids"] == [EVIDENCE.id]
         assert (
             check_decision(payload, context=context, catalog=catalog) == ()
+        )
+
+
+class TestReplicateFirstUnderRealCosts:
+    """The tie-break trap the playbook exists to close: with a real
+    trainer's cost estimate, synthesis outbids replication at equal
+    MEDIUM value and the claim would be judged at n=1 — permanently.
+    The playbook's replication-gap advice boosts REPLICATE to HIGH."""
+
+    def costly_frontier(self) -> ResearchFrontier:
+        expensive = ExperimentSpec(
+            prediction_id=PREDICTION.id,
+            objective="measure the contrast",
+            procedure="run the template",
+            metrics=(ENCODER_METRIC,),
+            seeds=(11, 23, 47, 71, 83),
+            estimated_cost=ResourceCost(wall_clock_seconds=600.0),
+        )
+        return frontier(
+            replication_gaps=(expensive,),
+            unsynthesized_evidence=("ev_1",),
+            recent_results=(
+                ResultRef(
+                    result_id="res_1",
+                    spec_id=expensive.id,
+                    status=ExperimentStatus.COMPLETED,
+                ),
+            ),
+        )
+
+    def test_without_advice_synthesis_outbids_replication(self) -> None:
+        from autonomous_research_lab.orchestration.director import (
+            RuleBasedFrontierDirector,
+        )
+
+        chosen = RuleBasedFrontierDirector().deliberate(
+            self.costly_frontier()
+        )
+        assert chosen.selected is not None
+        assert (
+            chosen.selected.action.action_type
+            is ResearchActionType.SYNTHESIZE_FINDING
+        )
+
+    def test_the_playbook_restores_replicate_first(self) -> None:
+        from autonomous_research_lab.orchestration.director import (
+            RuleBasedFrontierDirector,
+        )
+        from autonomous_research_lab.runtime.playbook import (
+            EmpiricalMLPlaybook,
+        )
+
+        watched = self.costly_frontier()
+        advice = EmpiricalMLPlaybook().advise(watched)
+        assert advice is not None
+
+        chosen = RuleBasedFrontierDirector().deliberate(
+            watched, advice=advice
+        )
+
+        assert chosen.selected is not None
+        assert (
+            chosen.selected.action.action_type
+            is ResearchActionType.REPLICATE
         )

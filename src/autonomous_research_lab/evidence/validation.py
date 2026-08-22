@@ -37,8 +37,12 @@ from ..core.prediction import Consistency
 from ..core.state import ResearchState
 from .store import EvidenceStore, UnknownRecordError
 
-_CONCLUSIVE = frozenset(
+#: The verdicts that require grounds: every one of these leans somewhere,
+#: and a lean that cites nothing is exactly the ungrounded judgment this
+#: check exists to surface. Only UNDETERMINED may stand on no evidence.
+_REQUIRES_GROUNDS = frozenset(
     {
+        AssessmentVerdict.PLAUSIBLE,
         AssessmentVerdict.SUPPORTED,
         AssessmentVerdict.REFUTED,
         AssessmentVerdict.CONTESTED,
@@ -203,7 +207,10 @@ def validate_evidence_chain(
                         detail=f"assessment cites unavailable evidence {evidence_id}",
                     )
                 )
-        if assessment.verdict in _CONCLUSIVE and not assessment.evidence_ids:
+        if (
+            assessment.verdict in _REQUIRES_GROUNDS
+            and not assessment.evidence_ids
+        ):
             issues.append(
                 ChainIssue(
                     kind=ChainIssueKind.UNGROUNDED_ASSESSMENT,
