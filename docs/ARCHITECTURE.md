@@ -2557,6 +2557,58 @@ routing, but not a place in `CHAIN_ORDER` — a manuscript is exported
 from a finished run, never walked to, and a config naming it as
 `stop_after` is refused.
 
+## The faithfulness reviewer (Task 8C)
+
+The reviewer answers one question — does the prose claim anything the
+packet does not record? — and holds its own criticism to the same
+standard admission holds support quotes to. Two kinds of finding
+exist, both grounded:
+
+- **deterministic findings** — trusted code's reading, before any
+  model runs: a forbidden-strength phrase (`statistically
+  significant`, `proves`, `novel`, `state-of-the-art` …) that no
+  verdict in this system ever licenses, or a verdict word appearing in
+  prose when no claim's assessment records that verdict. The
+  unlicensed-verdict gate fires only when the verdict is absent from
+  the packet entirely — zero false positives on faithful drafts, with
+  the model seat covering misuse of licensed words;
+- **model findings** — one gated call returns structured findings, and
+  each must survive mechanical verification: the quote must appear
+  verbatim (case- and whitespace-folded, admission's rule) in the
+  named section, and the cited record id must be one the packet
+  prints. The schema makes invention unexpressible — the subject enum
+  holds exactly this packet's printed ids — and an ungrounded finding
+  earns a corrective call, not a hearing.
+
+The verdict is derived by trusted code — REVISE iff any finding stands
+— and the model's schema has no verdict property, so the one judgment
+that matters is never the model's to output. Before any spend, two
+zero-cost checks run: the draft must belong to the packet, and it must
+still pass the author's own gates (a recorded draft that no longer
+does means the gate code drifted, and reviewing on top of drift would
+judge the wrong document).
+
+**One bounded revise cycle, every state durable.** A REVISE review is
+recorded — findings and spend on disk — before any revision is
+attempted. The revision is a new manuscript authored with the grounded
+findings in its request; succession is then recorded as its own
+write-once fact, a `RevisionRecord` naming the review, the superseded
+draft, and the successor, the way an assessment supersedes an
+assessment — the manuscript's schema and identity never change. The
+revision is reviewed once more, and the cycle ends there: if any
+revision record exists for a packet, no further draft is ever
+authored — a standing REVISE replays idempotently and the operator
+reads its findings. Every crash window between those writes recovers
+by deterministic dispatch on the durable record (an orphaned revision
+with exactly one unresolved REVISE review is adopted; any other
+multi-head state is a hand-edited store and a refusal).
+
+The reviewer is deliberately not a venue simulator: it judges
+faithfulness against the record, where questions have checkable
+answers. Conference-readiness scoring — an impression instrument — is
+a separate, later seat (8E), and its feedback will drive prose
+revision under these same gates, never past them.
+
 ## Architectural invariants
 
 The list this pass was made against; each is enforced by at least one
@@ -2685,7 +2737,7 @@ control       the composition root: one command over the seven stages,
               the stage event log, and the recovery that finishes a
               step a killed process left half done  (may import every
               stage; nothing imports it)
-publication   the evidence packet and the gated manuscript
+publication   the evidence packet, the gated manuscript, the reviewer
 ```
 
 Dependencies point downward only; `core` imports nothing from its
