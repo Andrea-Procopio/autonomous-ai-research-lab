@@ -2339,6 +2339,86 @@ attempt's whole cost, which is true of a repair rerun and not of a step
 whose role also made model calls; that distinction is what the work
 would have to establish.
 
+## The vision lab (Task 7A)
+
+The first production lab: `--lab examples.vision_lab:lab` (or
+`:qualification_lab`, `:ci_lab`) supplies what `DefaultLab` refuses —
+roles, an executor, and a trusted template catalog — and what executes
+in the seventh stage is genuine CIFAR-scale representation learning.
+The lab lives under `examples/`, outside the package, because a lab
+must import the composition root and nothing under `src/` may (layering
+rule 12); `canary_lab` set the precedent.
+
+**Measurability is a gate, and refusal is the honest outcome.** An
+admitted prediction's metric is the verbatim string admission encoded —
+`difference in {base}: {higher arm} minus {lower arm}` — and the
+mechanical test reads `result.metrics[that string]` exactly. The lab's
+capability is therefore a closed table of contrasts its templates
+genuinely compute (`measure.py`), and composition's first act on a
+funded state is to parse every admitted prediction against it. What the
+lab cannot measure raises `UnmeasurablePredictionsError`, a subclass of
+`ExperimentationUnavailableError`, so the stage records REFUSED and the
+CLI exits 2 with every unmeasurable string named — before any spend. An
+experiment that could only ever come back INCONCLUSIVE is not an
+experiment. `examples/vision_refusal.py` proves this against the real
+preserved Task 5F admission, whose attention-head observables no vision
+template measures.
+
+**The admitted metric reaches the trainer by substitution, not
+transcription.** `catalog.py` writes the admitted string into a fixed
+placeholder in the template source at catalog build — trusted,
+deterministic, and recorded, because the template id is a content id
+over the substituted source and every `ImplementationRecord` carries
+it. The capability's metrics are the closed set the planner gate can
+hold future decisions to; its cost estimate picks up the deployment's
+GPU occupancy so a reservation covers what the executor will bill.
+
+**Templates are fixed programs with one slot.** Fenced regions
+(`# ARL-FIXED-BEGIN/END`) cover seeding, data loading, splits, the
+probe, the positive control, and every byte that writes
+`metrics.json`; the one slot is the encoder architecture the engineer's
+model completes. `FixedRegionCheck` — a lab-side preflight injected
+through the engineer's existing `preflight_checks` seam — refuses any
+completion that edits a fixed byte, after the rejected payload is
+preserved and before anything executes. Trusted measurement stays
+trusted because nothing else can touch it.
+
+**The model holds one seat.** The scientist that designs the experiment
+copies the admitted metric verbatim from the prediction into a spec the
+catalog serves, and the analyst maps prediction tests to a verdict —
+both trusted code, canary-pattern, because the funded state already
+committed to the question. `RuleBasedFrontierDirector` walks the arc:
+design, run, replicate across the declared seeds, synthesize, assess,
+stop. The `ModelBackedPlanner` takes the scientist's seat in Task 7B —
+its gate demands cited admissible evidence, which a fresh funded state
+cannot supply, and the deterministic designer is the honest bootstrap
+(the catalog already fits `check_decision`; the fit is tested).
+
+**Execution is backend-agnostic by deployment data.** An
+`ExecutionProfile` (operator JSON: host-cpu, host-mps, host-cuda,
+container-cpu, container-cuda) resolves onto the existing `JobBinding`
+and `Executor` seams; the spec, predictions, state, and gate decisions
+are byte-identical across backends, and only the job's command, GPU
+occupancy, timeout, and dataset path differ — execution provenance,
+recorded in the job record. Container backends require a digest-pinned
+image the operator pre-pulled; live model-generated code runs on a host
+only when the deployment file says `allow_generated_code_on_host` in so
+many words. Datasets reach network-less jobs as operator-staged bytes
+under a content-addressed manifest (`datasets.py`): the manifest id
+derives from per-file digests, so `dataset_id` in job config is
+machine-independent, and the `DatasetStaged` preflight re-hashes the
+staged files before every launch.
+
+**Governance stays on.** The lab wires the structural methodology
+reviewer, the catalog's tiny-subset overfit control, and — mandatory,
+because `runtime()` is rebuilt every step — a `FileVerificationStore`,
+so promotion gating survives per-step rebuilds. The scripted
+instruments (`scripted.py`, the canary pattern in vision vocabulary)
+let the whole chain run with zero network; the same scripted provider
+can serve the engineer a trusted fixture completion of the template's
+slot, which is how the CI walk and the qualification walk keep the
+production engineer contract without a live model.
+
 ## Architectural invariants
 
 The list this pass was made against; each is enforced by at least one

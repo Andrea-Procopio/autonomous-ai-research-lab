@@ -118,6 +118,12 @@ class ExperimentJob:
     segments are rejected at construction, and executors re-check the
     resolved path (symlinks included) at collection time."""
 
+    gpu_count: int = 0
+    """GPUs this job occupies for its whole wall-clock life. Occupancy,
+    not utilization: the accounting question is what the lab could not
+    schedule elsewhere while this ran, not what the kernels achieved.
+    Zero for CPU jobs, and the executor bills ``gpu_hours`` from it."""
+
     id: str = field(default="")
 
     def __post_init__(self) -> None:
@@ -127,6 +133,8 @@ class ExperimentJob:
             raise ValueError("job command must be non-empty")
         if self.timeout_seconds <= 0 or not math.isfinite(self.timeout_seconds):
             raise ValueError("timeout_seconds must be positive and finite")
+        if self.gpu_count < 0:
+            raise ValueError("gpu_count cannot be negative")
         for relative in self.required_artifacts:
             path = PurePath(relative)
             if not relative.strip() or path.is_absolute() or ".." in path.parts:

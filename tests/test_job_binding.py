@@ -125,6 +125,143 @@ def test_the_container_policy_is_contained_by_construction() -> None:
     )
 
 
+def test_the_loaded_policy_is_contained_by_construction() -> None:
+    """The GPU, shared-memory and dataset extensions, pinned the same way:
+    every flag they add is enumerated here, and nothing else appears."""
+    command = docker_run_command(
+        image="python@sha256:deadbeef",
+        source_dir=Path("/work/src"),
+        entrypoint="experiment.py",
+        run_dir=Path("/work/run"),
+        memory="8g",
+        pids_limit=1024,
+        cpus=4.0,
+        seed="7",
+        container_name="arl-job_1",
+        gpus=1,
+        shm_size="2g",
+        data_mounts=((Path("/data/cifar10"), "cifar10"),),
+    )
+
+    def follows(flag: str) -> str:
+        return command[command.index(flag) + 1]
+
+    assert follows("--gpus") == "1"
+    assert follows("--shm-size") == "2g"
+    assert "/data/cifar10:/arl/data/cifar10:ro" in command
+    assert "ARL_DATA_DIR=/arl/data" in command
+    assert "HOME=/tmp" in command
+    # The tail is unchanged: the entrypoint still runs from the read-only
+    # mount, inside the pinned image.
+    assert command[-3:] == (
+        "python@sha256:deadbeef",
+        "python",
+        "/arl/src/experiment.py",
+    )
+
+
+def test_the_default_policy_emits_nothing_gpu_or_data_shaped() -> None:
+    command = docker_run_command(
+        image="img",
+        source_dir=Path("/s"),
+        entrypoint="experiment.py",
+        run_dir=Path("/r"),
+        memory="1g",
+        pids_limit=8,
+        cpus=1.0,
+        seed=None,
+        container_name="arl-x",
+    )
+    assert "--gpus" not in command
+    assert "--shm-size" not in command
+    assert "ARL_DATA_DIR=/arl/data" not in command
+    assert not any("/arl/data" in part for part in command if ":" in part)
+    # HOME is tmpfs-bound unconditionally: the root filesystem is
+    # read-only, and library caches need somewhere legal to land.
+    assert "HOME=/tmp" in command
+
+
+def test_data_mounts_are_read_only_by_construction() -> None:
+    command = docker_run_command(
+        image="img",
+        source_dir=Path("/s"),
+        entrypoint="experiment.py",
+        run_dir=Path("/r"),
+        memory="1g",
+        pids_limit=8,
+        cpus=1.0,
+        seed=None,
+        container_name="arl-x",
+        data_mounts=((Path("/d/a"), "a"), (Path("/d/b"), "b")),
+    )
+    mounts = [
+        command[i + 1]
+        for i, part in enumerate(command)
+        if part == "-v" and "/arl/data/" in command[i + 1]
+    ]
+    assert len(mounts) == 2
+    assert all(mount.endswith(":ro") for mount in mounts)
+
+
+def test_gpus_reach_the_job_as_occupancy(tmp_path: Path) -> None:
+    job = ContainerBinding(image="img", gpus=2).bind(
+        spec_id="exp_1",
+        source_dir=tmp_path,
+        entrypoint="experiment.py",
+        config={},
+        seed=None,
+    )
+    assert job.gpu_count == 2
+    assert tuple(job.command[-2:]) == ("--gpus", "2")
+
+    host = HostPythonBinding(gpu_count=1).bind(
+        spec_id="exp_1",
+        source_dir=tmp_path,
+        entrypoint="experiment.py",
+        config={},
+        seed=None,
+    )
+    assert host.gpu_count == 1
+
+
+def test_a_default_binding_declares_no_new_policy(tmp_path: Path) -> None:
+    job = ContainerBinding(image="img").bind(
+        spec_id="exp_1",
+        source_dir=tmp_path,
+        entrypoint="experiment.py",
+        config={},
+        seed=None,
+    )
+    assert job.gpu_count == 0
+    assert "--gpus" not in job.command
+    assert "--shm-size" not in job.command
+    assert "--data" not in job.command
+
+
+def test_data_mount_names_must_be_plain_and_unique() -> None:
+    for bad in ("", "a/b", ".."):
+        with pytest.raises(ValueError, match="plain directory name"):
+            ContainerBinding(image="img", data_mounts=(("/d", bad),))
+    with pytest.raises(ValueError, match="unique"):
+        ContainerBinding(
+            image="img", data_mounts=(("/d1", "same"), ("/d2", "same"))
+        )
+
+
+def test_a_binding_passes_data_mounts_to_the_shim(tmp_path: Path) -> None:
+    job = ContainerBinding(
+        image="img", data_mounts=(("/data/cifar10", "cifar10"),)
+    ).bind(
+        spec_id="exp_1",
+        source_dir=tmp_path,
+        entrypoint="experiment.py",
+        config={},
+        seed=None,
+    )
+    position = job.command.index("--data")
+    assert job.command[position + 1] == "/data/cifar10:cifar10"
+
+
 def test_seedless_jobs_export_no_seed() -> None:
     command = docker_run_command(
         image="img",

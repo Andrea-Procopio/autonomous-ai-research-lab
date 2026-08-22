@@ -16,8 +16,9 @@ Two bindings, one contract:
   and live model-generated code must not run on the host.
 * :class:`ContainerBinding` runs the entrypoint inside a disposable
   container via the :mod:`~autonomous_research_lab.execution.container_shim`
-  launcher: network disabled, only the source tree (read-only) and the run
-  directory mounted, capabilities dropped, finite memory/pids/cpu/time, a
+  launcher: network disabled, only the source tree (read-only), the run
+  directory, and any declared dataset mounts (read-only) reachable,
+  capabilities dropped, finite memory/pids/cpu/time, a
   pinned preinstalled image, and no runtime pulls. The container's Linux VM
   boundary is what makes live generated code safe to execute at all.
 
@@ -69,6 +70,10 @@ class HostPythonBinding:
     source only, never live model output (see module docstring)."""
 
     timeout_seconds: float = 120.0
+    gpu_count: int = 0
+    """GPUs the bound job occupies (an Apple-silicon host binding says 1).
+    Occupancy for the executor's ``gpu_hours`` accounting, nothing else —
+    the host interpreter sees whatever devices the host exposes."""
 
     def bind(
         self,
@@ -87,6 +92,7 @@ class HostPythonBinding:
             seed=seed,
             timeout_seconds=self.timeout_seconds,
             required_artifacts=(METRICS_ARTIFACT,),
+            gpu_count=self.gpu_count,
             id=job_id,
         )
 
@@ -124,6 +130,35 @@ class ContainerBinding:
 
     launch_margin_seconds: float = 60.0
 
+    gpus: int = 0
+    """GPUs handed to the container (``--gpus <n>``) and occupied for the
+    job's whole wall-clock life. Linux hosts only: there is no GPU
+    passthrough under a macOS Docker VM (colima included), and asking for
+    one there is a daemon error, not a degraded mode."""
+
+    shm_size: str | None = None
+    """``--shm-size`` for the container. Torch DataLoader workers exchange
+    tensors over ``/dev/shm``, and Docker's 64 MB default starves them;
+    ``None`` keeps the default for jobs that need nothing more."""
+
+    data_mounts: tuple[tuple[str, str], ...] = ()
+    """``(host_dir, name)`` pairs mounted read-only at ``/arl/data/<name>``.
+    The one way dataset bytes reach a network-less container: staged by
+    trusted code on the host, verified against a manifest before launch,
+    and never writable from inside."""
+
+    def __post_init__(self) -> None:
+        if self.gpus < 0:
+            raise ValueError("gpus cannot be negative")
+        names = [name for _, name in self.data_mounts]
+        for name in names:
+            if not name.strip() or "/" in name or ".." in name:
+                raise ValueError(
+                    f"data mount name {name!r} must be a plain directory name"
+                )
+        if len(names) != len(set(names)):
+            raise ValueError("data mount names must be unique")
+
     def bind(
         self,
         *,
@@ -159,11 +194,23 @@ class ContainerBinding:
                 str(self.cpus),
                 "--timeout",
                 str(self.timeout_seconds),
+                *(
+                    part
+                    for host_dir, name in self.data_mounts
+                    for part in ("--data", f"{host_dir}:{name}")
+                ),
+                *(
+                    ("--shm-size", self.shm_size)
+                    if self.shm_size is not None
+                    else ()
+                ),
+                *(("--gpus", str(self.gpus)) if self.gpus else ()),
             ),
             config=config,
             env=env,
             seed=seed,
             timeout_seconds=self.timeout_seconds + self.launch_margin_seconds,
             required_artifacts=(METRICS_ARTIFACT,),
+            gpu_count=self.gpus,
             id=job_id,
         )

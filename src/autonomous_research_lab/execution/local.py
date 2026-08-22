@@ -61,7 +61,8 @@ import signal
 import subprocess
 import sys
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Final
 
@@ -126,6 +127,37 @@ class MalformedJobRecordError(RuntimeError):
     invite resubmitting it."""
 
 
+@dataclass(frozen=True, slots=True)
+class _JobFacts:
+    """What the durable record knows about a job before it ends.
+
+    Everything :func:`_finalize` needs, captured at submission and written
+    into the RUNNING record — so a *different* process, holding nothing
+    but ``job.json``, can finish the bookkeeping of a job whose submitter
+    died. The environment is captured once, before launch, and reused for
+    the result: one capture, both paths agree.
+    """
+
+    job_id: str
+    spec_id: str
+    command: tuple[str, ...]
+    config: dict[str, ConfigValue]
+    seed: int | None
+    required_artifacts: tuple[str, ...]
+    timeout_seconds: float
+    gpu_count: int
+    environment: Environment
+    started_at: float
+    """Unix seconds (wall clock, not monotonic — it must mean the same
+    thing to the process that reads it as to the one that wrote it)."""
+
+    pid: int | None
+    """The child's process id, written by a second rewrite of the RUNNING
+    record immediately after launch. Absent means the crash landed between
+    the two writes — and an orphan whose process cannot be probed is one
+    the reaper refuses to touch."""
+
+
 class LocalExecutor(Executor):
     def __init__(self, run_root: Path | str) -> None:
         self._run_root = Path(run_root)
@@ -147,9 +179,6 @@ class LocalExecutor(Executor):
         self._status[job.id] = JobStatus.RUNNING
         run_dir = self._run_root / job.id
         run_dir.mkdir(parents=True, exist_ok=True)
-        # Written before the process starts: a job nobody wrote down first
-        # is a job no later process can find.
-        self._write_record(job, JobStatus.RUNNING, None)
 
         if job.working_dir is not None:
             working_dir = job.working_dir
@@ -186,58 +215,117 @@ class LocalExecutor(Executor):
         if job.seed is not None:
             env["ARL_SEED"] = str(job.seed)
 
+        # Written before the process starts: a job nobody wrote down first
+        # is a job no later process can find. The record carries everything
+        # finalization needs — the environment included, captured once, so
+        # the record and the eventual result cannot disagree about it.
+        facts = _JobFacts(
+            job_id=job.id,
+            spec_id=job.spec_id,
+            command=job.command,
+            config=dict(job.config),
+            seed=job.seed,
+            required_artifacts=job.required_artifacts,
+            timeout_seconds=job.timeout_seconds,
+            gpu_count=job.gpu_count,
+            environment=_capture_environment(working_dir),
+            started_at=time.time(),
+            pid=None,
+        )
+        self._write_record(facts, JobStatus.RUNNING, None)
+
         started = time.monotonic()
         exit_code, stdout, stderr, failure_reason = _run_process(
-            job.command, working_dir, env, job.timeout_seconds
+            job.command,
+            working_dir,
+            env,
+            job.timeout_seconds,
+            # The pid lands in the record the instant the child exists, so
+            # a later process can ask whether it is still running. Written
+            # second: a record claiming a pid nobody launched would be the
+            # lie; a launch the record has not caught up with is only a
+            # window the reaper refuses to act in.
+            on_launch=lambda pid: self._write_record(
+                replace(facts, pid=pid), JobStatus.RUNNING, None
+            ),
         )
         runtime = time.monotonic() - started
 
         (run_dir / STDOUT_FILENAME).write_text(stdout)
         (run_dir / STDERR_FILENAME).write_text(stderr)
 
-        metrics: Mapping[str, float] = {}
-        if exit_code == 0:
-            try:
-                metrics = _read_metrics(run_dir / METRICS_FILENAME)
-            except (MalformedMetricsError, FileNotFoundError) as exc:
-                failure_reason = str(exc)
-        elif failure_reason is None:
-            failure_reason = f"exited with code {exit_code}"
-
-        if failure_reason is None:
-            failure_reason = _check_required_artifacts(
-                run_dir, job.required_artifacts
-            )
-
-        job_status = (
-            JobStatus.SUCCEEDED if failure_reason is None else JobStatus.FAILED
-        )
-        self._status[job.id] = job_status
-
-        # Everything the run left behind is preserved and hashed -- failures
-        # included, because a failed run's outputs are diagnostic evidence.
-        artifacts = _collect_artifacts(run_dir)
-        _write_manifest(run_dir, artifacts)
-
-        result = ExperimentResult(
-            spec_id=job.spec_id,
-            job_id=job.id,
-            status=_STATUS_MAP[job_status],
-            command=job.command,
-            environment=_capture_environment(working_dir),
-            metrics=metrics,
-            config=job.config,
-            seed=job.seed,
-            artifacts=artifacts,
-            logs=(str(run_dir / STDOUT_FILENAME), str(run_dir / STDERR_FILENAME)),
-            runtime_seconds=runtime,
-            cost=ResourceCost(wall_clock_seconds=runtime),
+        job_status, result = _finalize(
+            facts,
+            run_dir,
             exit_code=exit_code,
+            runtime=runtime,
             failure_reason=failure_reason,
         )
+        self._status[job.id] = job_status
         self._results[job.id] = result
-        self._write_record(job, job_status, result)
+        self._write_record(facts, job_status, result)
         return job.id
+
+    def reap(self, job_id: str) -> JobStatus:
+        """Finalize an orphan: a job whose record says RUNNING but whose
+        process is provably gone.
+
+        The submitting process is the only one that ever rewrites a job's
+        record, so a RUNNING record plus a dead pid means the submitter
+        died — and the child, launched in its own session, may well have
+        finished its work. This closes the books on it: success is decided
+        by the contract's own evidence (metrics parse, declared artifacts
+        present), because the exit code died with the parent.
+
+        Refuses — by returning ``RUNNING`` unchanged — whenever the death
+        cannot be proven: the pid is alive (or reused: probing cannot tell,
+        and both refuse), or the record predates the fields this needs.
+        Terminal records are a no-op returning their status, so reaping
+        twice is reaping once.
+
+        The measured runtime is the artifacts' clock, not a process timer:
+        newest file mtime minus the recorded start, clamped to the job's
+        own timeout — the executor never charges beyond what it authorized.
+
+        One honest gap: an orphaned *host* child that is still running is
+        unbounded, because the timeout enforcement died with its parent.
+        The container path does not share it — the shim is the job process,
+        and the in-container deadline dies only when the job does.
+        """
+        payload = self._payload(job_id)
+        try:
+            status, result = _record_from(payload)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise MalformedJobRecordError(
+                f"the durable record of job {job_id} cannot be read: {exc}"
+            ) from exc
+        if result is not None:
+            return status
+        facts = _facts_from(payload)
+        if facts is None or facts.pid is None:
+            return JobStatus.RUNNING
+        if _alive(facts.pid):
+            return JobStatus.RUNNING
+
+        run_dir = self._run_root / job_id
+        # The pipes died with the submitter; an empty log is the honest
+        # record of that, and finalization expects the files to exist.
+        for name in (STDOUT_FILENAME, STDERR_FILENAME):
+            log = run_dir / name
+            if not log.exists():
+                log.write_text("")
+        job_status, reaped = _finalize(
+            facts,
+            run_dir,
+            exit_code=None,
+            runtime=_orphan_runtime(run_dir, facts),
+            failure_reason=None,
+            orphaned=True,
+        )
+        self._status[job_id] = job_status
+        self._results[job_id] = reaped
+        self._write_record(facts, job_status, reaped)
+        return job_status
 
     def status(self, job_id: str) -> JobStatus:
         if job_id in self._status:
@@ -263,7 +351,7 @@ class LocalExecutor(Executor):
 
     def _write_record(
         self,
-        job: ExperimentJob,
+        facts: _JobFacts,
         status: JobStatus,
         result: ExperimentResult | None,
     ) -> None:
@@ -273,18 +361,20 @@ class LocalExecutor(Executor):
         history, it is the executor's current answer about one job, and
         the run directory beside it already holds the evidence.
         """
-        path = self._record_path(job.id)
+        path = self._record_path(facts.job_id)
         path.parent.mkdir(parents=True, exist_ok=True)
         scratch = path.with_suffix(".tmp")
         scratch.write_text(
             json.dumps(
-                _record_payload(job, status, result), indent=2, sort_keys=True
+                _record_payload(facts, status, result),
+                indent=2,
+                sort_keys=True,
             ),
             encoding="utf-8",
         )
         scratch.replace(path)
 
-    def _durable(self, job_id: str) -> tuple[JobStatus, ExperimentResult | None]:
+    def _payload(self, job_id: str) -> dict[str, object]:
         path = self._record_path(job_id)
         if not path.is_file():
             raise UnknownJobError(job_id)
@@ -298,6 +388,12 @@ class LocalExecutor(Executor):
             raise MalformedJobRecordError(
                 f"the durable record of job {job_id} is not an object"
             )
+        return payload
+
+    def _durable(self, job_id: str) -> tuple[JobStatus, ExperimentResult | None]:
+        # Loaded outside the try: UnknownJobError is a KeyError, and an
+        # absent record must stay "unknown", never "malformed".
+        payload = self._payload(job_id)
         try:
             return _record_from(payload)
         except (KeyError, TypeError, ValueError) as exc:
@@ -307,7 +403,7 @@ class LocalExecutor(Executor):
 
 
 def _record_payload(
-    job: ExperimentJob, status: JobStatus, result: ExperimentResult | None
+    facts: _JobFacts, status: JobStatus, result: ExperimentResult | None
 ) -> dict[str, object]:
     """What one job was and how it ended.
 
@@ -317,23 +413,24 @@ def _record_payload(
     was given to authenticate with.
     """
     payload: dict[str, object] = {
-        "job_id": job.id,
-        "spec_id": job.spec_id,
+        "job_id": facts.job_id,
+        "spec_id": facts.spec_id,
         "status": str(status),
-        "command": list(job.command),
-        "config": dict(job.config),
-        "seed": job.seed,
+        "command": list(facts.command),
+        "config": dict(facts.config),
+        "seed": facts.seed,
+        "required_artifacts": list(facts.required_artifacts),
+        "timeout_seconds": facts.timeout_seconds,
+        "gpu_count": facts.gpu_count,
+        "started_at": facts.started_at,
+        "pid": facts.pid,
+        "environment": _environment_payload(facts.environment),
     }
     if result is None:
         return payload
     payload["result"] = {
         "status": str(result.status),
-        "environment": {
-            "python_version": result.environment.python_version,
-            "platform": result.environment.platform,
-            "git_commit": result.environment.git_commit,
-            "git_dirty": result.environment.git_dirty,
-        },
+        "environment": _environment_payload(result.environment),
         "metrics": dict(result.metrics),
         "artifacts": list(result.artifacts),
         "logs": list(result.logs),
@@ -389,6 +486,72 @@ def _record_from(
         exit_code=_optional_int(body, "exit_code"),
         failure_reason=_optional_text(body, "failure_reason"),
     )
+
+
+def _environment_payload(environment: Environment) -> dict[str, object]:
+    return {
+        "python_version": environment.python_version,
+        "platform": environment.platform,
+        "git_commit": environment.git_commit,
+        "git_dirty": environment.git_dirty,
+    }
+
+
+def _facts_from(payload: Mapping[str, object]) -> _JobFacts | None:
+    """The pre-completion facts, or ``None`` for a record written before
+    they existed — which the reaper treats as "cannot prove anything",
+    never as an error: everything in ``live_runs/`` is such a record."""
+    if "started_at" not in payload or "environment" not in payload:
+        return None
+    environment = payload["environment"]
+    if not isinstance(environment, Mapping):
+        raise TypeError("environment must be an object")
+    return _JobFacts(
+        job_id=_text(payload, "job_id"),
+        spec_id=_text(payload, "spec_id"),
+        command=tuple(_strings(payload, "command")),
+        config=_config(payload, "config"),
+        seed=_optional_int(payload, "seed"),
+        required_artifacts=tuple(_strings(payload, "required_artifacts")),
+        timeout_seconds=_number_at(payload, "timeout_seconds"),
+        gpu_count=int(_number_at(payload, "gpu_count")),
+        environment=Environment(
+            python_version=_text(environment, "python_version"),
+            platform=_text(environment, "platform"),
+            git_commit=_optional_text(environment, "git_commit"),
+            git_dirty=_optional_bool(environment, "git_dirty"),
+        ),
+        started_at=_number_at(payload, "started_at"),
+        pid=_optional_int(payload, "pid"),
+    )
+
+
+def _alive(pid: int) -> bool:
+    """Whether a process with this pid exists. A pid we may not signal
+    still exists — and existence is all the reaper needs to refuse."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:  # pragma: no cover - foreign process
+        return True
+    return True
+
+
+def _orphan_runtime(run_dir: Path, facts: _JobFacts) -> float:
+    """How long the orphan ran, by the only clock that survived it.
+
+    Newest file mtime minus the recorded start — a measurement of the
+    artifacts, not of the process — clamped to the job's own timeout,
+    because the executor never charges beyond what it authorized.
+    """
+    newest = facts.started_at
+    for path in run_dir.rglob("*"):
+        if path.name == JOB_RECORD_FILENAME or not path.is_file():
+            continue
+        with contextlib.suppress(OSError):
+            newest = max(newest, path.stat().st_mtime)
+    return min(max(0.0, newest - facts.started_at), facts.timeout_seconds)
 
 
 def _text(payload: Mapping[str, object], key: str) -> str:
@@ -477,17 +640,96 @@ def _read_metrics(path: Path) -> Mapping[str, float]:
     return metrics
 
 
+def _finalize(
+    facts: _JobFacts,
+    run_dir: Path,
+    *,
+    exit_code: int | None,
+    runtime: float,
+    failure_reason: str | None,
+    orphaned: bool = False,
+) -> tuple[JobStatus, ExperimentResult]:
+    """Close the books on one run: metrics, artifacts, manifest, result.
+
+    One tail shared by :meth:`LocalExecutor.submit` and
+    :meth:`LocalExecutor.reap`, so the two cannot drift. ``orphaned``
+    marks the reap path, where the exit code died with the submitter:
+    success is then decided by the contract's own evidence — metrics that
+    parse and declared artifacts that exist — and every failure reason is
+    prefixed so the record says the submitter died rather than implying
+    anyone watched this run end.
+    """
+    metrics: Mapping[str, float] = {}
+    if failure_reason is None:
+        if exit_code == 0 or orphaned:
+            try:
+                metrics = _read_metrics(run_dir / METRICS_FILENAME)
+            except (MalformedMetricsError, FileNotFoundError) as exc:
+                failure_reason = (
+                    f"orphaned: the submitting process died; {exc}"
+                    if orphaned
+                    else str(exc)
+                )
+        else:
+            failure_reason = f"exited with code {exit_code}"
+
+    if failure_reason is None:
+        failure_reason = _check_required_artifacts(
+            run_dir, facts.required_artifacts
+        )
+        if failure_reason is not None and orphaned:
+            failure_reason = (
+                f"orphaned: the submitting process died; {failure_reason}"
+            )
+
+    job_status = (
+        JobStatus.SUCCEEDED if failure_reason is None else JobStatus.FAILED
+    )
+
+    # Everything the run left behind is preserved and hashed -- failures
+    # included, because a failed run's outputs are diagnostic evidence.
+    artifacts = _collect_artifacts(run_dir)
+    _write_manifest(run_dir, artifacts)
+
+    result = ExperimentResult(
+        spec_id=facts.spec_id,
+        job_id=facts.job_id,
+        status=_STATUS_MAP[job_status],
+        command=facts.command,
+        environment=facts.environment,
+        metrics=metrics,
+        config=facts.config,
+        seed=facts.seed,
+        artifacts=artifacts,
+        logs=(str(run_dir / STDOUT_FILENAME), str(run_dir / STDERR_FILENAME)),
+        runtime_seconds=runtime,
+        cost=ResourceCost(
+            wall_clock_seconds=runtime,
+            # Occupancy, not utilization: what the lab could not schedule
+            # elsewhere while this ran, whatever the kernels achieved.
+            gpu_hours=runtime / 3600.0 * facts.gpu_count,
+        ),
+        exit_code=exit_code,
+        failure_reason=failure_reason,
+    )
+    return job_status, result
+
+
 def _run_process(
     command: tuple[str, ...],
     working_dir: str,
     env: dict[str, str],
     timeout_seconds: float,
+    *,
+    on_launch: Callable[[int], None] | None = None,
 ) -> tuple[int | None, str, str, str | None]:
     """Run one job process to completion or timeout.
 
     The child starts in its own session (POSIX), so a timeout terminates the
     entire process group -- an experiment that forked workers does not leave
-    them running after its record says it timed out.
+    them running after its record says it timed out. ``on_launch`` fires
+    with the child's pid the moment it exists — the hook the durable record
+    uses to become probe-able by a process that did not launch anything.
     """
     try:
         process = subprocess.Popen(
@@ -501,6 +743,8 @@ def _run_process(
         )
     except OSError as exc:
         return None, "", "", f"could not launch command: {exc}"
+    if on_launch is not None:
+        on_launch(process.pid)
     try:
         stdout, stderr = process.communicate(timeout=timeout_seconds)
         return process.returncode, stdout, stderr, None

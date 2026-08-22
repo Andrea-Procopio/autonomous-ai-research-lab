@@ -158,6 +158,28 @@ end-to-end runs:
   in seven pieces, stopping and resuming at every boundary, it admits
   the same state, funds the same run once, and still verifies.
 
+- **A production vision lab.** The seventh stage's first real
+  instrument: `--lab examples.vision_lab:lab` supplies a trusted
+  template catalog for CIFAR-scale representation learning, and a
+  funded run trains for real. The lab's capability is a closed table of
+  contrasts its templates compute; every admitted prediction is parsed
+  against it, and what cannot be measured is refused, typed, exit 2,
+  before anything spends — proven against the preserved Task 5F
+  admission, whose attention-head observables no vision template
+  serves. What can be measured is served by trusted substitution: the
+  admitted metric string is written into the template source by catalog
+  code, so the exact-match contract holds by construction. Templates
+  are fixed programs — seeding, data, splits, probe, control, and every
+  byte of `metrics.json` are fenced trusted code a preflight holds
+  byte-identical — with one slot, the encoder architecture, for the
+  engineer's model. Execution is backend-agnostic by deployment data
+  (host CPU/MPS/CUDA or container), datasets are operator-staged bytes
+  under content-addressed manifests, and governance stays on. The CI
+  walk carries a synthetic vision brief through all seven stages on a
+  stdlib stub trainer in seconds: three seeded runs, all
+  `VERIFIED_EVIDENCE`, three consistent sign tests, a `SUPPORTED`
+  assessment, an honest stop, a cold verify.
+
 Nothing a model says becomes scientific state until deterministic code
 has gated, committed, executed, and verified it. Literature-derived
 records describe, conjecture, and prefer, carrying their sources; the
@@ -177,12 +199,10 @@ dispatches work, and every model decision passes a deterministic gate
 before it takes effect.
 
 Not built yet: access resolution for metadata-only retrieved works,
-real ML experiment execution over a funded state (the controller runs
-the seventh stage, but a live run needs a trusted template whose
-metrics match the admitted predictions, and no such catalog exists —
-the canary supplies its own), literature-grounded findings entering
-research state, cloud execution, statistician and skeptic roles with
-real inference, and paper writing.
+the live planner seat over the vision catalog (Task 7B; the gate fit is
+already tested), checkpoint-resume of a half-trained job (7A.1),
+literature-grounded findings entering research state, cloud execution,
+statistician and skeptic roles with real inference, and paper writing.
 
 Expect interfaces to change.
 
@@ -304,6 +324,34 @@ through the ordinary executor in real subprocesses and the ledger bills
 one debit per attempt. The second and third commands are the point: the
 walk stops where it was told, and a later process picks it up from the
 durable record with no memory of the first.
+
+### examples/vision_chain.py
+
+```bash
+pip install -e ".[dev,vision]"                                # host backends only
+python -m examples.vision_lab.stage_cifar10 --datasets-root ~/arl-data
+export ARL_VISION_PROFILE=profile.json                        # see docs/EXECUTION.md
+python -m examples.vision_chain --run-root /tmp/vision        # real training
+python -m examples.vision_chain --run-root /tmp/vision --ci   # stdlib stub, no setup
+```
+
+The vision brief through all seven stages, training for real. The
+analysis stages run on scripted instruments — zero network, zero model
+spend — and the seventh executes genuine representation learning
+through whatever backend the deployment profile names. `--ci` swaps the
+trainer for a stdlib stub: the exact walk the test suite runs, no
+torch, no docker, no dataset.
+
+### examples/vision_refusal.py
+
+```bash
+python -m examples.vision_refusal
+```
+
+The honest no, on a real record: funds the preserved Task 5F admission
+in a scratch root and asks the vision lab for a runtime. The lab
+refuses — typed, before anything runs or spends — naming both admitted
+attention-head metrics it cannot measure.
 
 ### examples/torn_step.py
 

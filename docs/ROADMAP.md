@@ -223,17 +223,79 @@ human in the loop, producing results that survive scrutiny.
   a commit bundle was written before the facts it names were durable, so
   recovery raised rather than finishing the step, and the verifier
   faulted a `SUBMITTED` note whose job never ran — which is the note
-  working, not a broken link. Still open: recovery *answers* an
-  interrupted rerun and does not *collect* it.
-- **Real experiment execution.** ML training runs under the existing
-  executor contract: checkpoints, longer timeouts, GPU accounting. No
-  longer blocked on the repair loop — every repair-loop job is
-  journalled now — but one gap is worth closing first: recovery charges
-  an interrupted job its authorization and closes it, rather than
-  collecting the outputs it can now name. That is a wasted training run
-  rather than a lost one, which is what Task 6D.1 bought; collecting is
-  sound only where the record proves the job was the attempt's whole
-  cost, and establishing that distinction is the work.
+  working, not a broken link. The one residue — recovery *answered* an
+  interrupted rerun but did not *collect* it — is closed by Task 7A's
+  salvage arm below.
+- **Collect-finished recovery and GPU accounting.** Done (Task 7A,
+  2026-08-21, first slice). A job now declares how many GPUs it
+  occupies and the executor bills `gpu_hours` as wall clock times that
+  occupancy — a measurement of occupancy, never of utilization, and the
+  record says which. The durable job record carries what finishing the
+  books needs — start time, pid, timeout, required artifacts, the
+  environment captured once before launch — so a cold process can reap
+  an orphan whose submitter provably died, deciding success from the
+  contract's own evidence. And recovery collects: an attempt whose job
+  finished before the crash is completed with the job's measured cost
+  instead of conservatively abandoned. The soundness predicate is all
+  journal: the submitted job id must equal the one `STARTED`
+  pre-registered, the executor's record must be terminal for exactly
+  that job, and any `OUTPUTS_DURABLE` event must agree about which
+  result it produced — anything unprovable keeps the conservative
+  answer. Salvage rebuilds precisely what the live step would have
+  built (one result proposal, the deterministic gate, a bundle costing
+  what the result cost), so a gate-refused result commits the same
+  failed bundle live execution would have. The sweep grew to cover it:
+  the simulated crash is a `BaseException` now, because a crash the
+  runtime could catch as a role failure was quietly testing the wrong
+  thing, and the repairing step's 52 durable writes each get a kill —
+  including the two positions where a job finished and nothing had
+  recorded it yet.
+- **Real experiment execution.** Done (Task 7A, 2026-08-22). The
+  seventh stage's first production instrument: `examples/vision_lab`, a
+  lab for CIFAR-scale representation learning behind every contract the
+  canary proved. Its capability is a closed table of contrasts its
+  templates genuinely compute; every admitted prediction is parsed
+  against it, and what cannot be measured refuses — typed, exit 2,
+  before anything spends — proven against the real preserved Task 5F
+  admission, whose attention-head observables no vision template
+  serves. What can be measured is served by trusted substitution: the
+  admitted metric string is written into the template source by catalog
+  code, so the exact-match contract between admission, the spec, and
+  `metrics.json` holds by construction. Templates are fixed programs —
+  seeding, data, splits, probe, control, and every byte of the metrics
+  file fenced as trusted code a preflight holds byte-identical — with
+  one slot, the encoder architecture, for the engineer's model.
+  Datasets are operator-staged bytes under content-addressed manifests,
+  re-verified by preflight before every launch; execution backends
+  (host CPU/MPS/CUDA, container CPU/CUDA) are deployment data resolving
+  onto the existing binding and executor seams, with the compute device
+  an explicit recorded decision — the first live run caught the
+  template auto-picking the Apple GPU under a profile that declared
+  none, which would have billed a falsehood. Qualified live on
+  2026-08-22: a synthetic vision brief walked all seven stages with
+  zero network and zero model spend, executing three real seeded
+  CIFAR-10 training runs on CPU (~19 s each; probe contrasts +0.040 to
+  +0.060, trained ~49% versus random ~45% top-1, overfit control 1.00),
+  every result `VERIFIED_EVIDENCE` under default governance, three
+  CONSISTENT sign tests, a `SUPPORTED` assessment, an honest stop, and
+  a clean cold verify — then again stopped at funding and resumed, and
+  again killed outright mid-training: the orphaned trainer finished in
+  its own session, the resuming process reaped it from the durable job
+  record, salvage rebuilt and committed the very bundle the dead
+  process would have (journal: `collected after an interrupted step`,
+  `succeeded (rebuilt from the collected job)`, MEASURED 19.8 s), and
+  the run ended with three jobs for three seeds — the killed training
+  run kept as science, nothing re-run, zero conservative charges.
+  Salvage exposed one gate defect the sweep could not: a reaped orphan
+  honestly records `exit_code: None`, and the validation gate read the
+  missing exit as failure; it now accepts completion by the contract's
+  own evidence, with the orphan shape stated in the check's detail.
+  Still open, deliberately: the container backends are documented and
+  policy-tested but this machine qualified the host path — the first
+  Linux/CUDA deployment should re-run the same qualification; the live
+  `ModelBackedPlanner` seat is Task 7B (the catalog already fits its
+  gate, tested); and checkpoint-resume of a half-trained job is 7A.1,
+  designed against a real workload now that one exists.
 - **Scientific debugging and experiment verification.** Done in its
   Phase 1 form: the five-way failure taxonomy (engineering /
   implementation / methodological / analytical / verified), a

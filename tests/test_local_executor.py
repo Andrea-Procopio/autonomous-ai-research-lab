@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
 import pytest
 
-from autonomous_research_lab.core.experiment import ExperimentStatus
+from autonomous_research_lab.core.experiment import Environment, ExperimentStatus
 from autonomous_research_lab.execution.executor import (
     DuplicateJobError,
     ExperimentJob,
@@ -18,7 +19,28 @@ from autonomous_research_lab.execution.local import (
     JOB_RECORD_FILENAME,
     LocalExecutor,
     MalformedJobRecordError,
+    _JobFacts,
 )
+
+
+def running_facts(
+    job: ExperimentJob, *, started_at: float = 0.0, pid: int | None = None
+) -> _JobFacts:
+    """The record a submitter writes before launching ``job`` — what a
+    killed run leaves behind for a cold process to find."""
+    return _JobFacts(
+        job_id=job.id,
+        spec_id=job.spec_id,
+        command=job.command,
+        config=dict(job.config),
+        seed=job.seed,
+        required_artifacts=job.required_artifacts,
+        timeout_seconds=job.timeout_seconds,
+        gpu_count=job.gpu_count,
+        environment=Environment(python_version="3", platform="test"),
+        started_at=started_at,
+        pid=pid,
+    )
 
 
 def script_job(tmp_path: Path, body: str, **overrides: object) -> ExperimentJob:
@@ -192,7 +214,9 @@ class TestAColdProcessCanFindTheJob:
         and nothing saying how it ended."""
         runs = tmp_path / "runs"
         job = script_job(tmp_path, WRITES_METRICS, config={"scale": 4})
-        LocalExecutor(runs)._write_record(job, JobStatus.RUNNING, None)
+        LocalExecutor(runs)._write_record(
+            running_facts(job), JobStatus.RUNNING, None
+        )
 
         cold = LocalExecutor(runs)
 
@@ -268,3 +292,300 @@ class TestDerivedJobIds:
         )
 
         assert job.id == derive_job_id("att_1")
+
+
+def test_gpu_occupancy_is_billed_from_the_job(tmp_path: Path) -> None:
+    """gpu_hours = wall clock x declared occupancy — what the lab could
+    not schedule elsewhere, whatever the kernels achieved."""
+    runs = tmp_path / "runs"
+    job = script_job(
+        tmp_path, WRITES_METRICS, config={"scale": 1}, gpu_count=2
+    )
+    executor = LocalExecutor(runs)
+
+    result = executor.collect(executor.submit(job))
+
+    assert result.cost.gpu_hours == pytest.approx(
+        result.cost.wall_clock_seconds * 2 / 3600.0
+    )
+
+
+def test_a_cpu_job_bills_no_gpu_hours(tmp_path: Path) -> None:
+    runs = tmp_path / "runs"
+    executor = LocalExecutor(runs)
+    result = executor.collect(
+        executor.submit(script_job(tmp_path, WRITES_METRICS, config={"scale": 1}))
+    )
+    assert result.cost.gpu_hours == 0.0
+
+
+class TestReapingOrphans:
+    """A job whose submitter died is finalized from its own evidence."""
+
+    def dead_pid(self) -> int:
+        """A pid that provably belonged to a process that is gone."""
+        import subprocess
+
+        process = subprocess.Popen((sys.executable, "-c", "pass"))
+        process.wait()
+        return process.pid
+
+    def plant_orphan(
+        self,
+        tmp_path: Path,
+        *,
+        with_metrics: bool = True,
+        pid: int | None = None,
+        gpu_count: int = 0,
+    ) -> tuple[LocalExecutor, str]:
+        """A run directory and a RUNNING record, as a killed submitter
+        leaves them: the job launched, the record never rewritten."""
+        runs = tmp_path / "runs"
+        job = script_job(
+            tmp_path,
+            WRITES_METRICS,
+            config={"scale": 1},
+            gpu_count=gpu_count,
+        )
+        run_dir = runs / job.id
+        run_dir.mkdir(parents=True)
+        if with_metrics:
+            (run_dir / "metrics.json").write_text('{"value": 4.0}')
+        executor = LocalExecutor(runs)
+        executor._write_record(
+            running_facts(
+                job,
+                started_at=run_dir.stat().st_mtime - 30.0,
+                pid=self.dead_pid() if pid is None else pid,
+            ),
+            JobStatus.RUNNING,
+            None,
+        )
+        return LocalExecutor(runs), job.id
+
+    def test_a_finished_orphan_is_reaped_as_a_success(
+        self, tmp_path: Path
+    ) -> None:
+        executor, job_id = self.plant_orphan(tmp_path)
+
+        assert executor.reap(job_id) is JobStatus.SUCCEEDED
+
+        result = LocalExecutor(tmp_path / "runs").collect(job_id)
+        assert result.status is ExperimentStatus.COMPLETED
+        assert result.metrics == {"value": 4.0}
+        assert result.exit_code is None  # nobody watched it end
+        assert result.cost.wall_clock_seconds > 0.0
+
+    def test_an_orphan_without_metrics_is_reaped_as_a_failure(
+        self, tmp_path: Path
+    ) -> None:
+        executor, job_id = self.plant_orphan(tmp_path, with_metrics=False)
+
+        assert executor.reap(job_id) is JobStatus.FAILED
+
+        result = LocalExecutor(tmp_path / "runs").collect(job_id)
+        assert result.failure_reason is not None
+        assert result.failure_reason.startswith(
+            "orphaned: the submitting process died"
+        )
+
+    def test_a_live_pid_refuses_the_reap(self, tmp_path: Path) -> None:
+        """Alive — or reused: probing cannot tell, and both refuse."""
+        import os
+
+        executor, job_id = self.plant_orphan(tmp_path, pid=os.getpid())
+
+        assert executor.reap(job_id) is JobStatus.RUNNING
+        with pytest.raises(JobNotFinishedError):
+            LocalExecutor(tmp_path / "runs").collect(job_id)
+
+    def test_a_record_without_a_pid_refuses_the_reap(
+        self, tmp_path: Path
+    ) -> None:
+        """The crash landed between the two record writes; nothing can be
+        proven about the process, so nothing is finalized."""
+        runs = tmp_path / "runs"
+        job = script_job(tmp_path, WRITES_METRICS, config={"scale": 1})
+        (runs / job.id).mkdir(parents=True)
+        executor = LocalExecutor(runs)
+        executor._write_record(running_facts(job), JobStatus.RUNNING, None)
+
+        assert executor.reap(job.id) is JobStatus.RUNNING
+
+    def test_an_old_format_record_refuses_the_reap(
+        self, tmp_path: Path
+    ) -> None:
+        """Everything in live_runs/ predates these fields; a record that
+        cannot prove a death is left exactly as found."""
+        import json
+
+        runs = tmp_path / "runs"
+        job = script_job(tmp_path, WRITES_METRICS, config={"scale": 1})
+        run_dir = runs / job.id
+        run_dir.mkdir(parents=True)
+        (run_dir / JOB_RECORD_FILENAME).write_text(
+            json.dumps(
+                {
+                    "job_id": job.id,
+                    "spec_id": job.spec_id,
+                    "status": "running",
+                    "command": list(job.command),
+                    "config": dict(job.config),
+                    "seed": job.seed,
+                }
+            )
+        )
+
+        assert LocalExecutor(runs).reap(job.id) is JobStatus.RUNNING
+
+    def test_reaping_a_terminal_job_is_a_no_op(self, tmp_path: Path) -> None:
+        runs = tmp_path / "runs"
+        executor = LocalExecutor(runs)
+        job_id = executor.submit(
+            script_job(tmp_path, WRITES_METRICS, config={"scale": 1})
+        )
+        before = (runs / job_id / JOB_RECORD_FILENAME).read_text()
+
+        assert LocalExecutor(runs).reap(job_id) is JobStatus.SUCCEEDED
+        assert (runs / job_id / JOB_RECORD_FILENAME).read_text() == before
+
+    def test_reaping_twice_is_reaping_once(self, tmp_path: Path) -> None:
+        executor, job_id = self.plant_orphan(tmp_path)
+        executor.reap(job_id)
+        record = (tmp_path / "runs" / job_id / JOB_RECORD_FILENAME).read_text()
+
+        assert executor.reap(job_id) is JobStatus.SUCCEEDED
+        assert (
+            tmp_path / "runs" / job_id / JOB_RECORD_FILENAME
+        ).read_text() == record
+
+    def test_a_reaped_gpu_job_bills_its_occupancy(
+        self, tmp_path: Path
+    ) -> None:
+        executor, job_id = self.plant_orphan(tmp_path, gpu_count=2)
+        executor.reap(job_id)
+
+        result = LocalExecutor(tmp_path / "runs").collect(job_id)
+        assert result.cost.gpu_hours == pytest.approx(
+            result.cost.wall_clock_seconds * 2 / 3600.0
+        )
+
+    def test_the_charge_is_clamped_to_the_authorization(
+        self, tmp_path: Path
+    ) -> None:
+        """The artifacts' clock can claim anything; the executor never
+        charges beyond the timeout it authorized."""
+        runs = tmp_path / "runs"
+        job = script_job(
+            tmp_path,
+            WRITES_METRICS,
+            config={"scale": 1},
+            timeout_seconds=10.0,
+        )
+        run_dir = runs / job.id
+        run_dir.mkdir(parents=True)
+        (run_dir / "metrics.json").write_text('{"value": 1.0}')
+        executor = LocalExecutor(runs)
+        executor._write_record(
+            running_facts(
+                job,
+                started_at=run_dir.stat().st_mtime - 9_999.0,
+                pid=self.dead_pid(),
+            ),
+            JobStatus.RUNNING,
+            None,
+        )
+
+        executor.reap(job.id)
+
+        result = LocalExecutor(runs).collect(job.id)
+        assert result.cost.wall_clock_seconds == pytest.approx(10.0)
+
+
+ORPHAN_SUBMITTER = """
+import sys
+from pathlib import Path
+
+sys.path.insert(0, {src!r})
+from autonomous_research_lab.execution.executor import ExperimentJob
+from autonomous_research_lab.execution.local import LocalExecutor
+
+job = ExperimentJob(
+    spec_id="exp_orphan",
+    command=(sys.executable, {script!r}),
+    working_dir={workdir!r},
+    seed=3,
+    id="job_orphan",
+)
+LocalExecutor({runs!r}).submit(job)
+"""
+
+SLEEPS_THEN_WRITES = """
+import json, os, time
+from pathlib import Path
+
+time.sleep(1.5)
+run_dir = Path(os.environ["ARL_RUN_DIR"])
+(run_dir / "metrics.json").write_text(json.dumps({"value": 4.0}))
+"""
+
+
+def test_a_job_that_finished_after_its_submitter_died_is_reaped(
+    tmp_path: Path,
+) -> None:
+    """The real story, with real processes: the submitter is SIGKILLed,
+    the job — in its own session — survives and finishes, and a cold
+    executor closes the books on it."""
+    import signal
+    import subprocess
+    import time
+
+    src = str(Path(__file__).resolve().parent.parent / "src")
+    runs = tmp_path / "runs"
+    script = tmp_path / "experiment.py"
+    script.write_text(SLEEPS_THEN_WRITES)
+    submitter_code = ORPHAN_SUBMITTER.format(
+        src=src,
+        script=str(script),
+        workdir=str(tmp_path),
+        runs=str(runs),
+    )
+
+    submitter = subprocess.Popen((sys.executable, "-c", submitter_code))
+    record = runs / "job_orphan" / JOB_RECORD_FILENAME
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline:
+        if record.is_file() and '"pid":' in record.read_text():
+            import json
+
+            if json.loads(record.read_text()).get("pid") is not None:
+                break
+        time.sleep(0.02)
+    else:
+        raise AssertionError("the submitter never recorded a pid")
+
+    submitter.send_signal(signal.SIGKILL)
+    submitter.wait()
+
+    metrics = runs / "job_orphan" / "metrics.json"
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline and not metrics.is_file():
+        time.sleep(0.05)
+    assert metrics.is_file(), "the orphaned job never finished"
+    # The job process itself must be gone before the reap can prove death.
+    import json
+
+    pid = json.loads(record.read_text())["pid"]
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.05)
+
+    cold = LocalExecutor(runs)
+    assert cold.reap("job_orphan") is JobStatus.SUCCEEDED
+    result = cold.collect("job_orphan")
+    assert result.metrics == {"value": 4.0}
+    assert result.failure_reason is None

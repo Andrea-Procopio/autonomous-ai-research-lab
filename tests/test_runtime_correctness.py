@@ -687,7 +687,7 @@ def test_unexpected_validation_exception_is_not_blamed_on_the_role(
     def broken_gate(*args: object, **kwargs: object) -> object:
         raise RuntimeError("validator bug")
 
-    monkeypatch.setattr(runtime_loop, "_gate_results", broken_gate)
+    monkeypatch.setattr(runtime_loop, "gate_results", broken_gate)
 
     with pytest.raises(RuntimeError, match="validator bug"):
         runtime.step(_prepared_state(spec, prediction))

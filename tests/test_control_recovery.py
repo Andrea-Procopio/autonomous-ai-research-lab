@@ -12,7 +12,11 @@ from __future__ import annotations
 from pathlib import Path
 
 from autonomous_research_lab.control import recovery as recovery_module
-from autonomous_research_lab.control.recovery import RecoveryReport, recover
+from autonomous_research_lab.control.recovery import (
+    FinishedJobs,
+    RecoveryReport,
+    recover,
+)
 from autonomous_research_lab.core.actions import ResearchAction, ResearchActionType
 from autonomous_research_lab.core.attempt import (
     ActionAttempt,
@@ -23,6 +27,11 @@ from autonomous_research_lab.core.attempt import (
 )
 from autonomous_research_lab.core.budget import ResearchBudget, ResourceCost
 from autonomous_research_lab.core.commit import CommitBundle
+from autonomous_research_lab.core.experiment import (
+    Environment,
+    ExperimentResult,
+    ExperimentStatus,
+)
 from autonomous_research_lab.core.hypothesis import Hypothesis
 from autonomous_research_lab.core.proposals import HypothesisProposal
 from autonomous_research_lab.core.state import ResearchState
@@ -64,7 +73,7 @@ class Crash:
         self.attempt = ActionAttempt(action=ACTION).started()
         self.begun = self.head.begin_attempt(self.attempt)
 
-    def started(self) -> None:
+    def started(self, job_id: str = "") -> None:
         """As far as `_open_attempt` gets: the begun state is durable,
         the phase is written, the money is held."""
         self.states.persist(self.begun)
@@ -72,9 +81,21 @@ class Crash:
             attempt_id=self.attempt.id,
             phase=AttemptPhase.STARTED,
             state_id=self.begun.id,
+            job_id=job_id,
             reserved=HELD,
         )
         self.ledger.reserve(HELD, charge_id=self.attempt.id, reason="a")
+
+    def submitted(self, job_id: str, *, registered: str | None = None) -> None:
+        """One step further: the job id was pre-registered on STARTED and
+        the submission went out. ``registered`` lets a test disagree the
+        two on purpose."""
+        self.started(job_id if registered is None else registered)
+        self.journal.record(
+            attempt_id=self.attempt.id,
+            phase=AttemptPhase.SUBMITTED,
+            job_id=job_id,
+        )
 
     def bundle(self) -> CommitBundle:
         return CommitBundle(
@@ -97,7 +118,12 @@ class Crash:
         )
         return bundle_id
 
-    def run(self, fallback: str | None = None) -> RecoveryReport:
+    def run(
+        self,
+        fallback: str | None = None,
+        *,
+        jobs: FinishedJobs | None = None,
+    ) -> RecoveryReport:
         return recover(
             journal=self.journal,
             ledger=self.ledger,
@@ -105,6 +131,7 @@ class Crash:
             states=self.states,
             evidence=self.evidence,
             fallback_state_id=fallback or self.head.id,
+            jobs=jobs,
         )
 
     def kinds(self) -> list[str]:
@@ -389,11 +416,179 @@ class TestAStepWhoseEventWasLost:
         assert report.state_id == crash.head.id
 
 
+class TestAdoptingTheRecordedSettlement:
+    """A crash between the live settlement and the closing journal event
+    leaves the debit on the ledger with the state-budget *delta* — which
+    floating point can hold one ulp away from the bundle's own cost.
+    The movement that happened is authoritative; recovery adopts it."""
+
+    def test_a_settled_charge_is_adopted_not_rederived(
+        self, tmp_path: Path
+    ) -> None:
+        crash = Crash(tmp_path)
+        crash.bundle_durable()
+        # What the dying step actually posted: the bundle's cost, one
+        # ulp adrift — exactly what (before - (before - cost)) can give.
+        drifted = ResourceCost(
+            usd=SPENT.usd + 1e-13, model_tokens=SPENT.model_tokens
+        )
+        crash.ledger.settle(
+            drifted,
+            charge_id=crash.attempt.id,
+            reason=f"attempt {crash.attempt.id}",
+        )
+
+        (recovery,) = crash.run().recoveries
+
+        assert recovery.resolution is AttemptPhase.COMPLETED
+        assert recovery.basis is SettlementBasis.MEASURED
+        assert recovery.settled == drifted  # the ledger's figure, adopted
+        # And twice is once.
+        assert crash.run().recoveries == ()
+
+    def test_a_released_charge_is_adopted_too(self, tmp_path: Path) -> None:
+        """The live step can release (a zero delta) and die before the
+        journal closes; recovery must not try to debit over the release."""
+        crash = Crash(tmp_path)
+        crash.bundle_durable()
+        crash.ledger.release(
+            charge_id=crash.attempt.id,
+            reason=f"attempt {crash.attempt.id}",
+        )
+
+        (recovery,) = crash.run().recoveries
+
+        assert recovery.resolution is AttemptPhase.COMPLETED
+        assert recovery.settled.is_zero
+
+
+class Answers:
+    """A collector with a script: one job id it will call finished."""
+
+    def __init__(self, job_id: str = "", result: ExperimentResult | None = None):
+        self._job_id = job_id
+        self._result = result
+
+    def finished(self, job_id: str, /) -> ExperimentResult | None:
+        return self._result if job_id == self._job_id else None
+
+
+def fabricated_result(job_id: str, *, spec_id: str = "exp_unknown") -> ExperimentResult:
+    """A terminal result the executor could have recorded — for a spec the
+    state never registered, so the deterministic gate must refuse it."""
+    return ExperimentResult(
+        spec_id=spec_id,
+        job_id=job_id,
+        status=ExperimentStatus.COMPLETED,
+        command=("python", "x.py"),
+        environment=Environment(python_version="3", platform="test"),
+        metrics={"value": 1.0},
+        cost=ResourceCost(wall_clock_seconds=2.0),
+    )
+
+
+class TestCollectingFinishedJobs:
+    """The refusal edges of the salvage arm. The happy path — a real job,
+    a real gate pass, a completed attempt with the job's measured cost —
+    is proven end-to-end by the fault sweep, killed at the exact write."""
+
+    def test_without_a_collector_nothing_changes(self, tmp_path: Path) -> None:
+        """``jobs=None`` is the pre-salvage behavior, verbatim."""
+        crash = Crash(tmp_path)
+        crash.submitted("job_1")
+
+        (recovery,) = crash.run().recoveries
+
+        assert recovery.resolution is AttemptPhase.ABANDONED
+        assert recovery.basis is SettlementBasis.CONSERVATIVE_MAX
+
+    def test_a_job_the_collector_cannot_prove_is_abandoned(
+        self, tmp_path: Path
+    ) -> None:
+        crash = Crash(tmp_path)
+        crash.submitted("job_1")
+
+        (recovery,) = crash.run(jobs=Answers()).recoveries
+
+        assert recovery.resolution is AttemptPhase.ABANDONED
+        assert recovery.basis is SettlementBasis.CONSERVATIVE_MAX
+
+    def test_a_submission_disagreeing_with_its_registration_is_refused(
+        self, tmp_path: Path
+    ) -> None:
+        """The STARTED event pre-registered one job id and SUBMITTED names
+        another: two versions of one history, and salvage trusts neither."""
+        crash = Crash(tmp_path)
+        crash.submitted("job_other", registered="job_1")
+
+        report = crash.run(
+            jobs=Answers("job_other", fabricated_result("job_other"))
+        )
+
+        (recovery,) = report.recoveries
+        assert recovery.resolution is AttemptPhase.ABANDONED
+        assert recovery.basis is SettlementBasis.CONSERVATIVE_MAX
+
+    def test_an_unregistered_submission_is_refused(
+        self, tmp_path: Path
+    ) -> None:
+        """A STARTED event with no job id pre-registered nothing; there is
+        no intent on record for the submission to be checked against."""
+        crash = Crash(tmp_path)
+        crash.submitted("job_1", registered="")
+
+        report = crash.run(jobs=Answers("job_1", fabricated_result("job_1")))
+
+        (recovery,) = report.recoveries
+        assert recovery.resolution is AttemptPhase.ABANDONED
+
+    def test_a_gate_refused_result_salvages_a_failed_bundle(
+        self, tmp_path: Path
+    ) -> None:
+        """The collected result names a spec the state never registered.
+        Salvage commits the same failed bundle the live step would have:
+        the attempt completes with the result's measured cost, and nothing
+        enters the evidence store."""
+        crash = Crash(tmp_path)
+        crash.submitted("job_1")
+        collected = fabricated_result("job_1")
+
+        report = crash.run(jobs=Answers("job_1", collected))
+
+        (recovery,) = report.recoveries
+        assert recovery.resolution is AttemptPhase.COMPLETED
+        assert recovery.basis is SettlementBasis.MEASURED
+        assert recovery.settled == collected.cost
+        assert crash.evidence.results() == ()
+        # And twice is once: nothing is open, so a second pass is silent.
+        assert crash.run(jobs=Answers("job_1", collected)).recoveries == ()
+
+    def test_a_disagreeing_outputs_record_is_refused(
+        self, tmp_path: Path
+    ) -> None:
+        """OUTPUTS_DURABLE names one result and the executor reports
+        another — the records disagree, and salvage takes neither side."""
+        crash = Crash(tmp_path)
+        crash.submitted("job_1")
+        crash.journal.record(
+            attempt_id=crash.attempt.id,
+            phase=AttemptPhase.OUTPUTS_DURABLE,
+            job_id="job_1",
+            produced=(("result", "res_someone_else"),),
+        )
+
+        report = crash.run(jobs=Answers("job_1", fabricated_result("job_1")))
+
+        (recovery,) = report.recoveries
+        assert recovery.resolution is AttemptPhase.ABANDONED
+        assert recovery.basis is SettlementBasis.CONSERVATIVE_MAX
+
+
 def test_recovery_reaches_no_executor(tmp_path: Path) -> None:
     """Recovery cannot resubmit because it cannot submit: it is handed
-    records, never an executor. A job that ran is finished from the
-    bundle its step already wrote, and a job that did not is a new
-    attempt's problem."""
+    records, never an executor. Even the collector arrives as a protocol
+    with one question in it — did this job finish? — and the composition
+    root supplies the implementation; nothing here can start work."""
     source = Path(recovery_module.__file__ or "")
     imports = [
         line

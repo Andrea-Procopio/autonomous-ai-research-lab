@@ -9,18 +9,23 @@ container instead of on the host::
         --cap-drop ALL --security-opt no-new-privileges
         --read-only --tmpfs /tmp
         --memory <m> --memory-swap <m> --pids-limit <n> --cpus <c>
+        [--shm-size <v>] [--gpus <n>]
         -v <source>:/arl/src:ro  -v <run_dir>:/arl/run
+        [-v <dataset>:/arl/data/<name>:ro ...]
         -e ARL_RUN_DIR=/arl/run -e ARL_CONFIG=/arl/run/config.json
-        [-e ARL_SEED=<seed>]
+        -e HOME=/tmp [-e ARL_DATA_DIR=/arl/data] [-e ARL_SEED=<seed>]
         <image> python /arl/src/<entrypoint>
 
 Containment properties, stated exactly:
 
 * **no network** — ``--network none``; and ``--pull never``, so even launch
   cannot fetch anything: the pinned image must already be present;
-* **no host filesystem** beyond two mounts: the validated source tree,
-  read-only, and the job's run directory, writable — no home directory, no
-  credentials, no repository;
+* **no host filesystem** beyond the declared mounts: the validated source
+  tree, read-only; the job's run directory, writable; and any staged
+  dataset directories, read-only by construction — the shim offers no
+  writable variant. No home directory, no credentials, no repository;
+  ``HOME`` points at the tmpfs ``/tmp``, because the root filesystem is
+  read-only and library caches need somewhere legal to land;
 * **no privileges** — all capabilities dropped, no privilege escalation, a
   read-only root filesystem with a tmpfs ``/tmp``;
 * **finite** — memory, pids and cpus capped by policy, and a wall-clock
@@ -60,6 +65,9 @@ def docker_run_command(
     cpus: float,
     seed: str | None,
     container_name: str,
+    gpus: int = 0,
+    shm_size: str | None = None,
+    data_mounts: tuple[tuple[Path, str], ...] = (),
 ) -> tuple[str, ...]:
     """The exact ``docker run`` invocation, as pure data — the policy is
     testable without a daemon."""
@@ -88,17 +96,40 @@ def docker_run_command(
         str(pids_limit),
         "--cpus",
         str(cpus),
-        "-v",
-        f"{source_dir}:/arl/src:ro",
-        "-v",
-        f"{run_dir}:/arl/run",
-        "-e",
-        "ARL_RUN_DIR=/arl/run",
-        "-e",
-        "ARL_CONFIG=/arl/run/config.json",
-        "-e",
-        "PYTHONDONTWRITEBYTECODE=1",
     ]
+    if shm_size is not None:
+        command.extend(("--shm-size", shm_size))
+    if gpus:
+        command.extend(("--gpus", str(gpus)))
+    command.extend(
+        (
+            "-v",
+            f"{source_dir}:/arl/src:ro",
+            "-v",
+            f"{run_dir}:/arl/run",
+        )
+    )
+    for host_dir, name in data_mounts:
+        # Read-only by construction: there is no writable variant to ask
+        # for, so a job cannot corrupt the dataset every later job reads.
+        command.extend(("-v", f"{host_dir}:/arl/data/{name}:ro"))
+    command.extend(
+        (
+            "-e",
+            "ARL_RUN_DIR=/arl/run",
+            "-e",
+            "ARL_CONFIG=/arl/run/config.json",
+            "-e",
+            "PYTHONDONTWRITEBYTECODE=1",
+            # The root filesystem is read-only; libraries that insist on a
+            # cache (torch, matplotlib) get the tmpfs, which adds nothing
+            # reachable that /tmp did not already offer.
+            "-e",
+            "HOME=/tmp",
+        )
+    )
+    if data_mounts:
+        command.extend(("-e", "ARL_DATA_DIR=/arl/data"))
     if seed is not None:
         command.extend(("-e", f"ARL_SEED={seed}"))
     command.extend((image, "python", f"/arl/src/{entrypoint}"))
@@ -114,7 +145,36 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--pids-limit", required=True, type=int)
     parser.add_argument("--cpus", required=True, type=float)
     parser.add_argument("--timeout", required=True, type=float)
+    parser.add_argument("--gpus", type=int, default=0)
+    parser.add_argument("--shm-size", default=None)
+    parser.add_argument(
+        "--data",
+        action="append",
+        default=[],
+        metavar="HOST_DIR:NAME",
+        help="stage a host directory read-only at /arl/data/NAME",
+    )
     args = parser.parse_args(argv)
+
+    data_mounts: list[tuple[Path, str]] = []
+    for declared in args.data:
+        host, _, name = declared.rpartition(":")
+        if not host or not name:
+            print(
+                f"container shim: --data expects HOST_DIR:NAME, got "
+                f"{declared!r}",
+                file=sys.stderr,
+            )
+            return LAUNCH_FAILURE_EXIT_CODE
+        host_dir = Path(host)
+        if not host_dir.is_dir():
+            print(
+                f"container shim: dataset directory {host_dir} does not "
+                f"exist; stage it before running",
+                file=sys.stderr,
+            )
+            return LAUNCH_FAILURE_EXIT_CODE
+        data_mounts.append((host_dir, name))
 
     run_dir_env = os.environ.get("ARL_RUN_DIR")
     if not run_dir_env:
@@ -140,6 +200,9 @@ def main(argv: list[str] | None = None) -> int:
         cpus=args.cpus,
         seed=os.environ.get("ARL_SEED"),
         container_name=container_name,
+        gpus=args.gpus,
+        shm_size=args.shm_size,
+        data_mounts=tuple(data_mounts),
     )
     try:
         completed = subprocess.run(
