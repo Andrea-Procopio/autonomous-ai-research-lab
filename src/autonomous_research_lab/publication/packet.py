@@ -490,6 +490,14 @@ def science_lines(science: RegisteredScience) -> list[str]:
     return lines
 
 
+def metric_text(metrics: tuple[tuple[str, float], ...]) -> str:
+    """One metrics tuple as the packet prints it. Every rendering of a
+    metric value — markdown, LaTeX, anything later — goes through this
+    one ``:g`` expression, so trusted code prints only what the packet
+    prints, in exactly one spelling."""
+    return ", ".join(f"{name}={value:g}" for name, value in metrics)
+
+
 def finding_lines(finding: ClaimFinding) -> list[str]:
     """One claim's finding block: statement, verdict, rationale, rows."""
     lines = [
@@ -504,12 +512,10 @@ def finding_lines(finding: ClaimFinding) -> list[str]:
         )
         lines.append(f"> {finding.assessment.rationale}")
     for row in finding.evidence_rows:
-        metrics = ", ".join(
-            f"{name}={value:g}" for name, value in row.metrics
-        )
         lines.append(
             f"- {row.evidence_id} ({row.relation}, {row.standing}) ← "
-            f"result {row.result_id}, seed {row.seed}: {metrics}"
+            f"result {row.result_id}, seed {row.seed}: "
+            f"{metric_text(row.metrics)}"
         )
     return lines
 
@@ -537,12 +543,10 @@ def table_lines(tables: tuple[TableRow, ...]) -> list[str]:
         "| --- | --- | --- | --- | --- |",
     ]
     for table_row in tables:
-        metrics = ", ".join(
-            f"{name}={value:g}" for name, value in table_row.metrics
-        )
         lines.append(
             f"| {table_row.spec_id} | {table_row.seed} | "
-            f"{table_row.result_id} | {table_row.standing} | {metrics} |"
+            f"{table_row.result_id} | {table_row.standing} | "
+            f"{metric_text(table_row.metrics)} |"
         )
     return lines
 
