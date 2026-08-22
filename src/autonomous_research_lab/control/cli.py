@@ -1,18 +1,24 @@
 """``arl`` — the front door.
 
-Four verbs, and no state of their own::
+Five verbs, and no state of their own::
 
     arl run CONFIG --root DIR [--lab module:factory] [--stop-after STAGE]
     arl resume [INVESTIGATION] --root DIR [--lab module:factory]
     arl status [INVESTIGATION] --root DIR
     arl verify --root DIR
+    arl packet [INVESTIGATION] --root DIR [--out DIR]
 
 ``run`` records the config and walks as far as it can. ``resume`` picks
 up exactly where a walk stopped, using the config the investigation
 recorded rather than whatever the file says now. ``status`` prints the
 stage table. ``verify`` re-checks every durable claim under the root —
 the snapshots, the facts, the artifact bytes, the ledger, and the event
-chains — and says so or lists what is wrong.
+chains — and says so or lists what is wrong. ``packet`` exports the
+evidence packet: it verifies the run from cold, re-derives the
+statistician's figures against the record, and writes
+``packet/<packet_id>.json`` and ``.md`` under the root — checked, not
+copied, and refused outright for a walk that never reached a research
+state.
 
 Exit codes are meant to be read by a script as well as a person: ``0``
 for a walk that ended on its own terms, including an honest scientific
@@ -33,11 +39,13 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from ..program.integrity import verify_run
+from ..publication.packet import PacketError
 from .config import ConfigError, load_config
 from .controller import Controller, ControllerError, Outcome, StatusReport
 from .investigation import InvestigationStore
 from .lab import Lab, LabError, load_lab
-from .stage import StageName, StageStatus
+from .packet import build_packet, write_packet
+from .stage import MissingFactError, StageName, StageStatus
 
 OK: int = 0
 FAILED: int = 1
@@ -45,6 +53,7 @@ REFUSED: int = 2
 
 _CONTROL = "control"
 _PROGRAM = "program"
+_PACKET = "packet"
 
 _EXIT_FOR = {
     Outcome.COMPLETED: OK,
@@ -65,6 +74,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _resume(arguments)
         if arguments.command == "status":
             return _status(arguments)
+        if arguments.command == "packet":
+            return _packet(arguments)
         return _verify(arguments)
     except (ConfigError, ControllerError, LabError) as error:
         print(f"FATAL: {error}")
@@ -150,6 +161,36 @@ def _verify(arguments: argparse.Namespace) -> int:
         return FAILED
     print()
     print("intact")
+    return OK
+
+
+def _packet(arguments: argparse.Namespace) -> int:
+    root = Path(arguments.root).resolve()
+    if not _exists(root):
+        return FAILED
+    investigation_id = _chosen(root, arguments.investigation)
+    if investigation_id is None:
+        return FAILED
+    try:
+        packet = build_packet(root, investigation_id)
+    except MissingFactError as error:
+        # A precondition, not a fault: the walk never produced a research
+        # state, so there is honestly nothing to export.
+        print(f"REFUSED: {error}")
+        return REFUSED
+    except PacketError as error:
+        print(f"FATAL: {error}")
+        return FAILED
+    out_dir = (
+        Path(arguments.out).resolve() if arguments.out else root / _PACKET
+    )
+    json_path, markdown_path = write_packet(packet, out_dir)
+    print(f"packet        {packet.packet_id}")
+    print(f"investigation {packet.provenance.investigation_id}")
+    print(f"run           {packet.provenance.run_id}")
+    print(f"claims        {len(packet.claims)}")
+    print(f"json          {json_path}")
+    print(f"markdown      {markdown_path}")
     return OK
 
 
@@ -258,6 +299,15 @@ def _parser() -> argparse.ArgumentParser:
 
     verify = commands.add_parser("verify", help="re-check every durable claim")
     _add_root(verify)
+
+    packet = commands.add_parser("packet", help="export the evidence packet")
+    packet.add_argument("investigation", nargs="?", help="investigation id")
+    _add_root(packet)
+    packet.add_argument(
+        "--out",
+        type=Path,
+        help="directory for the packet files (default: ROOT/packet)",
+    )
     return parser
 
 
