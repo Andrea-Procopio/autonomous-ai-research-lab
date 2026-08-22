@@ -26,6 +26,7 @@ import io
 import json
 import os
 from pathlib import Path
+from typing import Any
 
 import torch
 import torchvision
@@ -58,7 +59,7 @@ def device(config: dict[str, object]) -> torch.device:
 
 def resume_payload(
     config: dict[str, object], seed: int, where: torch.device
-) -> dict[str, object] | None:
+) -> dict[str, Any] | None:
     """The checkpoint the config hands over, verified before trust: the
     bytes must hash to the digest the record pins, and the checkpoint
     must belong to this seed. A mismatch is a refusal, not a fresh
@@ -199,7 +200,7 @@ def main() -> None:
     untrained = build_encoder().to(where)
     payload = resume_payload(config, seed, where)
     if payload is not None:
-        trained.load_state_dict(payload["augmented_encoder"])  # type: ignore[arg-type]
+        trained.load_state_dict(payload["augmented_encoder"])
     else:
         fit(trained, augmented=True)
         torch.save(
