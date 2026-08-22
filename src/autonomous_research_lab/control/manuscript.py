@@ -37,8 +37,13 @@ from ..publication.manuscript import (
     require_reportable,
 )
 from ..publication.packet import EvidencePacket
-from ..publication.store import ManuscriptStore
-from ..runtime.providers import UsageLedger
+from ..publication.store import (
+    AmbiguousHeadError,
+    ManuscriptStore,
+    ReviewStore,
+    head_for,
+)
+from ..runtime.providers import ModelProvider, UsageLedger
 from .config import parse_config
 from .investigation import InvestigationStore
 from .lab import DefaultLab, Lab
@@ -48,6 +53,7 @@ from .stage import StageName
 _CONTROL = "control"
 _PACKET = "packet"
 _MANUSCRIPT = "manuscript"
+_REVIEW = "review"
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,9 +85,17 @@ def author_manuscript(
     write_packet(packet, root / _PACKET)
 
     store = ManuscriptStore(out_dir if out_dir is not None else root / _MANUSCRIPT)
-    existing = store.for_packet(packet.packet_id)
-    if existing:
-        manuscript = existing[0]
+    heads = head_for(
+        store, ReviewStore(root / _REVIEW), packet.packet_id
+    )
+    if len(heads) > 1:
+        raise AmbiguousHeadError(
+            f"an interrupted review cycle left {len(heads)} drafts "
+            f"standing for packet {packet.packet_id}; run arl review to "
+            f"complete it"
+        )
+    if heads:
+        manuscript = heads[0]
         markdown_path = _written_markdown(store, packet, manuscript)
         return ManuscriptRunResult(
             manuscript=manuscript,
@@ -91,25 +105,15 @@ def author_manuscript(
             replayed=True,
         )
 
-    payload = InvestigationStore(root / _CONTROL).get_config(
-        packet.provenance.config_id
-    )
-    if payload is None:
-        raise ManuscriptError(
-            f"the recorded config {packet.provenance.config_id} is not "
-            f"under this root; the author takes its model from the record, "
-            f"not from a guess"
-        )
-    config = parse_config(payload)
-    provider = (lab if lab is not None else DefaultLab()).model_provider(
-        StageName.MANUSCRIPT
+    provider, seat_model, timeout = publication_seat(
+        root, packet, lab=lab, model=model
     )
     author = ManuscriptAuthor(
         provider=provider,
-        model=model if model is not None else config.model,
+        model=seat_model,
         ledger=UsageLedger(),
         store=store,
-        request_timeout_seconds=config.request_timeout_seconds,
+        request_timeout_seconds=timeout,
     )
     manuscript = store.record(author.author(packet))
     markdown_path = _written_markdown(store, packet, manuscript)
@@ -120,6 +124,44 @@ def author_manuscript(
         markdown_path=markdown_path,
         replayed=False,
     )
+
+
+def publication_seat(
+    root: Path,
+    packet: EvidencePacket,
+    *,
+    lab: Lab | None,
+    model: str | None,
+) -> tuple[ModelProvider, str, float]:
+    """The writing seat's provider, model, and timeout: the recorded
+    configuration, not the current file, with an explicit model
+    override allowed because the recorded config predates the seat —
+    never silent, since every record carries requested and served."""
+    payload = InvestigationStore(root / _CONTROL).get_config(
+        packet.provenance.config_id
+    )
+    if payload is None:
+        raise ManuscriptError(
+            f"the recorded config {packet.provenance.config_id} is not "
+            f"under this root; the seat takes its model from the record, "
+            f"not from a guess"
+        )
+    config = parse_config(payload)
+    provider = (lab if lab is not None else DefaultLab()).model_provider(
+        StageName.MANUSCRIPT
+    )
+    return (
+        provider,
+        model if model is not None else config.model,
+        config.request_timeout_seconds,
+    )
+
+
+def written_markdown(
+    store: ManuscriptStore, packet: EvidencePacket, manuscript: Manuscript
+) -> Path:
+    """The assembled reading copy, write-once by content id."""
+    return _written_markdown(store, packet, manuscript)
 
 
 def _written_markdown(

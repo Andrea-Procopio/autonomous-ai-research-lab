@@ -422,6 +422,29 @@ human in the loop, producing results that survive scrutiny.
   claim-evidence graph (8C), rendered figures, LaTeX/submission
   formats, a semantic honest-language gate (deliberately the
   reviewer's job, not the author's), and manuscript signing.
+- **Faithfulness reviewer.** Done (Task 8C, 2026-08-22). The seat
+  that judges whether the manuscript's prose claims anything the
+  packet does not record — and whose criticism must ground itself the
+  way admission's support quotes do. Trusted code reads first: a
+  forbidden-strength lexicon no verdict ever licenses, and verdict
+  words no claim's assessment records. The model's findings each carry
+  a verbatim quote and a packet record id, mechanically verified
+  (normalized substring; the subject enum holds exactly the packet's
+  printed ids, so an invented citation is unexpressible); an
+  ungrounded finding earns a corrective call, then a typed refusal.
+  The verdict is derived from the findings by trusted code — the
+  schema has no verdict property. A REVISE triggers one bounded
+  revision: the new draft is authored with the findings in its
+  request, succession is recorded as its own write-once fact, and the
+  revision is reviewed once — every crash window between those writes
+  recovers by dispatch on the durable record. Qualified live on the
+  real CIFAR-10 root, 2026-08-22: muse-spark-1.2 reviewed the live
+  draft against its packet and returned zero findings — APPROVED in
+  one call, an honest verdict on a faithful draft — and the root
+  re-verified intact. Still open: 8D venue LaTeX kits (NeurIPS/ICML/
+  ICLR styles as deployment configuration), 8E the venue simulator
+  (conference-readiness scoring with ensemble + meta-review, feeding
+  prose revision under the same gates), and signing.
 - **Trajectory analysis.** The decision log (`DecisionRecord` + JSONL)
   exists. Horizon 1 adds the analysis code that reads it: utility
   calibration, cost prediction error, failure-mode tallies, feeding

@@ -1,6 +1,6 @@
 """``arl`` — the front door.
 
-Six verbs, and no state of their own::
+Seven verbs, and no state of their own::
 
     arl run CONFIG --root DIR [--lab module:factory] [--stop-after STAGE]
     arl resume [INVESTIGATION] --root DIR [--lab module:factory]
@@ -9,6 +9,8 @@ Six verbs, and no state of their own::
     arl packet [INVESTIGATION] --root DIR [--out DIR]
     arl manuscript [INVESTIGATION] --root DIR [--lab module:factory]
         [--model NAME] [--out DIR]
+    arl review [INVESTIGATION] --root DIR [--lab module:factory]
+        [--model NAME] [--out DIR] [--review-only]
 
 ``run`` records the config and walks as far as it can. ``resume`` picks
 up exactly where a walk stopped, using the config the investigation
@@ -25,7 +27,12 @@ model writes prose only, behind deterministic gates that refuse any
 number the packet does not state and any citation outside its
 bibliography; trusted code assembles everything else. Refused for a
 walk with nothing to report; re-running replays the recorded draft
-without a model call.
+without a model call. ``review`` runs the faithfulness reviewer over
+that draft: trusted code and one gated model call judge whether the
+prose claims anything the packet does not record, every finding
+grounded in a verbatim quote and a record id or refused. A REVISE
+verdict triggers at most one revision-and-re-review cycle; a standing
+REVISE after it exits 1 with the findings printed.
 
 Exit codes are meant to be read by a script as well as a person: ``0``
 for a walk that ended on its own terms, including an honest scientific
@@ -48,6 +55,11 @@ from pathlib import Path
 from ..program.integrity import verify_run
 from ..publication.manuscript import ManuscriptError, NothingToReportError
 from ..publication.packet import PacketError
+from ..publication.review import (
+    NothingToReviewError,
+    ReviewError,
+    ReviewVerdict,
+)
 from ..runtime.providers import ModelProviderError
 from .config import ConfigError, load_config
 from .controller import Controller, ControllerError, Outcome, StatusReport
@@ -55,6 +67,7 @@ from .investigation import InvestigationStore
 from .lab import Lab, LabError, load_lab
 from .manuscript import author_manuscript
 from .packet import build_packet, write_packet
+from .review import review_manuscript
 from .stage import CHAIN_ORDER, MissingFactError, StageName, StageStatus
 
 OK: int = 0
@@ -88,6 +101,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _packet(arguments)
         if arguments.command == "manuscript":
             return _manuscript(arguments)
+        if arguments.command == "review":
+            return _review(arguments)
         return _verify(arguments)
     except (ConfigError, ControllerError, LabError) as error:
         print(f"FATAL: {error}")
@@ -248,6 +263,79 @@ def _manuscript(arguments: argparse.Namespace) -> int:
     return OK
 
 
+def _review(arguments: argparse.Namespace) -> int:
+    root = Path(arguments.root).resolve()
+    if not _exists(root):
+        return FAILED
+    investigation_id = _chosen(root, arguments.investigation)
+    if investigation_id is None:
+        return FAILED
+    try:
+        result = review_manuscript(
+            root,
+            investigation_id,
+            lab=_lab(arguments),
+            out_dir=Path(arguments.out).resolve() if arguments.out else None,
+            model=arguments.model,
+            revise=not arguments.review_only,
+        )
+    except (
+        MissingFactError,
+        NothingToReportError,
+        NothingToReviewError,
+    ) as error:
+        print(f"REFUSED: {error}")
+        return REFUSED
+    except (
+        PacketError,
+        ManuscriptError,
+        ReviewError,
+        ModelProviderError,
+    ) as error:
+        print(f"FATAL: {error}")
+        return FAILED
+    review = result.review
+    deterministic = sum(
+        1 for f in review.findings if f.origin == "deterministic"
+    )
+    print(f"review        {review.review_id}")
+    print(f"manuscript    {review.manuscript_id}")
+    print(f"verdict       {review.verdict}")
+    print(
+        f"findings      {len(review.findings)} "
+        f"({deterministic} deterministic, "
+        f"{len(review.findings) - deterministic} model)"
+    )
+    print(
+        f"model         {review.call.requested_model} "
+        f"(served {review.call.served_model} via {review.call.provider})"
+    )
+    print(f"replayed      {str(result.replayed).lower()}")
+    if result.opening_review is not None:
+        print(
+            f"opening       {result.opening_review.review_id} (revise, "
+            f"{len(result.opening_review.findings)} finding(s))"
+        )
+    if result.superseded_manuscript is not None:
+        print(
+            f"superseded    "
+            f"{result.superseded_manuscript.manuscript_id}"
+        )
+    print(f"review json   {result.review_path}")
+    print(f"markdown      {result.manuscript_markdown_path}")
+    if review.verdict is ReviewVerdict.REVISE:
+        print()
+        for finding in review.findings:
+            subject = f" (record {finding.subject_id})" if finding.subject_id else ""
+            print(
+                f"  {finding.origin} {finding.issue} in "
+                f"{finding.section}: {finding.quote!r}{subject} — "
+                f"{finding.explanation}"
+            )
+        return FAILED
+    return OK
+
+
 # -- helpers ------------------------------------------------------------------
 
 
@@ -381,6 +469,30 @@ def _parser() -> argparse.ArgumentParser:
         "--out",
         type=Path,
         help="directory for the manuscript files (default: ROOT/manuscript)",
+    )
+
+    review = commands.add_parser(
+        "review", help="review the manuscript against the packet"
+    )
+    review.add_argument("investigation", nargs="?", help="investigation id")
+    _add_root(review)
+    _add_lab(review)
+    review.add_argument(
+        "--model",
+        help=(
+            "model for the reviewing seat (default: the investigation's "
+            "recorded model); every record carries requested and served"
+        ),
+    )
+    review.add_argument(
+        "--out",
+        type=Path,
+        help="directory for the review records (default: ROOT/review)",
+    )
+    review.add_argument(
+        "--review-only",
+        action="store_true",
+        help="record the verdict without the revise cycle",
     )
     return parser
 

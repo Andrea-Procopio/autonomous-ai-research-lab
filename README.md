@@ -238,7 +238,7 @@ Expect interfaces to change.
 | `search` | Policies for choosing the next action among candidates. |
 | `roles` | Interfaces for the agents, including the model-backed engineer and planner. A role receives a task and returns proposals. It never edits state directly. |
 | `orchestration` | The main loop: pick an action, route it to a role, validate what comes back, commit it, log everything. |
-| `publication` | The evidence packet — flat, checked-not-copied mirrors of everything a manuscript may claim — and the manuscript itself: one gated model call writes five prose sections, deterministic gates refuse unknown numbers and unresolved citations, and trusted code assembles every load-bearing section from the packet. The reviewer role is still to come. Depends on `core`, `evidence`, and `runtime`; its one consumer is `control` (now enforced by the layering tests). |
+| `publication` | The evidence packet — flat, checked-not-copied mirrors of everything a manuscript may claim — the manuscript (one gated model call writes five prose sections behind deterministic number/citation/structure gates; trusted code assembles everything else), and the faithfulness reviewer (findings grounded in verbatim quotes and record ids or refused; the verdict derived by trusted code; one bounded revise cycle recorded as its own succession fact). Depends on `core`, `evidence`, and `runtime`; its one consumer is `control` (enforced by the layering tests). |
 
 Dependencies point one way: higher packages import lower ones, never
 the reverse, and `core` imports nothing. `control` is the one exception
@@ -304,6 +304,7 @@ arl status [INVESTIGATION] --root DIR
 arl verify --root DIR
 arl packet [INVESTIGATION] --root DIR [--out DIR]
 arl manuscript [INVESTIGATION] --root DIR [--lab module:factory] [--model NAME] [--out DIR]
+arl review [INVESTIGATION] --root DIR [--lab module:factory] [--model NAME] [--out DIR] [--review-only]
 ```
 
 `run` records the config and walks as far as it can. `resume` picks up
@@ -317,7 +318,13 @@ that never reached a research state. `manuscript` authors the workshop
 draft from that packet: a model writes prose only, behind deterministic
 gates that refuse any number the packet does not state and any citation
 outside its bibliography; trusted code assembles everything else.
-Re-running replays the recorded draft without a model call.
+Re-running replays the recorded draft without a model call. `review`
+runs the faithfulness reviewer over that draft: trusted code and one
+gated model call judge whether the prose claims anything the packet
+does not record — every finding grounded in a verbatim quote and a
+record id, or refused. A REVISE verdict triggers at most one
+revision-and-re-review cycle; a standing REVISE exits 1 with the
+findings printed.
 
 Exit codes are for scripts as much as for people: `0` for a walk that
 ended on its own terms — including an honest scientific no, which is a
