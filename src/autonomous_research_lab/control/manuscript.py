@@ -41,6 +41,7 @@ from ..publication.store import (
     AmbiguousHeadError,
     ManuscriptStore,
     ReviewStore,
+    SimulationStore,
     head_for,
 )
 from ..runtime.providers import ModelProvider, UsageLedger
@@ -54,6 +55,7 @@ _CONTROL = "control"
 _PACKET = "packet"
 _MANUSCRIPT = "manuscript"
 _REVIEW = "review"
+_SIMULATION = "simulation"
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,13 +88,16 @@ def author_manuscript(
 
     store = ManuscriptStore(out_dir if out_dir is not None else root / _MANUSCRIPT)
     heads = head_for(
-        store, ReviewStore(root / _REVIEW), packet.packet_id
+        store,
+        ReviewStore(root / _REVIEW),
+        packet.packet_id,
+        SimulationStore(root / _SIMULATION),
     )
     if len(heads) > 1:
         raise AmbiguousHeadError(
-            f"an interrupted review cycle left {len(heads)} drafts "
-            f"standing for packet {packet.packet_id}; run arl review to "
-            f"complete it"
+            f"an interrupted cycle left {len(heads)} drafts standing "
+            f"for packet {packet.packet_id}; run arl review or arl "
+            f"simulate to complete it"
         )
     if heads:
         manuscript = heads[0]

@@ -33,13 +33,19 @@ from ..publication.review import (
     ReviewRecord,
     ReviewVerdict,
 )
-from ..publication.store import ManuscriptStore, ReviewStore, head_for
+from ..publication.store import (
+    ManuscriptStore,
+    ReviewStore,
+    SimulationStore,
+    head_for,
+)
 from .packet import build_packet, write_packet
 
 _PACKET = "packet"
 _MANUSCRIPT = "manuscript"
 _REVIEW = "review"
 _SUBMISSION = "submission"
+_SIMULATION = "simulation"
 
 _LOG_TAIL_LINES = 30
 
@@ -84,7 +90,12 @@ def render_submission(
 
     manuscripts = ManuscriptStore(root / _MANUSCRIPT)
     reviews = ReviewStore(root / _REVIEW)
-    heads = head_for(manuscripts, reviews, packet.packet_id)
+    heads = head_for(
+        manuscripts,
+        reviews,
+        packet.packet_id,
+        SimulationStore(root / _SIMULATION),
+    )
     if not heads:
         raise NothingToReviewError(
             f"no manuscript exists for packet {packet.packet_id}; "
@@ -95,7 +106,8 @@ def render_submission(
     if len(heads) > 1:
         raise RenderError(
             f"{len(heads)} drafts stand for packet {packet.packet_id}; "
-            f"run arl review to complete the interrupted cycle first"
+            f"run arl review or arl simulate to complete the "
+            f"interrupted cycle first"
         )
     standing = reviews.for_manuscript(head.manuscript_id)
     if not standing:

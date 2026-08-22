@@ -40,6 +40,7 @@ from ..publication.store import (
     AmbiguousHeadError,
     ManuscriptStore,
     ReviewStore,
+    SimulationStore,
     head_for,
 )
 from ..runtime.providers import UsageLedger
@@ -50,6 +51,7 @@ from .packet import build_packet, write_packet
 _PACKET = "packet"
 _MANUSCRIPT = "manuscript"
 _REVIEW = "review"
+_SIMULATION = "simulation"
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,6 +84,7 @@ class _Cycle:
         self.packet = packet
         self.manuscripts = manuscripts
         self.reviews = reviews
+        self.simulations = SimulationStore(root / _SIMULATION)
         self._lab = lab
         self._model = model
         self.called = False
@@ -169,7 +172,10 @@ def _resolved_head(cycle: _Cycle) -> Manuscript:
     the cycle can leave: a revision authored but its succession not yet
     recorded (the adoption rule)."""
     heads = head_for(
-        cycle.manuscripts, cycle.reviews, cycle.packet.packet_id
+        cycle.manuscripts,
+        cycle.reviews,
+        cycle.packet.packet_id,
+        cycle.simulations,
     )
     if len(heads) == 1:
         return heads[0]
@@ -202,10 +208,14 @@ def _resolved_head(cycle: _Cycle) -> Manuscript:
                 )
             )
             return unreviewed[0]
+    # The adoption rule above is rvn-only by design: a polish
+    # succession must never disable, or be invented as, a faithfulness
+    # revision — the simulate verb owns its own recovery.
     raise AmbiguousHeadError(
         f"{len(heads)} drafts stand for packet "
         f"{cycle.packet.packet_id} and the records do not say which "
-        f"succeeded which; this is not a state the lab writes"
+        f"succeeded which; run arl review or arl simulate to complete "
+        f"an interrupted cycle"
     )
 
 

@@ -35,10 +35,16 @@ from .review import (
     ReviewVerdict,
     RevisionRecord,
 )
+from .simulator import (
+    PolishRecord,
+    SimulationError,
+    SimulationRecord,
+    VenueReview,
+)
 
 _RECORD_SUFFIX = ".json"
 
-_R = TypeVar("_R", "ReviewRecord", "RevisionRecord")
+_R = TypeVar("_R")
 _REJECTED_DIRNAME = "rejected"
 
 
@@ -355,12 +361,7 @@ class ReviewStore:
         return self._root / f"{record_id}{_RECORD_SUFFIX}"
 
     def _load(self, record_id: str) -> dict[str, object] | None:
-        path = self._path(record_id)
-        if not path.exists():
-            return None
-        loaded = json.loads(path.read_text(encoding="utf-8"))
-        assert isinstance(loaded, dict)
-        return loaded
+        return _load_payload(self._root, record_id)
 
     def _record(
         self,
@@ -369,30 +370,340 @@ class ReviewStore:
         get: Callable[[str], _R | None],
         kind: str,
     ) -> _R:
-        existing = get(record_id)
-        if existing is not None:
-            if existing != record:
-                raise ReviewConflictError(
-                    f"{kind} {record_id} is already recorded with "
-                    f"different content; records are never rewritten"
-                )
-            return existing
-        self._path(record_id).write_text(
-            json.dumps(to_jsonable(record), indent=2, sort_keys=True),
+        return _write_once(
+            self._root, record, record_id, get, kind, ReviewConflictError
+        )
+
+
+def _load_payload(root: Path, record_id: str) -> dict[str, object] | None:
+    path = root / f"{record_id}{_RECORD_SUFFIX}"
+    if not path.exists():
+        return None
+    loaded = json.loads(path.read_text(encoding="utf-8"))
+    assert isinstance(loaded, dict)
+    return loaded
+
+
+def _write_once(
+    root: Path,
+    record: _R,
+    record_id: str,
+    get: Callable[[str], _R | None],
+    kind: str,
+    conflict: type[Exception],
+) -> _R:
+    existing = get(record_id)
+    if existing is not None:
+        if existing != record:
+            raise conflict(
+                f"{kind} {record_id} is already recorded with "
+                f"different content; records are never rewritten"
+            )
+        return existing
+    (root / f"{record_id}{_RECORD_SUFFIX}").write_text(
+        json.dumps(to_jsonable(record), indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    return record
+
+
+class SimulationConflictError(SimulationError):
+    """A simulation record id is already taken by different content."""
+
+
+class SimulationIntegrityError(SimulationError):
+    """A stored simulation record no longer matches its own name."""
+
+
+class SimulationStore:
+    """Write-once storage for venue reviews, simulations, and polish
+    successions, under ``root/simulation``. The same discipline as
+    every store: the filename is the content id, identical re-records
+    are no-ops, and loading re-derives the id."""
+
+    def __init__(self, root: Path | str) -> None:
+        self._root = Path(root)
+        self._root.mkdir(parents=True, exist_ok=True)
+
+    @property
+    def root(self) -> Path:
+        return self._root
+
+    # -- venue reviews -------------------------------------------------------
+
+    def record_review(self, review: VenueReview) -> VenueReview:
+        return _write_once(
+            self._root,
+            review,
+            review.review_id,
+            self.get_review,
+            "venue review",
+            SimulationConflictError,
+        )
+
+    def get_review(self, review_id: str) -> VenueReview | None:
+        payload = _load_payload(self._root, review_id)
+        if payload is None:
+            return None
+        try:
+            review = _venue_review_from(payload)
+        except (SimulationError, ManuscriptError) as error:
+            raise SimulationIntegrityError(
+                f"venue review filed under {review_id} does not survive "
+                f"loading: {error}"
+            ) from error
+        if review.review_id != review_id:
+            raise SimulationIntegrityError(
+                f"venue review filed under {review_id} re-derives id "
+                f"{review.review_id}; refusing to load a record that no "
+                f"longer matches its name"
+            )
+        return review
+
+    def reviews(self) -> tuple[VenueReview, ...]:
+        return tuple(
+            found
+            for path in sorted(self._root.glob(f"vrev_*{_RECORD_SUFFIX}"))
+            if (found := self.get_review(path.stem)) is not None
+        )
+
+    def reviews_for(
+        self, manuscript_id: str, tex_sha256: str
+    ) -> tuple[VenueReview, ...]:
+        return tuple(
+            found
+            for found in self.reviews()
+            if found.manuscript_id == manuscript_id
+            and found.tex_sha256 == tex_sha256
+        )
+
+    # -- simulations ---------------------------------------------------------
+
+    def record_simulation(
+        self, simulation: SimulationRecord
+    ) -> SimulationRecord:
+        return _write_once(
+            self._root,
+            simulation,
+            simulation.simulation_id,
+            self.get_simulation,
+            "simulation",
+            SimulationConflictError,
+        )
+
+    def get_simulation(
+        self, simulation_id: str
+    ) -> SimulationRecord | None:
+        payload = _load_payload(self._root, simulation_id)
+        if payload is None:
+            return None
+        try:
+            simulation = SimulationRecord(
+                manuscript_id=str(payload["manuscript_id"]),
+                packet_id=str(payload["packet_id"]),
+                venue_name=str(payload["venue_name"]),
+                tex_sha256=str(payload["tex_sha256"]),
+                bar=int(payload["bar"]),  # type: ignore[call-overload]
+                review_ids=tuple(
+                    str(found) for found in _listed(payload, "review_ids")
+                ),
+                medians=tuple(
+                    (str(pair[0]), float(pair[1]))  # type: ignore[index]
+                    for pair in _listed(payload, "medians")
+                ),
+                meets_bar=bool(payload["meets_bar"]),
+                simulation_id=str(payload["simulation_id"]),
+            )
+        except SimulationError as error:
+            raise SimulationIntegrityError(
+                f"simulation filed under {simulation_id} does not "
+                f"survive loading: {error}"
+            ) from error
+        if simulation.simulation_id != simulation_id:
+            raise SimulationIntegrityError(
+                f"simulation filed under {simulation_id} re-derives id "
+                f"{simulation.simulation_id}; refusing to load a record "
+                f"that no longer matches its name"
+            )
+        return simulation
+
+    def simulations(self) -> tuple[SimulationRecord, ...]:
+        return tuple(
+            found
+            for path in sorted(self._root.glob(f"vsim_*{_RECORD_SUFFIX}"))
+            if (found := self.get_simulation(path.stem)) is not None
+        )
+
+    def for_manuscript(
+        self, manuscript_id: str
+    ) -> tuple[SimulationRecord, ...]:
+        return tuple(
+            found
+            for found in self.simulations()
+            if found.manuscript_id == manuscript_id
+        )
+
+    # -- polish successions --------------------------------------------------
+
+    def record_polish(self, polish: PolishRecord) -> PolishRecord:
+        return _write_once(
+            self._root,
+            polish,
+            polish.polish_id,
+            self.get_polish,
+            "polish",
+            SimulationConflictError,
+        )
+
+    def get_polish(self, polish_id: str) -> PolishRecord | None:
+        payload = _load_payload(self._root, polish_id)
+        if payload is None:
+            return None
+        try:
+            polish = PolishRecord(
+                packet_id=str(payload["packet_id"]),
+                simulation_id=str(payload["simulation_id"]),
+                superseded_manuscript_id=str(
+                    payload["superseded_manuscript_id"]
+                ),
+                revision_manuscript_id=str(
+                    payload["revision_manuscript_id"]
+                ),
+                polish_id=str(payload["polish_id"]),
+            )
+        except SimulationError as error:
+            raise SimulationIntegrityError(
+                f"polish filed under {polish_id} does not survive "
+                f"loading: {error}"
+            ) from error
+        if polish.polish_id != polish_id:
+            raise SimulationIntegrityError(
+                f"polish filed under {polish_id} re-derives id "
+                f"{polish.polish_id}; refusing to load a record that no "
+                f"longer matches its name"
+            )
+        return polish
+
+    def polishes_for(self, packet_id: str) -> tuple[PolishRecord, ...]:
+        return tuple(
+            found
+            for path in sorted(self._root.glob(f"plsh_*{_RECORD_SUFFIX}"))
+            if (found := self.get_polish(path.stem)) is not None
+            and found.packet_id == packet_id
+        )
+
+    # -- rejected ------------------------------------------------------------
+
+    def preserve_rejected(
+        self,
+        *,
+        manuscript_id: str,
+        packet_id: str,
+        lens: str,
+        tex_sha256: str,
+        reasons: tuple[tuple[str, str], ...],
+        request_fingerprint: str,
+        response_id: str,
+        payload: object,
+        repair: int,
+    ) -> Path:
+        directory = self._root / _REJECTED_DIRNAME
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / f"{occurrence_id('rej')}{_RECORD_SUFFIX}"
+        path.write_text(
+            json.dumps(
+                {
+                    "manuscript_id": manuscript_id,
+                    "packet_id": packet_id,
+                    "lens": lens,
+                    "tex_sha256": tex_sha256,
+                    "reasons": [list(reason) for reason in reasons],
+                    "request_fingerprint": request_fingerprint,
+                    "response_id": response_id,
+                    "payload": to_jsonable(payload),
+                    "repair": repair,
+                },
+                indent=2,
+                sort_keys=True,
+            ),
             encoding="utf-8",
         )
-        return record
+        return path
+
+    def rejected(self) -> tuple[Mapping[str, object], ...]:
+        directory = self._root / _REJECTED_DIRNAME
+        if not directory.exists():
+            return ()
+        return tuple(
+            json.loads(path.read_text(encoding="utf-8"))
+            for path in sorted(directory.glob(f"*{_RECORD_SUFFIX}"))
+        )
+
+
+def _listed(payload: Mapping[str, object], key: str) -> list[object]:
+    raw = payload[key]
+    assert isinstance(raw, list)
+    return raw
+
+
+def _venue_review_from(payload: Mapping[str, object]) -> VenueReview:
+    call = payload["call"]
+    assert isinstance(call, Mapping)
+    return VenueReview(
+        manuscript_id=str(payload["manuscript_id"]),
+        packet_id=str(payload["packet_id"]),
+        venue_name=str(payload["venue_name"]),
+        tex_sha256=str(payload["tex_sha256"]),
+        lens=str(payload["lens"]),
+        summary=str(payload["summary"]),
+        strengths=tuple(
+            str(found) for found in _listed(payload, "strengths")
+        ),
+        weaknesses=tuple(
+            str(found) for found in _listed(payload, "weaknesses")
+        ),
+        questions=tuple(
+            str(found) for found in _listed(payload, "questions")
+        ),
+        originality=int(payload["originality"]),  # type: ignore[call-overload]
+        quality=int(payload["quality"]),  # type: ignore[call-overload]
+        clarity=int(payload["clarity"]),  # type: ignore[call-overload]
+        significance=int(payload["significance"]),  # type: ignore[call-overload]
+        soundness=int(payload["soundness"]),  # type: ignore[call-overload]
+        presentation=int(payload["presentation"]),  # type: ignore[call-overload]
+        contribution=int(payload["contribution"]),  # type: ignore[call-overload]
+        overall=int(payload["overall"]),  # type: ignore[call-overload]
+        confidence=int(payload["confidence"]),  # type: ignore[call-overload]
+        call=AuthorCall(
+            request_fingerprint=str(call["request_fingerprint"]),
+            response_id=str(call["response_id"]),
+            provider=str(call["provider"]),
+            requested_model=str(call["requested_model"]),
+            served_model=str(call["served_model"]),
+            provider_request_id=(
+                str(call["provider_request_id"])
+                if call["provider_request_id"] is not None
+                else None
+            ),
+            latency_seconds=float(call["latency_seconds"]),
+            input_tokens=int(call["input_tokens"]),
+            output_tokens=int(call["output_tokens"]),
+            repair_count=int(call["repair_count"]),
+        ),
+        review_id=str(payload["review_id"]),
+    )
 
 
 def head_for(
     manuscripts: ManuscriptStore,
     reviews: ReviewStore,
     packet_id: str,
+    simulations: SimulationStore | None = None,
 ) -> tuple[Manuscript, ...]:
-    """The manuscripts currently standing for a packet: those no
-    revision record supersedes, id-ordered. One is the ordinary state;
-    zero means author first; two or more is an interrupted review cycle
-    for the review verb to complete."""
+    """The manuscripts currently standing for a packet: those neither a
+    revision record nor a polish record supersedes, id-ordered. One is
+    the ordinary state; zero means author first; two or more is an
+    interrupted cycle for the review or simulate verb to complete."""
     superseded = set()
     for revision in reviews.revisions_for(packet_id):
         if manuscripts.get(revision.revision_manuscript_id) is None:
@@ -402,6 +713,15 @@ def head_for(
                 f"does not hold"
             )
         superseded.add(revision.superseded_manuscript_id)
+    if simulations is not None:
+        for polish in simulations.polishes_for(packet_id):
+            if manuscripts.get(polish.revision_manuscript_id) is None:
+                raise SimulationIntegrityError(
+                    f"polish {polish.polish_id} names manuscript "
+                    f"{polish.revision_manuscript_id}, which the store "
+                    f"does not hold"
+                )
+            superseded.add(polish.superseded_manuscript_id)
     return tuple(
         found
         for found in manuscripts.for_packet(packet_id)
