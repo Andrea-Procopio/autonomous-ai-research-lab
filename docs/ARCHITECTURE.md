@@ -2606,8 +2606,8 @@ multi-head state is a hand-edited store and a refusal).
 The reviewer is deliberately not a venue simulator: it judges
 faithfulness against the record, where questions have checkable
 answers. Conference-readiness scoring — an impression instrument — is
-a separate, later seat (8E), and its feedback will drive prose
-revision under these same gates, never past them.
+a separate seat (the venue simulator, below), and its feedback drives
+prose revision under these same gates, never past them.
 
 ## Venue rendering (Task 8D)
 
@@ -2656,6 +2656,52 @@ an unchanged record is a no-op. The PDF a toolchain makes from it is a
 timestamps): the `.tex` is the record, the PDF is not, and `--pdf`
 with no toolchain installed is a failure naming what to install, not a
 shrug.
+
+## The venue simulator (Task 8E)
+
+Two reviewers, two questions, kept apart on purpose. The faithfulness
+reviewer (8C) asks *is it true?* against the record, and gates. The
+venue simulator asks *how does it read?* — and it reads exactly what a
+venue reviewer would: the rendered ``main.tex`` and its bibliography,
+nothing else. Blindness to the record is what makes the simulation
+honest; a simulator that peeked would become a weaker second
+faithfulness reviewer, and one that gated on impressions would put
+persuasiveness above truth.
+
+The ensemble is **lens-diverse at temperature zero**: three
+deterministic reviewer perspectives — rigor, clarity, significance —
+in place of sampling one prompt at temperature 0.75. Each lens fills
+the NeurIPS review form (dimensional scores 1–4, overall 1–10,
+confidence 1–5, all integer enums; strengths, weaknesses, questions as
+text), and the form has **no verdict property**: accept or reject is
+unexpressible. Trusted code takes the medians and derives the outcome
+against an operator-configured bar. Deliberately absent from the
+Sakana lineage this borrows from: bias prompts (steering the verdict
+is exactly what this lab does not do), reflection rounds (the bounded
+corrective-call discipline is the only retry), and few-shot
+third-party reviews.
+
+A below-bar reading triggers **one polish cycle, ever**: the recorded
+weaknesses travel to the author as polish notes (a separate request
+path from faithfulness findings — a venue's opinion is not a grounded
+finding, and never pretends to be), the revision passes the same
+number/citation/structure gates, must be APPROVED by a fresh
+faithfulness review (a REVISE there is a typed stop — presentation
+polish does not outrank the record), is re-rendered, and re-scored
+once. The succession is a ``PolishRecord``, deliberately not a
+faithfulness ``RevisionRecord``: a polish must never disable, or be
+mistaken for, the faithfulness revise cycle. Head resolution unions
+both succession kinds, so the author, reviewer, render, and simulate
+verbs always agree on which draft stands, and every crash window
+recovers by dispatch on the durable record.
+
+Every lens review and every aggregate is write-once with its call's
+provenance, and the reviews are the replay unit: re-running with a
+different bar derives a new aggregate from the same recorded reviews
+with zero model calls. The score is an instrument reading. It informs;
+it is never the objective — the ROADMAP's standing warning, now
+enforced by construction: nothing downstream optimizes for it, and the
+only thing it can trigger is prose polish under the gates.
 
 ## Architectural invariants
 
@@ -2785,7 +2831,7 @@ control       the composition root: one command over the seven stages,
               the stage event log, and the recovery that finishes a
               step a killed process left half done  (may import every
               stage; nothing imports it)
-publication   the packet, the manuscript, the reviewer, venue kits
+publication   packet, manuscript, reviewer, venue kits, simulator
 ```
 
 Dependencies point downward only; `core` imports nothing from its

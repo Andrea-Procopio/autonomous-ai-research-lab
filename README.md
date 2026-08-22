@@ -238,7 +238,7 @@ Expect interfaces to change.
 | `search` | Policies for choosing the next action among candidates. |
 | `roles` | Interfaces for the agents, including the model-backed engineer and planner. A role receives a task and returns proposals. It never edits state directly. |
 | `orchestration` | The main loop: pick an action, route it to a role, validate what comes back, commit it, log everything. |
-| `publication` | The evidence packet — flat, checked-not-copied mirrors of everything a manuscript may claim — the manuscript (one gated model call writes five prose sections behind deterministic number/citation/structure gates; trusted code assembles everything else), and the faithfulness reviewer (findings grounded in verbatim quotes and record ids or refused; the verdict derived by trusted code; one bounded revise cycle recorded as its own succession fact), and venue rendering (the approved draft typeset into an operator-staged, hash-pinned conference kit; the venue is deployment configuration and never enters a record). Depends on `core`, `evidence`, and `runtime`; its one consumer is `control` (enforced by the layering tests). |
+| `publication` | The evidence packet — flat, checked-not-copied mirrors of everything a manuscript may claim — the manuscript (one gated model call writes five prose sections behind deterministic number/citation/structure gates; trusted code assembles everything else), and the faithfulness reviewer (findings grounded in verbatim quotes and record ids or refused; the verdict derived by trusted code; one bounded revise cycle recorded as its own succession fact), venue rendering (the approved draft typeset into an operator-staged, hash-pinned conference kit; the venue is deployment configuration and never enters a record), and the venue simulator (a lens-diverse ensemble of NeurIPS-form reviews over the rendered submission, blind to the record, aggregated by trusted-code medians against a configured bar — an impression instrument, never the objective). Depends on `core`, `evidence`, and `runtime`; its one consumer is `control` (enforced by the layering tests). |
 
 Dependencies point one way: higher packages import lower ones, never
 the reverse, and `core` imports nothing. `control` is the one exception
@@ -306,6 +306,7 @@ arl packet [INVESTIGATION] --root DIR [--out DIR]
 arl manuscript [INVESTIGATION] --root DIR [--lab module:factory] [--model NAME] [--out DIR]
 arl review [INVESTIGATION] --root DIR [--lab module:factory] [--model NAME] [--out DIR] [--review-only]
 arl render [INVESTIGATION] --root DIR (--venue NAME | --venue-config FILE) [--kits DIR] [--out DIR] [--pdf]
+arl simulate [INVESTIGATION] --root DIR (--venue NAME | --venue-config FILE) [--kits DIR] [--reviews N] [--bar N] [--no-polish]
 ```
 
 `run` records the config and walks as far as it can. `resume` picks up
@@ -330,6 +331,12 @@ findings printed. `render` typesets the approved draft for a venue:
 beside the staged kit's verified files — refused while the standing
 review is anything but approved. `--pdf` compiles when a LaTeX
 toolchain is installed; the PDF is a derived artifact, never a record.
+`simulate` takes a venue's reading of that submission: an ensemble of
+NeurIPS-form model reviews over exactly the document a venue reviewer
+would see, aggregated by trusted code against a configured bar. A
+below-bar reading triggers at most one polish revision — re-gated,
+re-reviewed for faithfulness, re-rendered, re-scored once. The score is
+an instrument reading, never the objective.
 
 Venue kits are operator-staged and hash-pinned, like datasets:
 
