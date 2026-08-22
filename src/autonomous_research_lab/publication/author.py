@@ -18,24 +18,22 @@ the model's.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+import json
 from typing import Final
 
 from ..runtime.providers import (
     Message,
     MessageRole,
     ModelProvider,
-    ModelProviderError,
     ModelRequest,
-    ModelResponse,
     OutputSchema,
-    StructuredOutputError,
     UsageLedger,
 )
+from ._calling import GatedCaller
 from .manuscript import (
     PROSE_SECTIONS,
-    AuthorCall,
     Manuscript,
+    ManuscriptError,
     ManuscriptRejectedError,
     ProseRejection,
     ProseSections,
@@ -44,6 +42,7 @@ from .manuscript import (
     require_reportable,
 )
 from .packet import EvidencePacket, render_markdown
+from .review import ReviewFinding
 from .store import ManuscriptStore
 
 PROSE_SCHEMA: Final = OutputSchema(
@@ -83,16 +82,6 @@ AUTHOR_INSTRUCTION: Final = (
 )
 
 
-class _Spend:
-    __slots__ = ("calls", "input_tokens", "limit", "output_tokens")
-
-    def __init__(self, limit: int) -> None:
-        self.limit = limit
-        self.calls = 0
-        self.input_tokens = 0
-        self.output_tokens = 0
-
-
 class ManuscriptAuthor:
     def __init__(
         self,
@@ -106,42 +95,112 @@ class ManuscriptAuthor:
         request_timeout_seconds: float = 240.0,
         max_corrective_calls: int = 1,
     ) -> None:
-        self._provider = provider
         self._model = model
-        self._ledger = ledger
         self._store = store
         self._max_output_tokens = max_output_tokens
         self._temperature = temperature
         self._request_timeout_seconds = request_timeout_seconds
-        self._max_corrective_calls = max_corrective_calls
+        self._caller = GatedCaller(
+            provider=provider,
+            ledger=ledger,
+            max_corrective_calls=max_corrective_calls,
+        )
 
-    def author(self, packet: EvidencePacket) -> Manuscript:
-        """One accepted draft for this packet, or a typed refusal."""
+    def author(
+        self,
+        packet: EvidencePacket,
+        *,
+        revision_of: Manuscript | None = None,
+        findings: tuple[ReviewFinding, ...] = (),
+    ) -> Manuscript:
+        """One accepted draft for this packet, or a typed refusal.
+
+        With ``revision_of`` and ``findings``, the call revises: the
+        prior draft and the grounded findings travel with the request,
+        and the same gates judge the result — a revision may fix a
+        finding, never loosen a constraint.
+        """
+        if (revision_of is None) != (not findings):
+            raise ManuscriptError(
+                "a revision names the draft it revises and the findings "
+                "that demanded it — one without the other is malformed"
+            )
         require_reportable(packet)
         allowed = known_renderings(packet)
+        messages = [
+            Message(
+                role=MessageRole.USER,
+                content=render_markdown(packet),
+            ),
+        ]
+        metadata = {"packet": packet.packet_id, "stage": "manuscript"}
+        if revision_of is not None:
+            rendered = "\n".join(
+                f"- {f.section}: {f.issue}: quoted {f.quote!r} "
+                f"(record {f.subject_id or 'none'}) — {f.explanation}"
+                for f in findings
+            )
+            messages.append(
+                Message(
+                    role=MessageRole.ASSISTANT,
+                    content=json.dumps(
+                        {
+                            name: getattr(revision_of.sections, name)
+                            for name in PROSE_SECTIONS
+                        }
+                    ),
+                )
+            )
+            messages.append(
+                Message(
+                    role=MessageRole.USER,
+                    content=(
+                        f"A faithfulness review found these grounded "
+                        f"issues in your draft:\n{rendered}\n"
+                        f"Revise the draft to fix each finding; change "
+                        f"nothing else beyond what fixing requires; "
+                        f"every original constraint holds."
+                    ),
+                )
+            )
+            metadata["revision_of"] = revision_of.manuscript_id
         request = ModelRequest(
             model=self._model,
             instruction=AUTHOR_INSTRUCTION,
-            messages=(
-                Message(
-                    role=MessageRole.USER,
-                    content=render_markdown(packet),
-                ),
-            ),
+            messages=tuple(messages),
             schema=PROSE_SCHEMA,
             max_output_tokens=self._max_output_tokens,
             temperature=self._temperature,
             timeout_seconds=self._request_timeout_seconds,
-            metadata={"packet": packet.packet_id, "stage": "manuscript"},
+            metadata=metadata,
         )
-        payload, call = self._gated_call(
+        payload, call = self._caller.gated_call(
             request,
             gate=lambda found: gate_prose(
                 {name: str(found[name]) for name in PROSE_SECTIONS},
                 allowed=allowed,
                 bibliography=packet.bibliography,
             ),
-            packet_id=packet.packet_id,
+            preserve=lambda reasons, fingerprint, response_id, raw, repair: (
+                self._store.preserve_rejected(
+                    packet_id=packet.packet_id,
+                    reasons=reasons,
+                    request_fingerprint=fingerprint,
+                    response_id=response_id,
+                    payload=raw,
+                    repair=repair,
+                )
+            ),
+            feedback=_feedback,
+            exhausted=lambda rejections: ManuscriptRejectedError(
+                "the draft was rejected by the deterministic gates: "
+                + "; ".join(f"{r.rule}: {r.detail}" for r in rejections)
+            ),
+            budget_error=lambda limit: ManuscriptRejectedError(
+                f"the author's call budget ({limit}) is spent; "
+                f"refusing the call that would exceed it"
+            ),
+            requested_model=self._model,
         )
         return Manuscript(
             packet_id=packet.packet_id,
@@ -151,144 +210,14 @@ class ManuscriptAuthor:
             call=call,
         )
 
-    # -- the calling discipline, mirrored from the admission door ------------
 
-    def _invoke(self, request: ModelRequest, spend: _Spend) -> ModelResponse:
-        if spend.calls >= spend.limit:
-            raise ManuscriptRejectedError(
-                f"the author's call budget ({spend.limit}) is spent; "
-                f"refusing the call that would exceed it"
-            )
-        spend.calls += 1
-        try:
-            response = self._provider.invoke(request)
-        except ModelProviderError as error:
-            if self._ledger.record_failure(error):
-                assert error.accounting is not None
-                spend.input_tokens += error.accounting.usage.input_tokens
-                spend.output_tokens += error.accounting.usage.output_tokens
-            raise
-        self._ledger.record(response)
-        spend.input_tokens += response.usage.input_tokens
-        spend.output_tokens += response.usage.output_tokens
-        return response
-
-    def _attempt(
-        self, request: ModelRequest, spend: _Spend
-    ) -> tuple[ModelResponse | None, StructuredOutputError | None]:
-        try:
-            return self._invoke(request, spend), None
-        except StructuredOutputError as error:
-            return None, error
-
-    def _gated_call(
-        self,
-        request: ModelRequest,
-        *,
-        gate: Callable[[Mapping[str, object]], tuple[ProseRejection, ...]],
-        packet_id: str,
-    ) -> tuple[Mapping[str, object], AuthorCall]:
-        spend = _Spend(1 + self._max_corrective_calls)
-        response, schema_error = self._attempt(request, spend)
-        repairs = 0
-        while True:
-            if schema_error is not None:
-                payload: Mapping[str, object] | None = None
-                rejections: tuple[ProseRejection, ...] = (
-                    ProseRejection(
-                        "invalid_structured_output",
-                        f"the reply violated the output schema: "
-                        f"{schema_error}",
-                    ),
-                )
-                fingerprint, response_id = request.fingerprint, ""
-                raw: object = str(schema_error)
-            else:
-                assert response is not None
-                payload = response.structured
-                if payload is None:
-                    rejections = (
-                        ProseRejection(
-                            "no_structured_payload",
-                            "the reply carried no structured payload",
-                        ),
-                    )
-                else:
-                    rejections = gate(payload)
-                fingerprint = response.request_fingerprint
-                response_id = response.id
-                raw = response.text
-            if not rejections:
-                break
-            self._store.preserve_rejected(
-                packet_id=packet_id,
-                reasons=tuple((r.rule, r.detail) for r in rejections),
-                request_fingerprint=fingerprint,
-                response_id=response_id,
-                payload=payload if payload is not None else raw,
-                repair=repairs,
-            )
-            if repairs >= self._max_corrective_calls:
-                if schema_error is not None:
-                    raise schema_error
-                raise ManuscriptRejectedError(
-                    "the draft was rejected by the deterministic gates: "
-                    + "; ".join(
-                        f"{r.rule}: {r.detail}" for r in rejections
-                    )
-                )
-            repairs += 1
-            request = _repair_request(request, response, rejections, repairs)
-            response, schema_error = self._attempt(request, spend)
-        assert response is not None
-        assert payload is not None  # an absent payload never passes the gate
-        return payload, AuthorCall(
-            request_fingerprint=response.request_fingerprint,
-            response_id=response.id,
-            provider=response.provider,
-            requested_model=self._model,
-            served_model=response.model,
-            provider_request_id=response.request_id,
-            latency_seconds=response.latency_seconds,
-            input_tokens=spend.input_tokens,
-            output_tokens=spend.output_tokens,
-            repair_count=repairs,
-        )
-
-
-def _repair_request(
-    base: ModelRequest,
-    failed: ModelResponse | None,
-    rejections: tuple[ProseRejection, ...],
-    attempt: int,
-) -> ModelRequest:
-    """One corrective request: the failed draft plus every deterministic
-    rule that fired. Mechanical rules only — never a preferred wording."""
+def _feedback(rejections: tuple[ProseRejection, ...]) -> str:
     rules = "\n".join(f"- {r.rule}: {r.detail}" for r in rejections)
-    feedback = (
+    return (
         f"Your draft was rejected by the deterministic manuscript gates. "
         f"Nothing was recorded. The rules that fired:\n{rules}\n"
         f"Return one corrected draft now, satisfying every original "
         f"constraint. Every number must appear digit for digit in the "
         f"shown packet; every citation must be a bracketed source id "
         f"from the References; no line may start with '#'."
-    )
-    previous = (
-        failed.text
-        if failed is not None and failed.text
-        else "(the previous reply did not satisfy the output schema)"
-    )
-    return ModelRequest(
-        model=base.model,
-        instruction=base.instruction,
-        messages=(
-            *base.messages,
-            Message(role=MessageRole.ASSISTANT, content=previous),
-            Message(role=MessageRole.USER, content=feedback),
-        ),
-        schema=base.schema,
-        max_output_tokens=base.max_output_tokens,
-        temperature=base.temperature,
-        timeout_seconds=base.timeout_seconds,
-        metadata={**dict(base.metadata), "corrective": str(attempt)},
     )
