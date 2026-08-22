@@ -91,6 +91,7 @@ from ..core.proposals import (
     ResultProposal,
     payload_ids,
 )
+from ..core.replication import group_replications
 from ..core.state import ResearchState, recorded_lineage, recording_lineage
 from ..evidence.store import EvidenceStore, UnknownRecordError
 from ..execution.executor import derive_job_id
@@ -2297,7 +2298,9 @@ def _context_for(
         case ResearchActionType.SYNTHESIZE_FINDING:
             return _synthesis_context(state, store, verifications, target)
         case ResearchActionType.ASSESS_CLAIM:
-            return _assessment_context(state, store, verifications, target)
+            return _assessment_context(
+                state, store, verifications, target, admissible
+            )
         case ResearchActionType.PLAN_NEXT_ACTION:
             return _planning_context(state, store, verifications, admissible)
         case _:
@@ -2381,7 +2384,19 @@ def _assessment_context(
     store: EvidenceStore,
     verifications: VerificationStore,
     claim_id: str | None,
+    admissible: ScientificAdmissibility,
 ) -> RoleContext:
+    """What an assessor — a statistician — receives: raw results, the
+    designs, and the replication groups, exactly as the role contract
+    has always promised, plus the one label that makes citation safe.
+
+    The admissible ids matter because two gates squeeze from opposite
+    sides: analysis coverage demands the admissible conclusive family be
+    cited in full, and promotion demands every cited id be admissible.
+    The only citation set that satisfies both is exactly the labelled
+    family — a fact the context now states instead of leaving the role
+    to guess.
+    """
     claim = state.claim(claim_id) if claim_id else None
     if claim is None:
         return RoleContext(objective=state.objective)
@@ -2399,6 +2414,16 @@ def _assessment_context(
         for prediction in predictions
         for test in state.tests_for(prediction.id)
     )
+    experiments = tuple(
+        spec
+        for prediction in predictions
+        for spec in state.experiments_for(prediction.id)
+    )
+    results = tuple(
+        store.get_result(ref.result_id)
+        for spec in experiments
+        for ref in state.results_for(spec.id)
+    )
     # An assessor sees — and can therefore cite — every conclusive
     # observation bearing on the hypothesis, not only the claim's own
     # links: the analysis-validity gate holds it to exactly that coverage.
@@ -2415,10 +2440,16 @@ def _assessment_context(
         hypotheses=(hypothesis,) if hypothesis else (),
         predictions=tuple(predictions),
         prediction_tests=tests,
+        experiments=experiments,
+        results=results,
+        replication_groups=tuple(group_replications(results)),
         evidence=evidence,
         claims=(claim,),
         evidence_links=links,
         assessments=state.assessments,
+        admissible_evidence_ids=tuple(
+            found.id for found in evidence if admissible(found.result_id)
+        ),
         notes=_standing_notes(evidence, verifications),
     )
 

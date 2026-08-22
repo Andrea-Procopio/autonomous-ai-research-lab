@@ -31,7 +31,11 @@ from autonomous_research_lab.core.assessment import (
 )
 from autonomous_research_lab.core.claim import Claim, EvidenceLink, EvidenceRelation
 from autonomous_research_lab.core.experiment import ExperimentSpec
-from autonomous_research_lab.core.prediction import Consistency, PredictionTest
+from autonomous_research_lab.core.prediction import (
+    Consistency,
+    Prediction,
+    PredictionTest,
+)
 from autonomous_research_lab.core.proposals import (
     AssessmentProposal,
     ClaimProposal,
@@ -41,6 +45,7 @@ from autonomous_research_lab.core.proposals import (
 from autonomous_research_lab.core.state import ResearchState
 from autonomous_research_lab.roles.base import (
     ResearchRole,
+    RoleContext,
     RoleInvocation,
     RoleName,
     RoleSuitability,
@@ -55,6 +60,7 @@ from autonomous_research_lab.runtime.implementation_store import (
     SourceFile,
 )
 from autonomous_research_lab.runtime.preflight import JobLike
+from autonomous_research_lab.runtime.statistics import assess_family
 from autonomous_research_lab.runtime.verification import (
     CheckState,
     PositiveControl,
@@ -64,7 +70,7 @@ from autonomous_research_lab.runtime.verification import (
 
 from .catalog import entry_for_metric, fixed_regions
 
-SEEDS = (11, 23, 47)
+SEEDS = (11, 23, 47, 71, 83)
 
 
 class VisionScientist(ResearchRole):
@@ -232,6 +238,172 @@ def _verdict(tests: Sequence[PredictionTest]) -> AssessmentVerdict:
         return AssessmentVerdict.REFUTED
     if consistent:
         return AssessmentVerdict.SUPPORTED
+    return AssessmentVerdict.UNDETERMINED
+
+
+class VisionStatistician(ResearchRole):
+    """The result-analyst seat, with the arithmetic done properly.
+
+    For ASSESS_CLAIM: exact inference over the claim's replication
+    family — the raw per-seed observations the enriched context now
+    carries — with the comparison count pinned across the hypothesis's
+    tested predictions and every figure stated in the assessment's own
+    rationale. The verdict is trusted code's; no model authors a number.
+
+    Citation discipline, exactly as the gates demand: the hypothesis-wide
+    admissible conclusive family, in full, for every verdict — coverage
+    applies to UNDETERMINED too, and promotion refuses any inadmissible
+    citation. The statistic itself is computed over admissible tests
+    only, because an inadmissible observation counted-but-uncited would
+    slip both gates.
+
+    ANALYZE (the critic path) keeps the prior analyst behavior,
+    delegated unchanged.
+    """
+
+    def __init__(self, *, alpha: float = 0.05) -> None:
+        self._alpha = alpha
+        self._fallback = VisionAnalyst()
+
+    @property
+    def name(self) -> RoleName:
+        return RoleName.RESULT_ANALYST
+
+    @property
+    def supported_actions(self) -> frozenset[ResearchActionType]:
+        return frozenset(
+            {ResearchActionType.ANALYZE, ResearchActionType.ASSESS_CLAIM}
+        )
+
+    def suitability(
+        self, state: ResearchState, action: ResearchAction
+    ) -> RoleSuitability:
+        del state, action
+        return RoleSuitability(value=1.0)
+
+    def perform(self, invocation: RoleInvocation) -> tuple[Proposal, ...]:
+        if (
+            invocation.assignment.action_type
+            is not ResearchActionType.ASSESS_CLAIM
+        ):
+            return self._fallback.perform(invocation)
+        context = invocation.context
+        claim = context.claims[0]
+        admissible_ids = set(context.admissible_evidence_ids)
+        admissible_result_ids = {
+            found.result_id
+            for found in context.evidence
+            if found.id in admissible_ids
+        }
+        seed_of = {
+            result.id: result.seed for result in context.results
+        }
+
+        def family(prediction: Prediction) -> tuple[PredictionTest, ...]:
+            tests = [
+                test
+                for test in context.prediction_tests
+                if test.prediction_id == prediction.id
+                and test.consistency is not Consistency.INCONCLUSIVE
+                and test.result_id in admissible_result_ids
+            ]
+            tests.sort(
+                key=lambda test: (
+                    seed_of.get(test.result_id) is None,
+                    seed_of.get(test.result_id) or 0,
+                )
+            )
+            return tuple(tests)
+
+        comparisons = (
+            sum(1 for found in context.predictions if family(found)) or 1
+        )
+        own = _own_predictions(context, claim)
+        assessed = [
+            assess_family(
+                prediction,
+                family(prediction),
+                alpha=self._alpha,
+                comparisons=comparisons,
+            )
+            for prediction in own
+        ]
+        verdict = _combined(tuple(v for v, _ in assessed))
+        rationale = " | ".join(stats.render() for _, stats in assessed)
+        spec = next(
+            (
+                found
+                for found in context.experiments
+                if own and found.prediction_id == own[0].id
+            ),
+            None,
+        )
+        assessment = EpistemicAssessment(
+            subject_id=claim.id,
+            verdict=verdict,
+            method="statistician:exact-sign-v1",
+            # The hypothesis-wide admissible conclusive family, in
+            # context order — the one citation set both gates accept.
+            evidence_ids=tuple(
+                found.id
+                for found in context.evidence
+                if found.id in admissible_ids
+            ),
+            scope=spec.procedure if spec is not None else "",
+            rationale=rationale or "no admissible conclusive observations",
+        )
+        return (
+            AssessmentProposal(
+                assessment=assessment, proposer="vision:statistician"
+            ),
+        )
+
+
+def _own_predictions(
+    context: RoleContext, claim: Claim
+) -> tuple[Prediction, ...]:
+    """The predictions the claim's own evidence tested: links → evidence
+    → spec → prediction. Falls back to every shown prediction when the
+    join yields nothing, so a sparsely-linked claim is still judged on
+    the record rather than on air."""
+    linked_evidence = {
+        link.evidence_id
+        for link in context.evidence_links
+        if link.claim_id == claim.id
+    }
+    linked_specs = {
+        found.spec_id
+        for found in context.evidence
+        if found.id in linked_evidence
+    }
+    prediction_ids = {
+        spec.prediction_id
+        for spec in context.experiments
+        if spec.id in linked_specs
+    }
+    own = tuple(
+        found for found in context.predictions if found.id in prediction_ids
+    )
+    return own or tuple(context.predictions)
+
+
+_SEVERITY = (
+    AssessmentVerdict.REFUTED,
+    AssessmentVerdict.CONTESTED,
+    AssessmentVerdict.UNDETERMINED,
+    AssessmentVerdict.PLAUSIBLE,
+    AssessmentVerdict.SUPPORTED,
+)
+
+
+def _combined(verdicts: tuple[AssessmentVerdict, ...]) -> AssessmentVerdict:
+    """Worst-of across a claim's own predictions: a claim is only as
+    settled as its least settled family."""
+    if not verdicts:
+        return AssessmentVerdict.UNDETERMINED
+    for severe in _SEVERITY:
+        if severe in verdicts:
+            return severe
     return AssessmentVerdict.UNDETERMINED
 
 

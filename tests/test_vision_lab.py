@@ -309,14 +309,15 @@ class TestTheWholeWalk:
         )
         assert report.ok, report.issues
 
-        # The science that walk recorded: three bootstrap runs on the
-        # admitted sign, plus the planner's sharpened effect-size claim
-        # at a fresh seed — every run verified, every test consistent,
-        # both claims assessed SUPPORTED.
+        # The science that walk recorded: five bootstrap runs on the
+        # admitted sign — enough for the exact sign test to clear 0.05 —
+        # plus the planner's sharpened claim at one fresh seed, honestly
+        # PLAUSIBLE: consistent, and underpowered to say more. Every
+        # figure is in the assessment's own rationale.
         states = FileStateStore(tmp_path / "run")
         loaded = [states.load(found) for found in states.state_ids()]
         head = max(loaded, key=lambda state: len(state.attempts))
-        assert len(head.prediction_tests) == 4
+        assert len(head.prediction_tests) == 6
         assert all(
             str(test.consistency) == "consistent"
             for test in head.prediction_tests
@@ -324,18 +325,23 @@ class TestTheWholeWalk:
         assert any(
             "ge 0.01" in test.detail for test in head.prediction_tests
         )
-        supported = [
-            found
-            for found in head.assessments
-            if str(found.verdict) == "supported"
-        ]
-        assert len(supported) == 2
+        by_verdict = {
+            str(found.verdict): found for found in head.assessments
+        }
+        assert sorted(by_verdict) == ["plausible", "supported"]
+        supported = by_verdict["supported"]
+        assert supported.method == "statistician:exact-sign-v1"
+        assert "n=5" in supported.rationale
+        assert "p=0.03125" in supported.rationale
+        plausible = by_verdict["plausible"]
+        assert "n=1" in plausible.rationale
+        assert "2 comparison(s)" in plausible.rationale
         verifications = tmp_path / "run" / "verifications"
         records = [
             json.loads(path.read_text())
             for path in verifications.glob("*.json")
         ]
-        assert len(records) == 4
+        assert len(records) == 6
         assert all(
             record["standing"] == "verified_evidence" for record in records
         )

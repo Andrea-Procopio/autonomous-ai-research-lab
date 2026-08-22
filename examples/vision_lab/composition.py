@@ -71,6 +71,7 @@ from autonomous_research_lab.runtime.muse import (
     MuseSparkProvider,
 )
 from autonomous_research_lab.runtime.planning_store import PlanningStore
+from autonomous_research_lab.runtime.playbook import EmpiricalMLPlaybook
 from autonomous_research_lab.runtime.preflight import (
     DEFAULT_PREFLIGHT_CHECKS,
     PreflightCheck,
@@ -98,9 +99,9 @@ from .measure import require_measurable
 from .science import (
     FixedRegionCheck,
     FixedRegionReview,
-    VisionAnalyst,
     VisionControls,
     VisionScientist,
+    VisionStatistician,
 )
 from .scripted import VisionScriptedLiterature, VisionScriptedModel
 
@@ -260,10 +261,17 @@ class VisionLab:
         return ResearchRuntime(
             config=RuntimeConfig(),
             director=director,
+            # The playbook is the replicate-first guarantee: with a real
+            # trainer's cost estimate, synthesis and assessment would
+            # outbid replication on think-cost and the claim would be
+            # judged at n=1 — permanently, since a claim is assessed
+            # once. Advice boosts REPLICATE to HIGH while declared seeds
+            # remain, in every lab, at any cost estimate.
+            playbook=EmpiricalMLPlaybook(),
             roles={
                 RoleName.RESEARCH_DIRECTOR: seat,
                 RoleName.RESEARCH_ENGINEER: engineer,
-                RoleName.RESULT_ANALYST: VisionAnalyst(),
+                RoleName.RESULT_ANALYST: VisionStatistician(),
             },
             store=request.evidence,
             states=request.states,
