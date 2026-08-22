@@ -27,6 +27,10 @@ dev = ["pytest>=8.0", "ruff>=0.6", "mypy>=1.11"]
 # pinned image, never from the host environment; staging a dataset
 # needs neither. See docs/EXECUTION.md.
 vision = ["torch>=2.4,<3", "torchvision>=0.19,<1"]
+# Figure rendering only. Records, packets, verification, and every
+# replay read hashed bytes; drawing a new figure is the one act that
+# needs the library. See docs/ARCHITECTURE.md (Rendered figures).
+figures = ["matplotlib>=3.8,<4"]
 
 [project.scripts]
 arl = "autonomous_research_lab.control.cli:main"
@@ -56,7 +60,10 @@ select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF", "ARG", "PTH"]
 known-first-party = ["autonomous_research_lab", "examples"]
 
 [tool.mypy]
-python_version = "3.11"
+# No python_version pin: each CI job checks under its own interpreter,
+# so the 3.12 job accepts the PEP 695 stubs its own resolved packages
+# ship (numpy via the figures extra), while the 3.11 job still guards
+# the lowest supported version.
 files = ["src", "tests", "examples"]
 strict = true
 warn_unused_ignores = true
@@ -68,3 +75,12 @@ warn_unreachable = true
 [[tool.mypy.overrides]]
 module = ["torch", "torch.*", "torchvision", "torchvision.*"]
 ignore_missing_imports = true
+
+# CI installs [figures]; developers may not have it. follow_imports =
+# "skip" keeps strict mypy identical either way — matplotlib's partial
+# inline types would otherwise flap warn_unused_ignores between
+# environments.
+[[tool.mypy.overrides]]
+module = ["matplotlib", "matplotlib.*"]
+ignore_missing_imports = true
+follow_imports = "skip"

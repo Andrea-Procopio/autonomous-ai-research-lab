@@ -35,13 +35,42 @@ schema here is flat data, and the composition root does the reading.
   and ``references.bib`` printing exactly the number strings the
   packet prints; and nothing venue-shaped enters any record.
 
-Still deliberately absent: the venue simulator that scores
-conference-readiness (8E — an impression instrument, kept separate
-from the faithfulness reviewer by design), rendered figures, full
-venue-macro fidelity, and signing.
+* the **venue simulator** (:mod:`.simulator`) — the impression
+  instrument, kept separate from the faithfulness reviewer by design:
+  an ensemble of NeurIPS-form reviews over exactly the rendered
+  submission (blind to the record), lens-diverse at temperature zero,
+  aggregated by trusted-code medians against a configured bar. The
+  model never outputs a verdict; the score is an instrument reading,
+  never the objective.
+
+* the **rendered figures** (:mod:`.figures`) — trusted code draws the
+  replication families the packet re-derives; the model never sees,
+  names, or captions a figure. The numbers are the identity; the bytes
+  are hashed at creation into a write-once manifest and verified ever
+  after, because matplotlib output varies across versions and the
+  first rendering is the record.
+
+Still deliberately absent: full venue-macro fidelity, and signing.
 """
 
 from .author import AUTHOR_INSTRUCTION, PROSE_SCHEMA, ManuscriptAuthor
+from .figures import (
+    FigureConflictError,
+    FigureData,
+    FigureError,
+    FigureIntegrityError,
+    FigureManifest,
+    FigureStore,
+    FiguresUnavailableError,
+    NothingToDrawError,
+    StaleFigureError,
+    UnknownFigureError,
+    compose_caption,
+    figure_id_for,
+    planned_figures,
+    render_and_manifest,
+    render_figure,
+)
 from .kits import (
     KitConflictError,
     KitIntegrityError,
@@ -74,6 +103,7 @@ from .packet import (
     EvidencePacket,
     FiguresMismatchError,
     PacketError,
+    RenderedFigure,
     render_markdown,
     to_json,
 )
@@ -94,6 +124,20 @@ from .review import (
     review_schema,
 )
 from .reviewer import FaithfulnessReviewer
+from .simulator import (
+    DIMENSIONS,
+    LENSES,
+    SIMULATOR_INSTRUCTION,
+    PolishRecord,
+    SimulationError,
+    SimulationRecord,
+    SimulationRejectedError,
+    VenueReview,
+    VenueSimulator,
+    aggregate,
+    meets,
+    review_form_schema,
+)
 from .store import (
     AmbiguousHeadError,
     ManuscriptConflictError,
@@ -102,21 +146,34 @@ from .store import (
     ReviewConflictError,
     ReviewIntegrityError,
     ReviewStore,
+    SimulationConflictError,
+    SimulationIntegrityError,
+    SimulationStore,
     head_for,
 )
 
 __all__ = [
     "AUTHOR_INSTRUCTION",
+    "DIMENSIONS",
     "FORBIDDEN_STRENGTH",
+    "LENSES",
     "MODEL_ISSUES",
     "PROSE_SCHEMA",
     "PROSE_SECTIONS",
     "REVIEWER_INSTRUCTION",
+    "SIMULATOR_INSTRUCTION",
     "VENUES",
     "AmbiguousHeadError",
     "EvidencePacket",
     "FaithfulnessReviewer",
+    "FigureConflictError",
+    "FigureData",
+    "FigureError",
+    "FigureIntegrityError",
+    "FigureManifest",
+    "FigureStore",
     "FiguresMismatchError",
+    "FiguresUnavailableError",
     "KitConflictError",
     "KitIntegrityError",
     "KitManifest",
@@ -128,9 +185,12 @@ __all__ = [
     "ManuscriptIntegrityError",
     "ManuscriptRejectedError",
     "ManuscriptStore",
+    "NothingToDrawError",
     "NothingToReportError",
     "NothingToReviewError",
     "PacketError",
+    "PolishRecord",
+    "RenderedFigure",
     "ReviewConflictError",
     "ReviewError",
     "ReviewFinding",
@@ -140,22 +200,40 @@ __all__ = [
     "ReviewStore",
     "ReviewVerdict",
     "RevisionRecord",
+    "SimulationConflictError",
+    "SimulationError",
+    "SimulationIntegrityError",
+    "SimulationRecord",
+    "SimulationRejectedError",
+    "SimulationStore",
+    "StaleFigureError",
+    "UnknownFigureError",
     "UnknownKitError",
     "VenueError",
+    "VenueReview",
+    "VenueSimulator",
     "VenueSpec",
+    "aggregate",
     "assemble",
     "bibtex_entries",
+    "compose_caption",
     "derive_verdict",
     "deterministic_findings",
     "escape",
+    "figure_id_for",
     "gate_prose",
     "ground_findings",
     "head_for",
     "known_renderings",
+    "meets",
+    "planned_figures",
     "prose_to_latex",
+    "render_and_manifest",
+    "render_figure",
     "render_latex",
     "render_markdown",
     "require_reportable",
+    "review_form_schema",
     "review_schema",
     "to_json",
     "venue_from",

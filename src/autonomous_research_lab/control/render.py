@@ -24,6 +24,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from ..publication.figures import FigureStore
 from ..publication.kits import KitStore, UnknownKitError
 from ..publication.latex import VENUES, VenueError, VenueSpec, render_latex, venue_from
 from ..publication.manuscript import Manuscript, require_reportable
@@ -33,13 +34,20 @@ from ..publication.review import (
     ReviewRecord,
     ReviewVerdict,
 )
-from ..publication.store import ManuscriptStore, ReviewStore, head_for
+from ..publication.store import (
+    ManuscriptStore,
+    ReviewStore,
+    SimulationStore,
+    head_for,
+)
 from .packet import build_packet, write_packet
 
 _PACKET = "packet"
+_FIGURES = "figures"
 _MANUSCRIPT = "manuscript"
 _REVIEW = "review"
 _SUBMISSION = "submission"
+_SIMULATION = "simulation"
 
 _LOG_TAIL_LINES = 30
 
@@ -84,7 +92,12 @@ def render_submission(
 
     manuscripts = ManuscriptStore(root / _MANUSCRIPT)
     reviews = ReviewStore(root / _REVIEW)
-    heads = head_for(manuscripts, reviews, packet.packet_id)
+    heads = head_for(
+        manuscripts,
+        reviews,
+        packet.packet_id,
+        SimulationStore(root / _SIMULATION),
+    )
     if not heads:
         raise NothingToReviewError(
             f"no manuscript exists for packet {packet.packet_id}; "
@@ -95,7 +108,8 @@ def render_submission(
     if len(heads) > 1:
         raise RenderError(
             f"{len(heads)} drafts stand for packet {packet.packet_id}; "
-            f"run arl review to complete the interrupted cycle first"
+            f"run arl review or arl simulate to complete the "
+            f"interrupted cycle first"
         )
     standing = reviews.for_manuscript(head.manuscript_id)
     if not standing:
@@ -113,6 +127,7 @@ def render_submission(
 
     spec = _venue_spec(venue, venue_config)
     kit_files = _kit_files(spec, kits_root)
+    figure_files = _figure_files(packet, root)
     main_tex, references_bib = render_latex(packet, head, spec)
 
     submission_dir = (
@@ -126,6 +141,7 @@ def render_submission(
         ("main.tex", main_tex.encode("utf-8")),
         ("references.bib", references_bib.encode("utf-8")),
         *kit_files,
+        *figure_files,
     ):
         target = submission_dir / relative
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -173,6 +189,29 @@ def _venue_spec(venue: str | None, venue_config: Path | None) -> VenueSpec:
     if not isinstance(payload, dict):
         raise VenueError("a venue config is a JSON object")
     return venue_from(payload)
+
+
+def _figure_files(
+    packet: EvidencePacket, root: Path
+) -> tuple[tuple[str, bytes], ...]:
+    """The packet's figure PDFs, verified against their manifests. Only
+    the ``.pdf`` enters the tree — the tree holds exactly what
+    ``main.tex`` compiles; the ``.png`` is the reading copy's."""
+    if not packet.figures:
+        return ()
+    store = FigureStore(root / _FIGURES)
+    files = []
+    for figure in packet.figures:
+        problems = store.verify(figure.figure_id)
+        if problems:
+            raise RenderError(
+                f"figure {figure.figure_id} does not match its manifest "
+                f"({'; '.join(problems)}); a submission is not built "
+                f"from bytes the record does not pin"
+            )
+        name = f"{figure.figure_id}.pdf"
+        files.append((f"figures/{name}", store.file_path(name).read_bytes()))
+    return tuple(files)
 
 
 def _kit_files(

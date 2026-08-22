@@ -90,7 +90,7 @@ class ManuscriptAuthor:
         model: str,
         ledger: UsageLedger,
         store: ManuscriptStore,
-        max_output_tokens: int = 8192,
+        max_output_tokens: int = 16384,
         temperature: float = 0.0,
         request_timeout_seconds: float = 240.0,
         max_corrective_calls: int = 1,
@@ -112,18 +112,26 @@ class ManuscriptAuthor:
         *,
         revision_of: Manuscript | None = None,
         findings: tuple[ReviewFinding, ...] = (),
+        polish_notes: tuple[str, ...] = (),
     ) -> Manuscript:
         """One accepted draft for this packet, or a typed refusal.
 
-        With ``revision_of`` and ``findings``, the call revises: the
-        prior draft and the grounded findings travel with the request,
-        and the same gates judge the result — a revision may fix a
-        finding, never loosen a constraint.
+        With ``revision_of`` and ``findings``, the call revises for
+        faithfulness: the prior draft and the grounded findings travel
+        with the request. With ``revision_of`` and ``polish_notes``, it
+        revises for presentation: a venue review's weaknesses travel
+        instead. Either way the same gates judge the result — a
+        revision may fix a finding, never loosen a constraint.
         """
-        if (revision_of is None) != (not findings):
+        if findings and polish_notes:
             raise ManuscriptError(
-                "a revision names the draft it revises and the findings "
-                "that demanded it — one without the other is malformed"
+                "a revision answers one instrument: findings or polish "
+                "notes, never both"
+            )
+        if (revision_of is None) != (not (findings or polish_notes)):
+            raise ManuscriptError(
+                "a revision names the draft it revises and what "
+                "demanded it — one without the other is malformed"
             )
         require_reportable(packet)
         allowed = known_renderings(packet)
@@ -135,11 +143,6 @@ class ManuscriptAuthor:
         ]
         metadata = {"packet": packet.packet_id, "stage": "manuscript"}
         if revision_of is not None:
-            rendered = "\n".join(
-                f"- {f.section}: {f.issue}: quoted {f.quote!r} "
-                f"(record {f.subject_id or 'none'}) — {f.explanation}"
-                for f in findings
-            )
             messages.append(
                 Message(
                     role=MessageRole.ASSISTANT,
@@ -151,19 +154,42 @@ class ManuscriptAuthor:
                     ),
                 )
             )
-            messages.append(
-                Message(
-                    role=MessageRole.USER,
-                    content=(
-                        f"A faithfulness review found these grounded "
-                        f"issues in your draft:\n{rendered}\n"
-                        f"Revise the draft to fix each finding; change "
-                        f"nothing else beyond what fixing requires; "
-                        f"every original constraint holds."
-                    ),
+            if findings:
+                rendered = "\n".join(
+                    f"- {f.section}: {f.issue}: quoted {f.quote!r} "
+                    f"(record {f.subject_id or 'none'}) — {f.explanation}"
+                    for f in findings
                 )
-            )
-            metadata["revision_of"] = revision_of.manuscript_id
+                messages.append(
+                    Message(
+                        role=MessageRole.USER,
+                        content=(
+                            f"A faithfulness review found these grounded "
+                            f"issues in your draft:\n{rendered}\n"
+                            f"Revise the draft to fix each finding; change "
+                            f"nothing else beyond what fixing requires; "
+                            f"every original constraint holds."
+                        ),
+                    )
+                )
+                metadata["revision_of"] = revision_of.manuscript_id
+            else:
+                rendered = "\n".join(
+                    f"- {note}" for note in polish_notes
+                )
+                messages.append(
+                    Message(
+                        role=MessageRole.USER,
+                        content=(
+                            f"A venue review found these presentation "
+                            f"weaknesses in your submission:\n{rendered}\n"
+                            f"Revise the prose to address what prose can "
+                            f"fix; change nothing else beyond what fixing "
+                            f"requires; every original constraint holds."
+                        ),
+                    )
+                )
+                metadata["polish_of"] = revision_of.manuscript_id
         request = ModelRequest(
             model=self._model,
             instruction=AUTHOR_INSTRUCTION,

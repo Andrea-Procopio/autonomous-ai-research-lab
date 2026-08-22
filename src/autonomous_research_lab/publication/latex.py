@@ -287,6 +287,8 @@ def render_latex(
         lines.append(
             f"\\usepackage{style_options}{{{venue.style_package}}}"
         )
+    if packet.figures:
+        lines.append("\\usepackage{graphicx}")
     lines.extend(
         [
             "\\providecommand{\\citep}{\\cite}",
@@ -382,6 +384,20 @@ def render_latex(
                     f"{escape(metric_text(row.metrics))}"
                 )
             lines.append("\\end{itemize}")
+        for figure in packet.figures:
+            if figure.claim_id != finding.claim_id:
+                continue
+            lines.extend(
+                [
+                    "\\begin{figure}[t]",
+                    "\\centering",
+                    f"\\includegraphics[width=0.7\\linewidth]"
+                    f"{{figures/{figure.figure_id}.pdf}}",
+                    f"\\caption{{{escape(figure.caption)}}}",
+                    f"\\label{{fig:{figure.figure_id}}}",
+                    "\\end{figure}",
+                ]
+            )
     if packet.tables:
         lines.extend(
             [

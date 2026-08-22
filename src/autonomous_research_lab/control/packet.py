@@ -29,8 +29,10 @@ Order of operations, and why:
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 
+from ..admission.records import AdmissionRecord
 from ..admission.store import AdmissionIntegrityError
 from ..core.claim import Claim
 from ..core.state import ResearchState
@@ -39,7 +41,15 @@ from ..evidence.file_store import EvidenceIntegrityError
 from ..ideation.store import IdeationIntegrityError
 from ..literature.store import LiteratureIntegrityError
 from ..persistence.state_store import SnapshotError
-from ..program.integrity import verify_run
+from ..program.integrity import IntegrityReport, verify_run
+from ..program.records import ResearchRun
+from ..publication.figures import (
+    FigureError,
+    FigureStore,
+    StaleFigureError,
+    figure_id_for,
+    planned_figures,
+)
 from ..publication.packet import (
     NOT_ASSESSED,
     RE_DERIVED,
@@ -59,6 +69,7 @@ from ..publication.packet import (
     PredictionRegistration,
     Provenance,
     RegisteredScience,
+    RenderedFigure,
     RequirementQuote,
     SpendSummary,
     SupportQuote,
@@ -77,13 +88,50 @@ from ..runtime.verification_store import (
     VerificationIntegrityError,
 )
 from .chain import Stores
+from .events import StageLog
 from .investigation import Investigation, InvestigationStore
 from .stage import Fact
 
 _CONTROL = "control"
+_FIGURES = "figures"
 _PROGRAM = "program"
 _VERIFICATIONS = "verifications"
 _PLANNING = "planning"
+
+
+@dataclass(frozen=True, slots=True)
+class RunReading:
+    """Everything a publication export reads from one verified run —
+    the shared first half of the packet build, extracted so the figures
+    verb reads the record exactly the way the packet does."""
+
+    investigations: InvestigationStore
+    investigation: Investigation
+    log: StageLog
+    run_id: str
+    head_state_id: str
+    report: IntegrityReport
+    stores: Stores
+    envelope: ResearchRun
+    head: ResearchState
+    admission: AdmissionRecord
+    verifications: FileVerificationStore
+    admissible: ScientificAdmissibility
+    seed_of: dict[str, int | None]
+
+
+def read_run_checked(
+    root: Path, investigation_id: str | None = None
+) -> RunReading:
+    """:func:`read_run` with the analysis-chain integrity refusals
+    wrapped the way :func:`build_packet` wraps them."""
+    try:
+        return read_run(root, investigation_id)
+    except _INTEGRITY_ERRORS as error:
+        raise PacketError(
+            f"a record under {root} does not survive its own digest: "
+            f"{error}"
+        ) from error
 
 
 def build_packet(
@@ -115,12 +163,13 @@ _INTEGRITY_ERRORS = (
     IdeationIntegrityError,
     LiteratureIntegrityError,
     PlanningIntegrityError,
+    FigureError,
     SnapshotError,
     VerificationIntegrityError,
 )
 
 
-def _build(root: Path, investigation_id: str | None) -> EvidencePacket:
+def read_run(root: Path, investigation_id: str | None = None) -> RunReading:
     investigations = InvestigationStore(root / _CONTROL)
     investigation = _resolved(investigations, investigation_id)
     log = investigations.log_for(investigation.investigation_id)
@@ -159,12 +208,43 @@ def _build(root: Path, investigation_id: str | None) -> EvidencePacket:
         )
 
     verifications = FileVerificationStore(root / _VERIFICATIONS)
-    admissible = ScientificAdmissibility(verifications)
-    seed_of = {
-        result.id: result.seed for result in stores.evidence.results()
-    }
-    spend = log.spend()
+    return RunReading(
+        investigations=investigations,
+        investigation=investigation,
+        log=log,
+        run_id=run_id,
+        head_state_id=head_state_id,
+        report=report,
+        stores=stores,
+        envelope=envelope,
+        head=head,
+        admission=admission,
+        verifications=verifications,
+        admissible=ScientificAdmissibility(verifications),
+        seed_of={
+            result.id: result.seed for result in stores.evidence.results()
+        },
+    )
+
+
+def _build(root: Path, investigation_id: str | None) -> EvidencePacket:
+    reading = read_run(root, investigation_id)
+    investigations = reading.investigations
+    investigation = reading.investigation
+    run_id = reading.run_id
+    head_state_id = reading.head_state_id
+    report = reading.report
+    stores = reading.stores
+    envelope = reading.envelope
+    head = reading.head
+    admission = reading.admission
+    verifications = reading.verifications
+    admissible = reading.admissible
+    seed_of = reading.seed_of
+    spend = reading.log.spend()
     balance = stores.program.ledger_for(run_id).balance()
+
+    figures = _rendered_figures(root, reading)
 
     question = head.question(envelope.question_id)
     hypothesis = head.hypothesis(envelope.hypothesis_id)
@@ -252,7 +332,63 @@ def _build(root: Path, investigation_id: str | None) -> EvidencePacket:
         planner_decisions=_planner_decisions(root),
         bibliography=_bibliography(stores, admission.selected_candidate_id),
         tables=_tables(stores, verifications),
+        figures=figures,
     )
+
+
+def _rendered_figures(
+    root: Path, reading: RunReading
+) -> tuple[RenderedFigure, ...]:
+    """The figure store's manifests, held to the record they claim to
+    draw. A missing figure is honest absence — the operator never ran
+    ``arl figures``; an unexpected or altered one is drift or tampering
+    and refuses loudly."""
+    store = FigureStore(root / _FIGURES)
+    expected = planned_figures(
+        reading.head,
+        reading.stores.evidence,
+        admissible=reading.admissible,
+        seed_of=reading.seed_of,
+    )
+    by_id = {figure_id_for(data): data for data in expected}
+    for manifest in store.manifests():
+        planned = by_id.get(manifest.figure_id)
+        if planned is None or planned != manifest.data:
+            raise StaleFigureError(
+                f"figure {manifest.figure_id} (claim "
+                f"{manifest.data.claim_id}) is recorded, but the record "
+                f"no longer derives it; a stale figure does not enter "
+                f"the packet silently"
+            )
+        problems = store.verify(manifest.figure_id)
+        if problems:
+            raise PacketError(
+                f"figure {manifest.figure_id} does not survive its "
+                f"digests: " + "; ".join(problems)
+            )
+    mirrors = []
+    for data in expected:
+        found = store.get(figure_id_for(data))
+        if found is None:
+            continue
+        mirrors.append(
+            RenderedFigure(
+                figure_id=found.figure_id,
+                claim_id=data.claim_id,
+                prediction_id=data.prediction_id,
+                metric=data.metric,
+                comparator=data.comparator,
+                threshold=data.threshold,
+                points=data.points,
+                n=data.n,
+                mean=data.mean,
+                stdev=data.stdev,
+                caption=data.caption,
+                renderer=found.renderer,
+                files=found.files,
+            )
+        )
+    return tuple(mirrors)
 
 
 def write_packet(packet: EvidencePacket, out_dir: Path) -> tuple[Path, Path]:

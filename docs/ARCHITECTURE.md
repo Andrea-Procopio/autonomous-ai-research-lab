@@ -2606,8 +2606,8 @@ multi-head state is a hand-edited store and a refusal).
 The reviewer is deliberately not a venue simulator: it judges
 faithfulness against the record, where questions have checkable
 answers. Conference-readiness scoring — an impression instrument — is
-a separate, later seat (8E), and its feedback will drive prose
-revision under these same gates, never past them.
+a separate seat (the venue simulator, below), and its feedback drives
+prose revision under these same gates, never past them.
 
 ## Venue rendering (Task 8D)
 
@@ -2656,6 +2656,96 @@ an unchanged record is a no-op. The PDF a toolchain makes from it is a
 timestamps): the `.tex` is the record, the PDF is not, and `--pdf`
 with no toolchain installed is a failure naming what to install, not a
 shrug.
+
+## The venue simulator (Task 8E)
+
+Two reviewers, two questions, kept apart on purpose. The faithfulness
+reviewer (8C) asks *is it true?* against the record, and gates. The
+venue simulator asks *how does it read?* — and it reads exactly what a
+venue reviewer would: the rendered ``main.tex`` and its bibliography,
+nothing else. Blindness to the record is what makes the simulation
+honest; a simulator that peeked would become a weaker second
+faithfulness reviewer, and one that gated on impressions would put
+persuasiveness above truth.
+
+The ensemble is **lens-diverse at temperature zero**: three
+deterministic reviewer perspectives — rigor, clarity, significance —
+in place of sampling one prompt at temperature 0.75. Each lens fills
+the NeurIPS review form (dimensional scores 1–4, overall 1–10,
+confidence 1–5, all integer enums; strengths, weaknesses, questions as
+text), and the form has **no verdict property**: accept or reject is
+unexpressible. Trusted code takes the medians and derives the outcome
+against an operator-configured bar. Deliberately absent from the
+Sakana lineage this borrows from: bias prompts (steering the verdict
+is exactly what this lab does not do), reflection rounds (the bounded
+corrective-call discipline is the only retry), and few-shot
+third-party reviews.
+
+A below-bar reading triggers **one polish cycle, ever**: the recorded
+weaknesses travel to the author as polish notes (a separate request
+path from faithfulness findings — a venue's opinion is not a grounded
+finding, and never pretends to be), the revision passes the same
+number/citation/structure gates, must be APPROVED by a fresh
+faithfulness review (a REVISE there is a typed stop — presentation
+polish does not outrank the record), is re-rendered, and re-scored
+once. The succession is a ``PolishRecord``, deliberately not a
+faithfulness ``RevisionRecord``: a polish must never disable, or be
+mistaken for, the faithfulness revise cycle. Head resolution unions
+both succession kinds, so the author, reviewer, render, and simulate
+verbs always agree on which draft stands, and every crash window
+recovers by dispatch on the durable record.
+
+Every lens review and every aggregate is write-once with its call's
+provenance, and the reviews are the replay unit: re-running with a
+different bar derives a new aggregate from the same recorded reviews
+with zero model calls. The score is an instrument reading. It informs;
+it is never the objective — the ROADMAP's standing warning, now
+enforced by construction: nothing downstream optimizes for it, and the
+only thing it can trigger is prose polish under the gates.
+
+## Rendered figures (Task 8F)
+
+Trusted code draws; the model never touches a figure. Each figure is
+one replication family — the seed-labeled observed values, the
+pre-registered threshold as a dashed line, the mean — re-derived from
+the record by the same projection the packet's figures check runs, so
+what the figure shows is exactly what the statistics stated. Captions
+are trusted text with the packet's own number spellings.
+
+The discipline is hashed-at-creation, not byte-re-derivation, and the
+distinction is deliberate. Everything else the publication side renders
+is deterministic text held byte-for-byte to its inputs; matplotlib
+output varies across versions, so a figure's bytes cannot be a
+re-derivable record. The kit store's answer transposes: the figure's
+content id derives from its data alone — the family's numbers are the
+scientific object — while the rendered bytes are the pinned occurrence,
+their sha256 digests recorded in a write-once manifest with the
+renderer's version and timestamp as provenance outside the id. The
+bytes stay fully pinned anyway: the digests enter the packet mirror,
+so the packet id covers them. Re-rendering never happens while the
+manifest exists; different bytes under a recorded id refuse.
+
+The evidence blob store was deliberately not reused: its only write
+path ingests files an executed experiment declared in its own run
+directory, which is the right rule for measurements and the wrong one
+for publication derivatives. Figures get their own store, mounted at
+`figures/` beside `packet/` and `manuscript/`.
+
+`arl figures` is the one act that needs matplotlib (the `figures`
+extra); everything downstream — the packet build, the manuscript, the
+submission tree, `verify` — reads hashed bytes and runs without it.
+The packet build holds the store to the record both ways: a missing
+figure is honest absence (the verb never ran; the packet keeps stating
+it), and an unexpected or altered one is a loud refusal. Populating
+the figures field changes the packet id, which is the intended
+consequence: a figure-bearing packet is a different document, and the
+manuscript, review, render, and simulation chain re-runs for it while
+the old chain stays attached to the old packet, write-once and intact.
+
+One blindness is documented rather than fixed: the venue simulator
+reads `main.tex`, so its reviewers see `\includegraphics` and the
+trusted captions, not pixels — the instrument reads what a text-bound
+reviewer reads.
 
 ## Architectural invariants
 
@@ -2785,7 +2875,7 @@ control       the composition root: one command over the seven stages,
               the stage event log, and the recovery that finishes a
               step a killed process left half done  (may import every
               stage; nothing imports it)
-publication   the packet, the manuscript, the reviewer, venue kits
+publication   packet, manuscript, reviewer, venue kits, simulator
 ```
 
 Dependencies point downward only; `core` imports nothing from its

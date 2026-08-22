@@ -187,6 +187,28 @@ class FigureSet:
 
 
 @dataclass(frozen=True, slots=True)
+class RenderedFigure:
+    """One rendered figure the store pins: the family's numbers, the
+    trusted caption, and the digests of the bytes that drew them. No
+    timestamp — provenance stays in the manifest, outside identity."""
+
+    figure_id: str
+    claim_id: str
+    prediction_id: str
+    metric: str
+    comparator: str
+    threshold: float
+    points: tuple[tuple[int | None, float], ...]
+    n: int
+    mean: float | None
+    stdev: float | None
+    caption: str
+    renderer: str
+    files: tuple[tuple[str, str, int], ...]
+    """``(name, sha256, size_bytes)``, sorted by name."""
+
+
+@dataclass(frozen=True, slots=True)
 class PredictionRegistration:
     prediction_id: str
     spec_id: str
@@ -267,10 +289,10 @@ class EvidencePacket:
     planner_decisions: tuple[PlannerDecision, ...] = ()
     bibliography: Bibliography | None = None
     tables: tuple[TableRow, ...] = ()
-    figures: tuple[str, ...] = ()
-    """Rendered figure files. Deliberately empty until something in the
-    lab produces plots: the packet states their absence rather than
-    implying an omission."""
+    figures: tuple[RenderedFigure, ...] = ()
+    """Rendered figures, populated by the composition root from the
+    write-once figure store and re-derived against the head state at
+    build time. Empty stays the honest statement of absence."""
 
     packet_id: str = field(default="")
 
@@ -602,9 +624,21 @@ def render_markdown(packet: EvidencePacket) -> str:
     lines.append("")
     lines.extend(table_lines(packet.tables))
     lines.append("")
-    lines.append(
-        "Figures: none — nothing in this run rendered plots, and the "
-        "packet states that rather than implying an omission."
-    )
+    if packet.figures:
+        lines.append("## Figures")
+        for figure in packet.figures:
+            lines.append("")
+            lines.append(f"### {figure.figure_id} — claim {figure.claim_id}")
+            lines.append(figure.caption)
+            for name, digest, size in figure.files:
+                lines.append(
+                    f"- {name} sha256 {digest} ({size} bytes), "
+                    f"{figure.renderer}"
+                )
+    else:
+        lines.append(
+            "Figures: none — nothing in this run rendered plots, and the "
+            "packet states that rather than implying an omission."
+        )
     lines.append("")
     return "\n".join(lines)

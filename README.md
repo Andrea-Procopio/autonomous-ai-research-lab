@@ -238,7 +238,7 @@ Expect interfaces to change.
 | `search` | Policies for choosing the next action among candidates. |
 | `roles` | Interfaces for the agents, including the model-backed engineer and planner. A role receives a task and returns proposals. It never edits state directly. |
 | `orchestration` | The main loop: pick an action, route it to a role, validate what comes back, commit it, log everything. |
-| `publication` | The evidence packet — flat, checked-not-copied mirrors of everything a manuscript may claim — the manuscript (one gated model call writes five prose sections behind deterministic number/citation/structure gates; trusted code assembles everything else), and the faithfulness reviewer (findings grounded in verbatim quotes and record ids or refused; the verdict derived by trusted code; one bounded revise cycle recorded as its own succession fact), and venue rendering (the approved draft typeset into an operator-staged, hash-pinned conference kit; the venue is deployment configuration and never enters a record). Depends on `core`, `evidence`, and `runtime`; its one consumer is `control` (enforced by the layering tests). |
+| `publication` | The evidence packet — flat, checked-not-copied mirrors of everything a manuscript may claim — the manuscript (one gated model call writes five prose sections behind deterministic number/citation/structure gates; trusted code assembles everything else), and the faithfulness reviewer (findings grounded in verbatim quotes and record ids or refused; the verdict derived by trusted code; one bounded revise cycle recorded as its own succession fact), venue rendering (the approved draft typeset into an operator-staged, hash-pinned conference kit; the venue is deployment configuration and never enters a record), and the venue simulator (a lens-diverse ensemble of NeurIPS-form reviews over the rendered submission, blind to the record, aggregated by trusted-code medians against a configured bar — an impression instrument, never the objective), and rendered figures (trusted code draws the re-derived replication families; bytes hashed at creation into a write-once store, because the numbers are the identity and the rendering is the occurrence). Depends on `core`, `evidence`, and `runtime`; its one consumer is `control` (enforced by the layering tests). |
 
 Dependencies point one way: higher packages import lower ones, never
 the reverse, and `core` imports nothing. `control` is the one exception
@@ -303,9 +303,11 @@ arl resume [INVESTIGATION] --root DIR
 arl status [INVESTIGATION] --root DIR
 arl verify --root DIR
 arl packet [INVESTIGATION] --root DIR [--out DIR]
+arl figures [INVESTIGATION] --root DIR
 arl manuscript [INVESTIGATION] --root DIR [--lab module:factory] [--model NAME] [--out DIR]
 arl review [INVESTIGATION] --root DIR [--lab module:factory] [--model NAME] [--out DIR] [--review-only]
 arl render [INVESTIGATION] --root DIR (--venue NAME | --venue-config FILE) [--kits DIR] [--out DIR] [--pdf]
+arl simulate [INVESTIGATION] --root DIR (--venue NAME | --venue-config FILE) [--kits DIR] [--reviews N] [--bar N] [--no-polish]
 ```
 
 `run` records the config and walks as far as it can. `resume` picks up
@@ -315,7 +317,11 @@ than whatever the file says now. `status` prints the stage table.
 the evidence packet: it verifies the run from cold, re-derives the
 statistician's figures against the record, and writes
 `packet/<packet_id>.json` and `.md` under the root — refused for a walk
-that never reached a research state. `manuscript` authors the workshop
+that never reached a research state. `figures` draws the
+replication-family plots from that same re-derived record — trusted
+code only, matplotlib via the `figures` extra, bytes hashed at creation
+into a write-once figure store; re-running verifies and draws nothing.
+`manuscript` authors the workshop
 draft from that packet: a model writes prose only, behind deterministic
 gates that refuse any number the packet does not state and any citation
 outside its bibliography; trusted code assembles everything else.
@@ -330,6 +336,12 @@ findings printed. `render` typesets the approved draft for a venue:
 beside the staged kit's verified files — refused while the standing
 review is anything but approved. `--pdf` compiles when a LaTeX
 toolchain is installed; the PDF is a derived artifact, never a record.
+`simulate` takes a venue's reading of that submission: an ensemble of
+NeurIPS-form model reviews over exactly the document a venue reviewer
+would see, aggregated by trusted code against a configured bar. A
+below-bar reading triggers at most one polish revision — re-gated,
+re-reviewed for faithfulness, re-rendered, re-scored once. The score is
+an instrument reading, never the objective.
 
 Venue kits are operator-staged and hash-pinned, like datasets:
 
