@@ -18,6 +18,7 @@ model ever sees this source.
 # ARL-FIXED-BEGIN contract
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -25,6 +26,7 @@ import random
 from pathlib import Path
 
 PRIMARY_METRIC_KEY = "__ARL_PRIMARY_METRIC__"
+CHECKPOINT_FILENAME = "checkpoint.json"
 
 DIM = 16
 N_CLASSES = 4
@@ -61,13 +63,26 @@ def train(
     matrix: list[list[float]],
     data: list[list[float]],
     labels: list[int],
+    *,
+    run_dir: Path,
+    seed: int,
+    start_step: int = 0,
+    loss: float = 0.0,
+    fail_after: int | None = None,
 ) -> tuple[list[list[float]], float]:
     """Deterministic 'training': pull each row toward the centroid of
     one class, a few steps. The point is a real, seeded process whose
-    output beats an untrained one — not deep learning."""
+    output beats an untrained one — not deep learning.
+
+    Every completed step writes a checkpoint carrying the matrix, the
+    step count, the running loss, and the seed — so a killed run can be
+    resumed from ``start_step`` and end in exactly the state the
+    uninterrupted run would have reached. ``fail_after`` is the stub's
+    deterministic stand-in for a crash: exit 3 after that many steps,
+    checkpoint already durable.
+    """
     trained = [list(row) for row in matrix]
-    loss = 0.0
-    for _ in range(TRAIN_STEPS):
+    for step in range(start_step, TRAIN_STEPS):
         loss = 0.0
         for target in range(min(N_CLASSES, len(trained))):
             members = [
@@ -89,7 +104,47 @@ def train(
                 weight + 0.5 * (value - weight)
                 for weight, value in zip(row, centroid, strict=False)
             ]
+        (run_dir / CHECKPOINT_FILENAME).write_text(
+            json.dumps(
+                {
+                    "encoder": trained,
+                    "loss": loss,
+                    "seed": seed,
+                    "steps_completed": step + 1,
+                },
+                sort_keys=True,
+            )
+        )
+        if fail_after is not None and step + 1 >= fail_after:
+            raise SystemExit(3)
     return trained, loss
+
+
+def resume_state(
+    config: dict[str, object], seed: int
+) -> tuple[list[list[float]] | None, int, float]:
+    """The checkpoint the config hands over, verified before trust:
+    the bytes must hash to the digest the record pins, and the
+    checkpoint must belong to this seed. A mismatch is a refusal, not
+    a fresh start — training silently from scratch would misreport a
+    resumed run as one."""
+    named = config.get("resume_checkpoint")
+    if not isinstance(named, str) or not named:
+        return None, 0, 0.0
+    declared = config.get("resume_checkpoint_sha256")
+    raw = Path(named).read_bytes()
+    if (
+        not isinstance(declared, str)
+        or hashlib.sha256(raw).hexdigest() != declared
+    ):
+        raise SystemExit(
+            "resume checkpoint does not hash to the digest the record pins"
+        )
+    payload = json.loads(raw)
+    if int(payload["seed"]) != seed:
+        raise SystemExit("resume checkpoint belongs to another seed")
+    matrix = [[float(value) for value in row] for row in payload["encoder"]]
+    return matrix, int(payload["steps_completed"]), float(payload["loss"])
 
 
 def probe_accuracy(
@@ -130,16 +185,29 @@ def main() -> None:
     run_dir = Path(os.environ["ARL_RUN_DIR"])
     seed = int(os.environ.get("ARL_SEED", "0"))
     config_path = os.environ.get("ARL_CONFIG")
+    config: dict[str, object] = {}
     if config_path and Path(config_path).exists():
-        json.loads(Path(config_path).read_text())  # present and well-formed
+        config = json.loads(Path(config_path).read_text())
 
     rng = random.Random(seed)
     trained_encoder = build_encoder(random.Random(seed + 1))
     random_encoder = build_encoder(random.Random(seed + 2))
 
+    resumed, start_step, prior_loss = resume_state(config, seed)
+    if resumed is not None:
+        trained_encoder = resumed
+    fail_after = config.get("fail_after_step")
+
     train_data, train_labels = batch(rng, N_TRAIN)
     trained_encoder, final_loss = train(
-        trained_encoder, train_data, train_labels
+        trained_encoder,
+        train_data,
+        train_labels,
+        run_dir=run_dir,
+        seed=seed,
+        start_step=start_step,
+        loss=prior_loss,
+        fail_after=int(fail_after) if isinstance(fail_after, int) else None,
     )
 
     probe_train, probe_train_labels = batch(rng, N_PROBE_TRAIN)
