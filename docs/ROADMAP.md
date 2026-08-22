@@ -296,6 +296,32 @@ human in the loop, producing results that survive scrutiny.
   `ModelBackedPlanner` seat is Task 7B (the catalog already fits its
   gate, tested); and checkpoint-resume of a half-trained job is 7A.1,
   designed against a real workload now that one exists.
+- **Checkpoint-resume.** Done (Task 7A.1, 2026-08-22). Finish the
+  seed the crash interrupted. Recovery already did the durable half —
+  a job whose process died half-trained is reaped as a failed result
+  with its checkpoint collected, hashed, and ingested; what was
+  missing was the other half, and it is deliberately small: templates
+  write periodic checkpoints (the encoder per epoch, the augmentation
+  contrast per completed arm, the stub per step), and the engineer's
+  injected dispatch policy re-picks a killed seed once, handing the
+  new job the blob store's verified copy — never the dead job's
+  mutable run directory — with the sha256 pinned in the job config.
+  The template refuses bytes that do not hash to that digest and
+  refuses another seed's checkpoint; the result records
+  resumed_from_job, so a resumed run never passes as an uninterrupted
+  one. No optimizer state travels: a resumed trajectory is its own
+  honest measurement (the stub, which has no optimizer, ends
+  byte-identical either way, and the tests pin it). Bounded by
+  construction — a failed attempt that was itself a resume never
+  offers its checkpoint. Qualified live on 2026-08-22 with real
+  CIFAR-10 training: the trainer and the lab both killed -9 three
+  seconds into epoch two, the orphan reaped (journal: collected after
+  an interrupted step; succeeded, rebuilt from the collected job),
+  and the resumed walk re-picked seed 11 with the verified checkpoint
+  and completed it — the family closed at n=4 consistent 4/4 with the
+  resumed seed standing as verified evidence, and the root verified
+  intact from cold. Still open: mounting the checkpoint blob into a
+  container backend.
 - **The live planner seat.** Done (Task 7B, 2026-08-22). The hand-off
   7A promised: once the deterministic follow-through is done and
   verified findings exist, the model-backed planner shares the
