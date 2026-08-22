@@ -395,3 +395,41 @@ class TestReview:
 
         assert code == FAILED
         assert "no run root" in capsys.readouterr().out
+
+
+class TestRender:
+    """The verb's conventions only — rendered submissions are exercised
+    in test_publication_latex.py, which has an approved draft to render."""
+
+    def test_a_walk_without_a_research_state_is_refused(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        prepared(tmp_path)
+
+        code = main(["render", "--root", str(tmp_path), "--venue", "plain"])
+
+        assert code == REFUSED
+        assert "REFUSED" in capsys.readouterr().out
+
+    def test_several_investigations_are_a_question_not_a_guess(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        first = prepared(tmp_path, label="first")
+        second = prepared(tmp_path, label="second")
+
+        code = main(["render", "--root", str(tmp_path), "--venue", "plain"])
+
+        printed = capsys.readouterr().out
+        assert code == FAILED
+        assert first in printed
+        assert second in printed
+
+    def test_a_missing_root_is_named(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        code = main(
+            ["render", "--root", str(tmp_path / "nowhere"), "--venue", "plain"]
+        )
+
+        assert code == FAILED
+        assert "no run root" in capsys.readouterr().out
