@@ -465,6 +465,36 @@ human in the loop, producing results that survive scrutiny.
   awaits a TeX install. Still open: 8E the venue simulator, rendered
   figures, full venue-macro fidelity (\icmltitle and friends —
   --venue-config is the escape hatch), and signing.
+- **Venue simulator.** Done (Task 8E, 2026-08-22). The impression
+  instrument: an ensemble of NeurIPS-form reviews over the rendered
+  submission, deliberately blind to the packet — each lens (rigor,
+  clarity, significance) reads only main.tex and references.bib, the
+  way a venue reviewer would, at temperature zero. The form's scores
+  are integer enums and the schema has no accept/reject property;
+  trusted code takes the medians and a configured bar derives the
+  outcome. The score is an instrument reading, never the objective.
+  Below bar earns one bounded polish cycle: the weaknesses re-author
+  the prose under the 8B gates, the revision must re-pass the 8C
+  faithfulness review (a REVISE is a typed stop — presentation polish
+  does not outrank the record), then re-renders and is scored once
+  more. The polish succession is its own write-once record,
+  deliberately not a faithfulness revision, and every crash window
+  recovers by dispatch on the durable records. Qualified live on the
+  real CIFAR-10 root, 2026-08-22: three muse-spark-1.2 lenses read
+  the anonymous NeurIPS 2025 submission and scored it overall median
+  3 of 10 — below bar 6 — for reasons the record confirms: the two
+  placeholder bibliography entries with example.invalid URLs, the n=5
+  sign test a single flip would null, the training protocol the
+  packet never specifies. The polish cycle ran live: the revision
+  passed the faithfulness review APPROVED and re-scored at overall 3,
+  because prose cannot fix record-level weaknesses — which is the
+  instrument working. The first live polish call also caught a real
+  bug (the author's 8192-token output cap truncated a live revision;
+  the cap is now 16384), and the crash recovered exactly as designed:
+  the recorded lens reviews replayed free and the run resumed at the
+  polish. The finished cycle re-runs with zero model calls, and the
+  root re-verified intact. Still open: rendered figures, the first
+  fully-live paper, venue-macro fidelity, and signing.
 - **Trajectory analysis.** The decision log (`DecisionRecord` + JSONL)
   exists. Horizon 1 adds the analysis code that reads it: utility
   calibration, cost prediction error, failure-mode tallies, feeding

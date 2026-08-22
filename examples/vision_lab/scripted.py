@@ -982,6 +982,37 @@ def _manuscript_review(request: ModelRequest) -> str:
     return json.dumps({"findings": []})
 
 
+def _venue_review(request: ModelRequest) -> str:
+    """A conscientious middle-of-the-road reading: the fixture paper is
+    small and honest, so the form says so — solid scores, one strength,
+    no weaknesses — and CI meets the default bar without a polish
+    cycle. The below-bar paths are exercised at unit level, where the
+    script can be harsher."""
+    del request
+    return json.dumps(
+        {
+            "summary": (
+                "A compact, pre-registered study whose claims match "
+                "exactly what its recorded experiments show."
+            ),
+            "strengths": [
+                "Every figure traces to a named, verified record."
+            ],
+            "weaknesses": [],
+            "questions": [],
+            "originality": 3,
+            "quality": 3,
+            "clarity": 3,
+            "significance": 3,
+            "soundness": 3,
+            "presentation": 3,
+            "contribution": 3,
+            "overall": 7,
+            "confidence": 4,
+        }
+    )
+
+
 ANSWERERS: Final = {
     "mapping_queries": _mapping_queries,
     "mapping_screening": _mapping_screening,
@@ -999,4 +1030,5 @@ ANSWERERS: Final = {
     "planning_decision": _planning_decision,
     "manuscript_prose": _manuscript_prose,
     "manuscript_review": _manuscript_review,
+    "venue_review": _venue_review,
 }
