@@ -2703,6 +2703,50 @@ it is never the objective — the ROADMAP's standing warning, now
 enforced by construction: nothing downstream optimizes for it, and the
 only thing it can trigger is prose polish under the gates.
 
+## Rendered figures (Task 8F)
+
+Trusted code draws; the model never touches a figure. Each figure is
+one replication family — the seed-labeled observed values, the
+pre-registered threshold as a dashed line, the mean — re-derived from
+the record by the same projection the packet's figures check runs, so
+what the figure shows is exactly what the statistics stated. Captions
+are trusted text with the packet's own number spellings.
+
+The discipline is hashed-at-creation, not byte-re-derivation, and the
+distinction is deliberate. Everything else the publication side renders
+is deterministic text held byte-for-byte to its inputs; matplotlib
+output varies across versions, so a figure's bytes cannot be a
+re-derivable record. The kit store's answer transposes: the figure's
+content id derives from its data alone — the family's numbers are the
+scientific object — while the rendered bytes are the pinned occurrence,
+their sha256 digests recorded in a write-once manifest with the
+renderer's version and timestamp as provenance outside the id. The
+bytes stay fully pinned anyway: the digests enter the packet mirror,
+so the packet id covers them. Re-rendering never happens while the
+manifest exists; different bytes under a recorded id refuse.
+
+The evidence blob store was deliberately not reused: its only write
+path ingests files an executed experiment declared in its own run
+directory, which is the right rule for measurements and the wrong one
+for publication derivatives. Figures get their own store, mounted at
+`figures/` beside `packet/` and `manuscript/`.
+
+`arl figures` is the one act that needs matplotlib (the `figures`
+extra); everything downstream — the packet build, the manuscript, the
+submission tree, `verify` — reads hashed bytes and runs without it.
+The packet build holds the store to the record both ways: a missing
+figure is honest absence (the verb never ran; the packet keeps stating
+it), and an unexpected or altered one is a loud refusal. Populating
+the figures field changes the packet id, which is the intended
+consequence: a figure-bearing packet is a different document, and the
+manuscript, review, render, and simulation chain re-runs for it while
+the old chain stays attached to the old packet, write-once and intact.
+
+One blindness is documented rather than fixed: the venue simulator
+reads `main.tex`, so its reviewers see `\includegraphics` and the
+trusted captions, not pixels — the instrument reads what a text-bound
+reviewer reads.
+
 ## Architectural invariants
 
 The list this pass was made against; each is enforced by at least one

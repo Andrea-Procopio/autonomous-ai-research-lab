@@ -495,6 +495,34 @@ human in the loop, producing results that survive scrutiny.
   polish. The finished cycle re-runs with zero model calls, and the
   root re-verified intact. Still open: rendered figures, the first
   fully-live paper, venue-macro fidelity, and signing.
+- **Rendered figures.** Done (Task 8F, 2026-08-22). Trusted code
+  draws; the model never touches a figure. Each figure is one
+  replication family — seed-labeled observed values, the
+  pre-registered threshold as a dashed line, the mean — re-derived
+  from the record by the same projection the packet's figures check
+  runs, with a trusted caption in the packet's own number spellings.
+  The discipline is hashed-at-creation, not byte-re-derivation:
+  matplotlib output varies across versions, so the figure's identity
+  is its data alone and the first rendering's bytes are pinned by
+  sha256 into a write-once manifest — digests the packet mirror then
+  carries, so the packet id covers the bytes. `arl figures` is the
+  one act that needs matplotlib (the `figures` extra); everything
+  downstream reads hashed bytes. A missing figure is honest absence;
+  an unexpected or altered one refuses the export loudly. Qualified
+  live on the real CIFAR-10 root, 2026-08-22: both families drawn
+  (n=5 and the n=1 floor test), the figured packet re-authored,
+  re-reviewed APPROVED with zero findings, and re-rendered into the
+  NeurIPS 2025 kit with the PDFs verified into the submission tree.
+  The venue simulator then read the figured submission at overall
+  median 4 of 10 — one point above the figure-less reading, with the
+  "no plots rendered" complaint gone and replaced by the honest
+  text-bound one: reviewers see the includegraphics lines and the
+  trusted captions, not pixels, a documented instrument property.
+  The polish cycle ran, passed faithfulness APPROVED, and the final
+  reading stayed below bar 6 for reasons figures cannot fix: the
+  placeholder bibliography, the minimal replication families, the
+  training protocol the packet does not state. Still open: the first
+  fully-live paper, venue-macro fidelity, and signing.
 - **Trajectory analysis.** The decision log (`DecisionRecord` + JSONL)
   exists. Horizon 1 adds the analysis code that reads it: utility
   calibration, cost prediction error, failure-mode tallies, feeding
