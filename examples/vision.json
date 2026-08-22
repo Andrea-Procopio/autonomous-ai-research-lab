@@ -47,5 +47,5 @@
     },
     "authority": "Lab operator: vision allocation for the first production chain."
   },
-  "experimentation": {"max_steps": 10}
+  "experimentation": {"max_steps": 24}
 }

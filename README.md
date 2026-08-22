@@ -177,8 +177,13 @@ end-to-end runs:
   under content-addressed manifests, and governance stays on. The CI
   walk carries a synthetic vision brief through all seven stages on a
   stdlib stub trainer in seconds: three seeded runs, all
-  `VERIFIED_EVIDENCE`, three consistent sign tests, a `SUPPORTED`
-  assessment, an honest stop, a cold verify.
+  `VERIFIED_EVIDENCE`, consistent sign tests, `SUPPORTED` assessments,
+  and — since Task 7B — a planner ending: once the deterministic
+  follow-through is done and verified findings exist, the model-backed
+  planner shares the director's seat, pre-registers a sharper
+  effect-size claim under the deterministic gate, runs it through the
+  same trusted template at a fresh seed, and stops the investigation
+  with a typed reason, citing its evidence.
 
 Nothing a model says becomes scientific state until deterministic code
 has gated, committed, executed, and verified it. Literature-derived
@@ -199,10 +204,11 @@ dispatches work, and every model decision passes a deterministic gate
 before it takes effect.
 
 Not built yet: access resolution for metadata-only retrieved works,
-the live planner seat over the vision catalog (Task 7B; the gate fit is
-already tested), checkpoint-resume of a half-trained job (7A.1),
-literature-grounded findings entering research state, cloud execution,
-statistician and skeptic roles with real inference, and paper writing.
+checkpoint-resume of a half-trained job (7A.1), the statistician role
+with real inference (effect sizes, uncertainty, multiple comparisons —
+today's assessments are sign checks), literature-grounded findings
+entering research state, cloud execution, a skeptic role, and paper
+writing.
 
 Expect interfaces to change.
 

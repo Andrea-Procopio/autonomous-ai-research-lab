@@ -7,8 +7,10 @@ funded state already carries the pre-registered prediction, and a
 designer's whole legitimate job is to copy its metric verbatim into a
 spec the catalog can serve. A model inventing anything there would be
 answering a different question than the one the state committed to.
-(The planner takes this seat in Task 7B, once evidence exists for its
-gate to cite.)
+(Since Task 7B the planner shares this seat: once verified evidence
+exists, the composite director in ``direction.py`` hands consultations
+to the model-backed planner, and this scientist keeps the design and
+synthesis work.)
 
 :class:`FixedRegionCheck` is the other half of the narrow-slot design:
 a completion that edits one byte of a fenced fixed region — the
@@ -43,9 +45,14 @@ from autonomous_research_lab.roles.base import (
     RoleName,
     RoleSuitability,
 )
+from autonomous_research_lab.roles.engineer import (
+    ENTRYPOINT,
+    ImplementationTemplate,
+)
 from autonomous_research_lab.roles.planner import TemplateCatalog
 from autonomous_research_lab.runtime.implementation_store import (
     ImplementationStore,
+    SourceFile,
 )
 from autonomous_research_lab.runtime.preflight import JobLike
 from autonomous_research_lab.runtime.verification import (
@@ -241,6 +248,41 @@ class VisionControls:
             ):
                 return (entry.control,)
         return ()
+
+
+@dataclass(frozen=True, slots=True)
+class FixedRegionReview:
+    """The fixed-region rule, where it can still be fixed.
+
+    Runs inside the engineer's bounded generation-repair loop, handed
+    the resolved template and the parsed completion before anything
+    persists: a violation earns the model one corrective call carrying
+    exactly what it must not touch. :class:`FixedRegionCheck` below
+    keeps the same judgment as a preflight backstop — defense in depth,
+    not redundancy: the review gives feedback, the check refuses
+    execution.
+    """
+
+    def review(
+        self,
+        template: ImplementationTemplate,
+        files: tuple[SourceFile, ...],
+    ) -> str:
+        completed = next(
+            (found for found in files if found.path == ENTRYPOINT), None
+        )
+        if completed is None:
+            return ""  # the parse gate already refuses a missing entrypoint
+        if fixed_regions(completed.content) != fixed_regions(template.source):
+            return (
+                "the completion altered a fenced fixed region; everything "
+                "between ARL-FIXED-BEGIN and ARL-FIXED-END — seeding, data "
+                "loading, splits, the probe, the control, and the metrics "
+                "writing — is trusted measurement code and must be "
+                "reproduced byte-for-byte; complete only the build_encoder "
+                "slot between ARL-SLOT-BEGIN and ARL-SLOT-END"
+            )
+        return ""
 
 
 @dataclass(frozen=True, slots=True)

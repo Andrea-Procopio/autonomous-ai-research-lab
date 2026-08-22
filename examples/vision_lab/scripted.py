@@ -788,6 +788,136 @@ def _admission_operationalization(request: ModelRequest) -> str:
     )
 
 
+_HYPOTHESIS_LINE: Final = re.compile(
+    r"- (hyp_[0-9a-f]{16}) \(question (q_[0-9a-f]{16})\)"
+)
+_ADMISSIBLE_LINE: Final = re.compile(r"- (ev_[0-9a-f]{16}) \[ADMISSIBLE\]")
+_TEMPLATE_ID: Final = re.compile(r"\btmpl_[0-9a-f]{16}\b")
+_METRICS_LINE: Final = re.compile(r"measurable metrics: (.+)")
+
+_SHARPENED_FLOOR: Final = 0.01
+"""The effect-size floor the scripted planner pre-registers. Chosen
+below every contrast either trainer produces at the declared seeds, so
+the sharpened prediction is a genuine claim that genuinely holds."""
+
+
+def _planning_sentinels() -> dict[str, object]:
+    """Every schema key with its sentinel; a decision overrides some."""
+    return {
+        "action": "stop",
+        "rationale": "",
+        "question_id": "",
+        "evidence_ids": [],
+        "hypothesis_id": "",
+        "hypothesis_statement": "",
+        "prediction_condition": "",
+        "prediction_metric": "",
+        "prediction_comparator": "none",
+        "prediction_threshold": 0,
+        "prediction_tolerance": 0,
+        "prediction_expectation": "",
+        "experiment_objective": "",
+        "experiment_procedure": "",
+        "experiment_metrics": [],
+        "experiment_baselines": [],
+        "experiment_controls": [],
+        "experiment_seeds": [],
+        "template_id": "",
+        "target_experiment_id": "",
+        "replication_seed": -1,
+        "removed_component": "",
+        "stop_reason": "none",
+    }
+
+
+def _planning_decision(request: ModelRequest) -> str:
+    """The scripted planner: sharpen the admitted claim, then stop.
+
+    Computed from the rendered context, never from call order. The first
+    consultation arrives once the bootstrap arc has verified evidence on
+    the record; it pre-registers a sharper bound on the admitted
+    contrast — comparator and threshold the planner's own, run through
+    the same trusted template at a fresh seed. The second consultation
+    sees that sharpened prediction already in the context and stops with
+    a typed reason. Both cite the admissible evidence, because the gate
+    requires every decision to.
+    """
+    text = "\n".join(message.content for message in request.messages)
+    evidence = [found.group(1) for found in _ADMISSIBLE_LINE.finditer(text)]
+    seen: list[str] = []
+    for found in evidence:
+        if found not in seen:
+            seen.append(found)
+    hypothesis = _HYPOTHESIS_LINE.search(text)
+    template = _TEMPLATE_ID.search(text)
+    metrics_line = _METRICS_LINE.search(text)
+    assert hypothesis is not None, (
+        "the scripted planner needs a hypothesis line in the context"
+    )
+    payload = _planning_sentinels()
+    payload["evidence_ids"] = seen
+    # The reference checks apply to every action, a stop included: each
+    # decision names the question it is about and cites its evidence.
+    payload["question_id"] = hypothesis.group(2)
+
+    if f" ge {_SHARPENED_FLOOR}" in text:
+        payload["action"] = "stop"
+        payload["stop_reason"] = "question_resolved"
+        payload["rationale"] = (
+            "the admitted contrast held at its sign and at the "
+            "pre-registered floor; a further run would spend without "
+            "changing the answer"
+        )
+        return json.dumps(payload)
+
+    assert template and metrics_line, (
+        "the scripted planner needs a template and its metrics in the "
+        "rendered context"
+    )
+    metric_names = metrics_line.group(1).split(", ")
+    primary = metric_names[0]
+    payload.update(
+        {
+            "action": "new_experiment",
+            "rationale": (
+                "every verified run shows the trained encoder ahead by "
+                "well over one point of probe accuracy; pre-register "
+                "that margin as a floor and test it at a fresh seed"
+            ),
+            "hypothesis_id": hypothesis.group(1),
+            "prediction_condition": (
+                "on held-out images from the evaluation split, at a seed "
+                "no earlier run used"
+            ),
+            "prediction_metric": primary,
+            "prediction_comparator": "ge",
+            "prediction_threshold": _SHARPENED_FLOOR,
+            "prediction_expectation": (
+                f"the trained encoder's probe advantage is at least "
+                f"{_SHARPENED_FLOOR}"
+            ),
+            "experiment_objective": (
+                "Hold the admitted contrast to a pre-registered "
+                "effect-size floor."
+            ),
+            "experiment_procedure": (
+                "Re-run the trusted template for this contrast at a "
+                "fresh seed and compare the observed difference against "
+                "the pre-registered floor."
+            ),
+            "experiment_metrics": metric_names,
+            "experiment_baselines": ["the untrained comparison arm"],
+            "experiment_controls": [
+                "tiny-subset overfit control: the probe must fit a "
+                "memorizable subset to at least 0.95 top-1"
+            ],
+            "experiment_seeds": [61],
+            "template_id": template.group(0),
+        }
+    )
+    return json.dumps(payload)
+
+
 ANSWERERS: Final = {
     "mapping_queries": _mapping_queries,
     "mapping_screening": _mapping_screening,
@@ -802,4 +932,5 @@ ANSWERERS: Final = {
     "selection_comparative_review": _selection_review,
     "selection_decision": _selection_decision,
     "admission_operationalization": _admission_operationalization,
+    "planning_decision": _planning_decision,
 }
