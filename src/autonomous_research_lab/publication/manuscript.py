@@ -23,9 +23,9 @@ judge the tokens before any prose is kept:
   section may be empty. Trusted code owns the document's shape.
 
 What the gates do not judge is meaning: whether the discussion
-overclaims is the reviewer role's question (8C), asked against the
-claim-evidence graph. Building a weaker semantic check here would only
-train prose to pass it.
+overclaims is the faithfulness reviewer's question (:mod:`.review`),
+asked against the packet with grounded findings. Building a weaker
+semantic check here would only train prose to pass it.
 
 A :class:`Manuscript` is one authored call's accepted output, named by a
 content id over everything in it — sections, packet id, and the call's
