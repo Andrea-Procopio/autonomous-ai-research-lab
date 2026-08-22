@@ -21,9 +21,12 @@ count for an operator's minutes-long sanity pass.
 # ARL-FIXED-BEGIN contract
 from __future__ import annotations
 
+import hashlib
+import io
 import json
 import os
 from pathlib import Path
+from typing import Any
 
 import torch
 import torchvision
@@ -31,6 +34,7 @@ from torch import nn
 from torch.utils.data import DataLoader, Subset
 
 PRIMARY_METRIC_KEY = "__ARL_PRIMARY_METRIC__"
+CHECKPOINT_FILENAME = "checkpoint.pt"
 
 N_ENCODER_TRAIN = 8_000
 N_PROBE_TRAIN = 5_000
@@ -51,6 +55,33 @@ def device(config: dict[str, object]) -> torch.device:
     if isinstance(declared, str) and declared:
         return torch.device(declared)
     return torch.device("cpu")
+
+
+def resume_payload(
+    config: dict[str, object], seed: int, where: torch.device
+) -> dict[str, Any] | None:
+    """The checkpoint the config hands over, verified before trust: the
+    bytes must hash to the digest the record pins, and the checkpoint
+    must belong to this seed. A mismatch is a refusal, not a fresh
+    start — training silently from scratch would misreport a resumed
+    run as one. No optimizer state travels: the record states the run
+    resumed, and the resumed trajectory is its own honest measurement."""
+    named = config.get("resume_checkpoint")
+    if not isinstance(named, str) or not named:
+        return None
+    declared = config.get("resume_checkpoint_sha256")
+    raw = Path(named).read_bytes()
+    if (
+        not isinstance(declared, str)
+        or hashlib.sha256(raw).hexdigest() != declared
+    ):
+        raise SystemExit(
+            "resume checkpoint does not hash to the digest the record pins"
+        )
+    payload = torch.load(io.BytesIO(raw), map_location=where, weights_only=True)
+    if int(payload["seed"]) != seed:
+        raise SystemExit("resume checkpoint belongs to another seed")
+    return dict(payload)
 
 
 def features_of(
@@ -146,9 +177,16 @@ def main() -> None:
     )
     loss_fn = nn.CrossEntropyLoss()
     train_loader = DataLoader(encoder_split, batch_size=BATCH, shuffle=False)
+    start_epoch = 0
     final_loss = 0.0
+    payload = resume_payload(config, seed, where)
+    if payload is not None:
+        trained.load_state_dict(payload["encoder"])
+        head.load_state_dict(payload["head"])
+        start_epoch = int(payload["epochs_completed"])
+        final_loss = float(payload["loss"])
     trained.train()
-    for _ in range(epochs):
+    for epoch in range(start_epoch, epochs):
         for images, targets in train_loader:
             optimizer.zero_grad()
             loss = loss_fn(
@@ -158,6 +196,16 @@ def main() -> None:
             loss.backward()
             optimizer.step()
             final_loss = float(loss.detach())
+        torch.save(
+            {
+                "seed": seed,
+                "epochs_completed": epoch + 1,
+                "loss": final_loss,
+                "encoder": trained.state_dict(),
+                "head": head.state_dict(),
+            },
+            run_dir / CHECKPOINT_FILENAME,
+        )
 
     # Both arms judged identically: frozen features, the same probe.
     probe_loader = DataLoader(probe_split, batch_size=BATCH)

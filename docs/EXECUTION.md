@@ -95,13 +95,29 @@ achieved. Occupancy is honest and defensible from the record;
 utilization metering would be a measurement infrastructure of its own,
 and the ledger never pretends to a number nobody took.
 
-## Checkpoints
+## Checkpoints and resume (Task 7A.1)
 
-Templates may write periodic checkpoints under the run directory; they
-are collected and hashed like any artifact. Policy at CIFAR scale:
-`state_dict` only, no optimizer state — each file stays comfortably
-under the evidence store's 64 MiB blob ceiling, and an oversized
-checkpoint fails ingest loudly, which is the correct failure.
-Resuming a half-trained job from its checkpoint is deliberately not
-built yet (Task 7A.1): it is designed against a real workload, not
-guessed in advance.
+Templates write periodic checkpoints under the run directory — the
+encoder template per epoch, the augmentation template per completed
+arm, the stub per step — and they are collected and hashed like any
+artifact. Policy at CIFAR scale: `state_dict` only, no optimizer state
+— each file stays comfortably under the evidence store's 64 MiB blob
+ceiling, and an oversized checkpoint fails ingest loudly, which is the
+correct failure.
+
+A job killed half-trained resumes at the next dispatch. Recovery
+already commits the dead attempt as a failed result with its
+checkpoint ingested; the engineer's dispatch policy
+(`examples/vision_lab/checkpoints.py`) then re-picks the killed seed
+and hands the new job the **blob store's** verified copy — never the
+dead job's mutable run directory — with the sha256 pinned in the job
+config. The template refuses bytes that do not hash to that digest,
+and refuses another seed's checkpoint; the result's config records
+`resumed_from_job`, so a resumed run never passes as an uninterrupted
+one. Bounded: a failed attempt that was itself a resume never offers
+its checkpoint, so a seed is resumed at most once and then consumed
+exactly as before. Host backends only — mounting the blob into a
+container is deliberately not built yet. No optimizer state travels,
+so a resumed trajectory is its own honest measurement, not a replay of
+the uninterrupted one; the stub trainer, which has no optimizer, ends
+byte-identical either way and the tests pin that.

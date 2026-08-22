@@ -1789,8 +1789,9 @@ candidate's resources, the frozen selection directive's four
 constraints, the selection decision's capabilities) versus
 operator-stated (the admission directive's three statements — batch
 scheduling, job-duration bounds, checkpoint/resume). The two are never
-presented as each other, the model authors none of them, and none is
-implemented here: they are stated capabilities for later work.
+presented as each other, and the model authors none of them; of the
+three, checkpoint/resume is now real (Task 7A.1, host backends), and
+the other two remain stated capabilities for later work.
 
 **All or nothing.** The state snapshot is written first and read back
 (the snapshot store verifies on repeat, and the read-back catches what

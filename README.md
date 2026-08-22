@@ -210,7 +210,7 @@ dispatches work, and every model decision passes a deterministic gate
 before it takes effect.
 
 Not built yet: access resolution for metadata-only retrieved works,
-checkpoint-resume of a half-trained job (7A.1), confidence intervals
+checkpoint-resume inside a container backend, confidence intervals
 and power analysis behind the statistician, re-assessment of claims as
 new evidence lands, literature-grounded findings entering research
 state, cloud execution, a skeptic role, and paper writing.

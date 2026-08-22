@@ -50,7 +50,7 @@ from pathlib import PurePosixPath
 from typing import Final, NoReturn, Protocol
 
 from ..core.actions import ResearchAction, ResearchActionType
-from ..core.experiment import ExperimentSpec
+from ..core.experiment import ExperimentResult, ExperimentSpec
 from ..core.ids import content_id
 from ..core.proposals import Proposal, ResultProposal
 from ..core.state import ResearchState
@@ -171,6 +171,58 @@ class ImplementationTemplate:
         return content_id("tmpl", self.name, self.sha256)
 
 
+@dataclass(frozen=True, slots=True)
+class ResumeSource:
+    """A prior attempt's durable checkpoint, handed to the next job as
+    verified input: the path the job can read, the sha256 the record
+    pins (the template refuses bytes that do not hash to it), and the
+    job whose training produced it — provenance, recorded in the job's
+    config and therefore in the result."""
+
+    checkpoint: str
+    sha256: str
+    from_job: str
+
+
+@dataclass(frozen=True, slots=True)
+class SeedPlan:
+    """One dispatch decision: which seed to run, and whether it resumes
+    a half-trained prior attempt."""
+
+    seed: int | None
+    resume: ResumeSource | None = None
+
+    def __post_init__(self) -> None:
+        if self.resume is not None and self.seed is None:
+            raise ValueError("a resume names the seed it continues")
+
+
+class DispatchPolicy(Protocol):
+    """Trusted code deciding which seed the next run serves. Injected by
+    the composition root; the default is :func:`default_plan`. A policy
+    may hand the job a prior attempt's checkpoint — the engineer stamps
+    it into the config, and the template verifies and loads it inside
+    its fixed region. The model is never consulted."""
+
+    def plan(
+        self, spec: ExperimentSpec, results: tuple[ExperimentResult, ...]
+    ) -> SeedPlan: ...
+
+
+def default_plan(
+    spec: ExperimentSpec, results: tuple[ExperimentResult, ...]
+) -> SeedPlan:
+    """The first declared seed no prior run of this spec has used; when
+    every declared seed has run (a replication), the first declared seed
+    — an exact rerun is a legitimate replication. Never resumes."""
+    if not spec.seeds:
+        return SeedPlan(seed=None)
+    used = {r.seed for r in results if r.spec_id == spec.id}
+    return SeedPlan(
+        seed=next((s for s in spec.seeds if s not in used), spec.seeds[0])
+    )
+
+
 class CompletionReview(Protocol):
     """A trusted judgment over a parsed completion, before anything
     persists.
@@ -214,6 +266,7 @@ class ModelBackedEngineer(ResearchRole):
         max_generation_repairs: int = 1,
         completion_review: CompletionReview | None = None,
         preflight_checks: Sequence[PreflightCheck] = DEFAULT_PREFLIGHT_CHECKS,
+        dispatch: DispatchPolicy | None = None,
     ) -> None:
         self._provider = provider
         self._model = model
@@ -229,6 +282,7 @@ class ModelBackedEngineer(ResearchRole):
         self._max_generation_repairs = max_generation_repairs
         self._completion_review = completion_review
         self._preflight_checks = tuple(preflight_checks)
+        self._dispatch = dispatch
 
     @property
     def name(self) -> RoleName:
@@ -259,7 +313,8 @@ class ModelBackedEngineer(ResearchRole):
                 f"not {action_type}"
             )
         spec = _the_spec(invocation)
-        seed = _seed_for(spec, invocation)
+        plan = self._plan_for(spec, invocation)
+        seed = plan.seed
         template = self._template_for(spec)
 
         request = self._request(invocation, spec, seed, template)
@@ -304,11 +359,12 @@ class ModelBackedEngineer(ResearchRole):
             spec_id=spec.id,
             source_dir=source_dir,
             entrypoint=ENTRYPOINT,
-            config={
-                "spec_id": spec.id,
-                "source_id": source_id,
-                "implementation_id": implementation_id,
-            },
+            config=_job_config(
+                spec_id=spec.id,
+                source_id=source_id,
+                implementation_id=implementation_id,
+                resume=plan.resume,
+            ),
             seed=seed,
             # Derived from the attempt when there is one, so the runtime
             # already knows this job's id before it exists and can find
@@ -349,6 +405,16 @@ class ModelBackedEngineer(ResearchRole):
                 proposer=f"engineer:{self._provider.name}:{self._model}",
             ),
         )
+
+    def _plan_for(
+        self, spec: ExperimentSpec, invocation: RoleInvocation
+    ) -> SeedPlan:
+        results = tuple(
+            r for r in invocation.context.results if r.spec_id == spec.id
+        )
+        if self._dispatch is None:
+            return default_plan(spec, results)
+        return self._dispatch.plan(spec, results)
 
     # -- the model call ------------------------------------------------------
 
@@ -535,14 +601,28 @@ def _the_spec(invocation: RoleInvocation) -> ExperimentSpec:
 
 
 def _seed_for(spec: ExperimentSpec, invocation: RoleInvocation) -> int | None:
-    """The first declared seed no prior run of this spec has used; when
-    every declared seed has run (a replication), the first declared seed —
-    an exact rerun is a legitimate replication. ``None`` only when the spec
-    declares no seeds."""
-    if not spec.seeds:
-        return None
-    used = {r.seed for r in invocation.context.results if r.spec_id == spec.id}
-    return next((s for s in spec.seeds if s not in used), spec.seeds[0])
+    """:func:`default_plan`'s seed, kept for callers that predate
+    dispatch policies."""
+    return default_plan(spec, tuple(invocation.context.results)).seed
+
+
+def _job_config(
+    *,
+    spec_id: str,
+    source_id: str,
+    implementation_id: str,
+    resume: ResumeSource | None,
+) -> dict[str, str]:
+    config = {
+        "spec_id": spec_id,
+        "source_id": source_id,
+        "implementation_id": implementation_id,
+    }
+    if resume is not None:
+        config["resume_checkpoint"] = resume.checkpoint
+        config["resume_checkpoint_sha256"] = resume.sha256
+        config["resumed_from_job"] = resume.from_job
+    return config
 
 
 def _parse_proposal(
