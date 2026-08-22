@@ -209,7 +209,7 @@ exists, so work nobody wrote down first cannot be started. Orchestration is not 
 dispatches work, and every model decision passes a deterministic gate
 before it takes effect.
 
-Not built yet: access resolution for metadata-only retrieved works,
+Not built yet: access resolution beyond arXiv listings,
 checkpoint-resume inside a container backend, confidence intervals
 and power analysis behind the statistician, re-assessment of claims as
 new evidence lands, literature-grounded findings entering research

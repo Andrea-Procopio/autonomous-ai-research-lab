@@ -141,10 +141,24 @@ human in the loop, producing results that survive scrutiny.
     provider that refuses every call. An admission is a translation,
     never a promotion: `ADMITTED` does not mean true, novel, or
     empirically supported.
-  - *Still open:* access resolution for attested material ambiguities
-    on metadata-only works, experiment execution over the funded
-    state, and findings entering the state as structured objects
-    carrying their sources through the governed commit.
+  - *Task 5G (2026-08-23).* Access resolution. The gap 5D.2 named —
+    an attested material ambiguity on a metadata-only work had no
+    lawful in-repo path to an abstract — closed at the only seam the
+    write-once, content-addressed corpus allows: retrieval time. A
+    trusted wrapper around the provider fetches the work's own
+    abstract from the arXiv listing its record names, and rebuilds the
+    source at abstract access before anything is recorded; a failed
+    fetch leaves the work honestly metadata-only, because resolution
+    is an enrichment, never a gate. The model is never involved.
+    Qualified live 2026-08-23: the arXiv wire contract proven against
+    a real listing (and a bogus id degrading to none), and real
+    OpenAlex searches passing through the wrapper unchanged — the
+    sampled works needed no resolution, and the upgrade itself is
+    pinned by tests on the exact record type.
+  - *Still open:* experiment execution over the funded state and
+    findings entering the state as structured objects (both since
+    delivered by the Task 6-7 chain), and resolution beyond arXiv
+    (Crossref and publisher abstracts remain unfetched).
 - **Funded runs.** Done (Task 6A, 2026-08-20). An admitted state
   carries no budget, and a state's identity excludes its budget, so
   funding one in place produces different bytes under an unchanged id

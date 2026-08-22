@@ -1560,10 +1560,12 @@ level or configuration — while the conditions that must still refuse
 were demonstrated, live and in calibration, to refuse. `DISTINGUISHED`
 still means exactly what it meant: materially differentiated from the
 closest works *this bounded search surfaced* — never proof of novelty.
-What remains honestly absent: access-level resolution for
-metadata-only works (an attested material ambiguity still has no
-lawful in-repo path to an abstract), and any separate bar on
-citation-dominated pools, should live evidence ever show one gamed.
+Access-level resolution for metadata-only works arrived as Task 5G —
+a retrieval-time wrapper that fetches the work's own arXiv abstract
+before anything is recorded, because the write-once corpus makes an
+in-place upgrade impossible by design. What remains honestly absent:
+resolution beyond arXiv, and any separate bar on citation-dominated
+pools, should live evidence ever show one gamed.
 
 **The Task 5E ingress contract (implemented).** A candidate is
 selectable only on a `DISTINGUISHED` assessment. The contract's first
