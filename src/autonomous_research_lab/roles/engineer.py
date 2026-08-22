@@ -47,7 +47,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import PurePosixPath
-from typing import Final, NoReturn
+from typing import Final, NoReturn, Protocol
 
 from ..core.actions import ResearchAction, ResearchActionType
 from ..core.experiment import ExperimentSpec
@@ -171,6 +171,25 @@ class ImplementationTemplate:
         return content_id("tmpl", self.name, self.sha256)
 
 
+class CompletionReview(Protocol):
+    """A trusted judgment over a parsed completion, before anything
+    persists.
+
+    Runs inside the bounded generation-repair loop, so a rejection here
+    earns the model one corrective call carrying the exact reason —
+    where the same judgment expressed as a preflight check would fail
+    the whole attempt with no chance to fix it. Return ``""`` to accept,
+    or the reason to reject; be specific, because the reason is the
+    entire feedback the corrective call gets.
+    """
+
+    def review(
+        self,
+        template: ImplementationTemplate,
+        files: tuple[SourceFile, ...],
+    ) -> str: ...
+
+
 class ModelBackedEngineer(ResearchRole):
     """See the module docstring; construction is explicit wiring, and every
     collaborator is injected — provider, runner, ledger, store, binding,
@@ -193,6 +212,7 @@ class ModelBackedEngineer(ResearchRole):
         temperature: float = 0.0,
         request_timeout_seconds: float = 240.0,
         max_generation_repairs: int = 1,
+        completion_review: CompletionReview | None = None,
         preflight_checks: Sequence[PreflightCheck] = DEFAULT_PREFLIGHT_CHECKS,
     ) -> None:
         self._provider = provider
@@ -207,6 +227,7 @@ class ModelBackedEngineer(ResearchRole):
         self._temperature = temperature
         self._request_timeout_seconds = request_timeout_seconds
         self._max_generation_repairs = max_generation_repairs
+        self._completion_review = completion_review
         self._preflight_checks = tuple(preflight_checks)
 
     @property
@@ -255,7 +276,7 @@ class ModelBackedEngineer(ResearchRole):
         while True:
             try:
                 files, rationale = self._validated_source(
-                    invocation, spec, response
+                    invocation, spec, response, template
                 )
                 break
             except ImplementationRejectedError as rejection:
@@ -387,6 +408,7 @@ class ModelBackedEngineer(ResearchRole):
         invocation: RoleInvocation,
         spec: ExperimentSpec,
         response: ModelResponse,
+        template: ImplementationTemplate,
     ) -> tuple[tuple[SourceFile, ...], str]:
         payload = response.structured
         if payload is None:
@@ -397,6 +419,14 @@ class ModelBackedEngineer(ResearchRole):
             files, rationale = _parse_proposal(payload)
         except ImplementationRejectedError as error:
             self._reject(invocation, spec, response, str(error), payload=payload)
+        if self._completion_review is not None:
+            # The injected judgment runs with the deterministic gates,
+            # before anything persists: its rejection is preserved and
+            # earns a corrective call like any other, rather than dying
+            # later as an unrepairable preflight failure.
+            reason = self._completion_review.review(template, files)
+            if reason:
+                self._reject(invocation, spec, response, reason, payload=payload)
         return files, rationale
 
     def _reject(

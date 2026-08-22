@@ -43,6 +43,7 @@ from autonomous_research_lab.roles.engineer import (
     ENTRYPOINT,
     MAX_SOURCE_BYTES,
     PROPOSAL_SCHEMA,
+    CompletionReview,
     EngineerContractError,
     ImplementationRejectedError,
     ImplementationTemplate,
@@ -130,6 +131,7 @@ def _engineer(
     *,
     executor: Executor | None = None,
     repairs: int = 1,
+    completion_review: CompletionReview | None = None,
 ) -> tuple[ModelBackedEngineer, FakeModelProvider, UsageLedger, ImplementationStore]:
     provider = FakeModelProvider(replies)
     ledger = UsageLedger()
@@ -143,6 +145,7 @@ def _engineer(
         binding=HostPythonBinding(timeout_seconds=60.0),
         template=TEMPLATE,
         max_generation_repairs=repairs,
+        completion_review=completion_review,
     )
     return engineer, provider, ledger, store
 
@@ -638,3 +641,66 @@ def test_without_an_attempt_the_job_mints_its_own_id(tmp_path: Path) -> None:
     assert runner.jobs[0].id.startswith("job_")
     # An occurrence id, not a derivation: there is no attempt to derive from.
     assert runner.jobs[0].id != derive_job_id("att_1")
+
+
+class NoComments:
+    """A review that rejects any completion carrying a comment — a stand-in
+    for the fixed-region judgment a lab injects."""
+
+    def review(
+        self, template: ImplementationTemplate, files: tuple[SourceFile, ...]
+    ) -> str:
+        del template
+        if any("#" in found.content for found in files):
+            return "the completion carries a comment; resubmit without one"
+        return ""
+
+
+class TestCompletionReview:
+    def test_a_rejected_completion_earns_one_corrective_call(
+        self, tmp_path: Path
+    ) -> None:
+        commented = _reply(source=GOOD_SOURCE + "# stray comment\n")
+        engineer, provider, ledger, store = _engineer(
+            tmp_path,
+            (commented, _reply()),
+            completion_review=NoComments(),
+        )
+
+        (proposal,) = engineer.perform(_invocation(_spec()))
+
+        assert isinstance(proposal, ResultProposal)
+        assert proposal.result.status is ExperimentStatus.COMPLETED
+        (rejected,) = store.rejected()
+        assert "comment" in str(rejected["reason"])
+        first, second = provider.calls
+        assert len(second.messages) == len(first.messages) + 2
+        assert "comment" in second.messages[-1].content
+        assert second.metadata["generation_repair"] == "1"
+        assert ledger.drain().calls == 2
+
+    def test_review_rejections_are_bounded(self, tmp_path: Path) -> None:
+        commented = _reply(source=GOOD_SOURCE + "# stray comment\n")
+        engineer, _, ledger, store = _engineer(
+            tmp_path,
+            (commented, commented),
+            executor=ForbiddenExecutor(),
+            completion_review=NoComments(),
+        )
+
+        with pytest.raises(ImplementationRejectedError, match="comment"):
+            engineer.perform(_invocation(_spec()))
+
+        assert len(store.rejected()) == 2
+        assert store.records() == ()
+        assert ledger.drain().calls == 2
+
+    def test_no_review_keeps_behavior(self, tmp_path: Path) -> None:
+        commented = _reply(source=GOOD_SOURCE + "# tolerated without a review\n")
+        engineer, _, _, store = _engineer(tmp_path, (commented,))
+
+        (proposal,) = engineer.perform(_invocation(_spec()))
+
+        assert isinstance(proposal, ResultProposal)
+        assert proposal.result.status is ExperimentStatus.COMPLETED
+        assert store.rejected() == ()
