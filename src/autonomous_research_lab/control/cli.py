@@ -1,12 +1,13 @@
 """``arl`` — the front door.
 
-Nine verbs, and no state of their own::
+Ten verbs, and no state of their own::
 
     arl run CONFIG --root DIR [--lab module:factory] [--stop-after STAGE]
     arl resume [INVESTIGATION] --root DIR [--lab module:factory]
     arl status [INVESTIGATION] --root DIR
     arl verify --root DIR
     arl packet [INVESTIGATION] --root DIR [--out DIR]
+    arl figures [INVESTIGATION] --root DIR
     arl manuscript [INVESTIGATION] --root DIR [--lab module:factory]
         [--model NAME] [--out DIR]
     arl review [INVESTIGATION] --root DIR [--lab module:factory]
@@ -27,9 +28,14 @@ evidence packet: it verifies the run from cold, re-derives the
 statistician's figures against the record, and writes
 ``packet/<packet_id>.json`` and ``.md`` under the root — checked, not
 copied, and refused outright for a walk that never reached a research
-state. ``manuscript`` authors the workshop draft from that packet: a
-model writes prose only, behind deterministic gates that refuse any
-number the packet does not state and any citation outside its
+state. ``figures`` draws the replication-family plots from the
+re-derived record — trusted code only, hashed at creation into a
+write-once figure store; refused when nothing is statistician-assessed
+or matplotlib (the ``figures`` extra) is not installed, and replaying
+verifies bytes without drawing anything. ``manuscript`` authors the
+workshop draft from that packet: a model writes prose only, behind
+deterministic gates that refuse any number the packet does not state
+and any citation outside its
 bibliography; trusted code assembles everything else. Refused for a
 walk with nothing to report; re-running replays the recorded draft
 without a model call. ``review`` runs the faithfulness reviewer over
@@ -43,6 +49,11 @@ the approved draft for a venue: trusted code renders ``main.tex`` and
 kit's verified files — refused while the standing review is anything
 but approved. ``--pdf`` additionally compiles when a LaTeX toolchain is
 installed; the PDF is a derived artifact, never a record.
+``simulate`` takes a venue's reading of the rendered submission: an
+ensemble of blind, form-structured model reviews whose medians trusted
+code holds against a configured bar — an instrument reading, never the
+objective. Below bar runs at most one polish cycle under every original
+gate.
 
 Exit codes are meant to be read by a script as well as a person: ``0``
 for a walk that ended on its own terms, including an honest scientific
@@ -63,6 +74,11 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from ..program.integrity import verify_run
+from ..publication.figures import (
+    FigureError,
+    FiguresUnavailableError,
+    NothingToDrawError,
+)
 from ..publication.kits import KitIntegrityError
 from ..publication.latex import VenueError
 from ..publication.manuscript import ManuscriptError, NothingToReportError
@@ -76,6 +92,7 @@ from ..publication.simulator import SimulationError
 from ..runtime.providers import ModelProviderError
 from .config import ConfigError, load_config
 from .controller import Controller, ControllerError, Outcome, StatusReport
+from .figures import render_figures
 from .investigation import InvestigationStore
 from .lab import Lab, LabError, load_lab
 from .manuscript import author_manuscript
@@ -114,6 +131,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _status(arguments)
         if arguments.command == "packet":
             return _packet(arguments)
+        if arguments.command == "figures":
+            return _figures(arguments)
         if arguments.command == "manuscript":
             return _manuscript(arguments)
         if arguments.command == "review":
@@ -237,6 +256,42 @@ def _packet(arguments: argparse.Namespace) -> int:
     print(f"claims        {len(packet.claims)}")
     print(f"json          {json_path}")
     print(f"markdown      {markdown_path}")
+    return OK
+
+
+def _figures(arguments: argparse.Namespace) -> int:
+    root = Path(arguments.root).resolve()
+    if not _exists(root):
+        return FAILED
+    investigation_id = _chosen(root, arguments.investigation)
+    if investigation_id is None:
+        return FAILED
+    try:
+        result = render_figures(root, investigation_id)
+    except (
+        MissingFactError,
+        NothingToDrawError,
+        FiguresUnavailableError,
+    ) as error:
+        # Preconditions, not faults: no research state, nothing a
+        # statistician assessed, or a deployment without the extra.
+        print(f"REFUSED: {error}")
+        return REFUSED
+    except (PacketError, FigureError) as error:
+        print(f"FATAL: {error}")
+        return FAILED
+    print(
+        f"figures       {len(result.manifests)} "
+        f"({len(result.rendered)} rendered, "
+        f"{len(result.replayed)} replayed)"
+    )
+    for manifest in result.manifests:
+        print(
+            f"  {manifest.figure_id}  claim {manifest.data.claim_id}  "
+            f"prediction {manifest.data.prediction_id}  "
+            f"n={manifest.data.n}"
+        )
+    print(f"store         {result.store_root}")
     return OK
 
 
@@ -611,6 +666,12 @@ def _parser() -> argparse.ArgumentParser:
         type=Path,
         help="directory for the packet files (default: ROOT/packet)",
     )
+
+    figures = commands.add_parser(
+        "figures", help="draw the replication-family figures"
+    )
+    figures.add_argument("investigation", nargs="?", help="investigation id")
+    _add_root(figures)
 
     manuscript = commands.add_parser(
         "manuscript", help="author the manuscript from the evidence packet"
