@@ -23,7 +23,7 @@ from pathlib import Path
 
 from autonomous_research_lab.control.controller import Controller, WalkResult
 from autonomous_research_lab.control.lab import Lab
-from autonomous_research_lab.control.stage import StageName
+from autonomous_research_lab.control.stage import CHAIN_ORDER, StageName
 from examples.vision_lab import ci_lab, qualification_lab
 
 CONFIG = Path(__file__).resolve().parent / "vision.json"
@@ -49,7 +49,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-root", type=Path, required=True)
     parser.add_argument(
-        "--stop-after", choices=[str(stage) for stage in StageName]
+        "--stop-after", choices=[str(stage) for stage in CHAIN_ORDER]
     )
     parser.add_argument(
         "--ci",

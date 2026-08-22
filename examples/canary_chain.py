@@ -36,7 +36,11 @@ from pathlib import Path
 
 from autonomous_research_lab.control.config import load_config
 from autonomous_research_lab.control.controller import Controller, WalkResult
-from autonomous_research_lab.control.stage import StageName, StageStatus
+from autonomous_research_lab.control.stage import (
+    CHAIN_ORDER,
+    StageName,
+    StageStatus,
+)
 from autonomous_research_lab.program.integrity import IntegrityReport, verify_run
 from examples.canary_lab import lab
 
@@ -74,7 +78,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--stop-after",
-        choices=[str(stage) for stage in StageName],
+        choices=[str(stage) for stage in CHAIN_ORDER],
         help="halt this walk after that stage; run again to continue",
     )
     arguments = parser.parse_args()

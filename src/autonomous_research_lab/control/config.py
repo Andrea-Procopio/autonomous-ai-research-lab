@@ -51,7 +51,7 @@ from ..program.authorization import (
 from ..program.directive import RunDirective
 from ..selection.directive import SelectionDirective
 from .investigation import MAX_LABEL_CHARS
-from .stage import StageName
+from .stage import CHAIN_ORDER, StageName
 
 MAX_STEPS_CEILING: Final = 200
 """A run that needs more than two hundred deliberations is not being
@@ -557,14 +557,22 @@ def _stop_after(payload: Mapping[str, object]) -> StageName | None:
         return None
     if not isinstance(raw, str):
         raise ConfigError("config.stop_after must be a stage name")
+    named = ", ".join(str(stage) for stage in CHAIN_ORDER)
     try:
-        return StageName(raw)
+        parsed = StageName(raw)
     except ValueError as exc:
-        named = ", ".join(str(stage) for stage in StageName)
         raise ConfigError(
             f"config.stop_after names no stage of the chain: {raw!r} "
             f"(one of: {named})"
         ) from exc
+    if parsed not in CHAIN_ORDER:
+        # The enum also holds post-run export seats; a walk cannot stop
+        # after something it never walks to.
+        raise ConfigError(
+            f"config.stop_after names no stage of the chain: {raw!r} "
+            f"(one of: {named})"
+        )
+    return parsed
 
 
 # -- readers ------------------------------------------------------------------

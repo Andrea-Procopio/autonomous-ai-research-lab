@@ -918,6 +918,61 @@ def _planning_decision(request: ModelRequest) -> str:
     return json.dumps(payload)
 
 
+def _manuscript_prose(request: ModelRequest) -> str:
+    """Prose computed from the shown packet, so the manuscript gates
+    pass by construction: every number and citation the fixture writes
+    is harvested verbatim from the packet markdown the author sent, and
+    the template text around them is digit-free and heading-free. Where
+    a pattern is absent the fixture writes numberless prose — the same
+    honest fallback the instruction asks of a live model."""
+    shown = request.messages[0].content if request.messages else ""
+    citations = re.findall(r"\[(lits_[0-9a-f]{16})\]", shown)
+    family = re.search(r"n=(\d+), consistent", shown)
+    p_value = re.search(r"one-sided p=([0-9.eE+-]+),", shown)
+    verdict = re.search(r"\*\*([A-Z]+)\*\* \(statistician", shown)
+    cited = " ".join(f"[{name}]" for name in dict.fromkeys(citations))
+    standing = (
+        f"the recorded verdict is {verdict.group(1).lower()}"
+        if verdict
+        else "no claim was conclusively judged"
+    )
+    family_clause = (
+        f"a replication family of n={family.group(1)} seeded runs, "
+        f"reaching a one-sided exact sign test of p={p_value.group(1)}"
+        if family and p_value
+        else "the replication family the packet records"
+    )
+    payload = {
+        "abstract": (
+            f"We report the registered contrast exactly as the evidence "
+            f"packet records it: {standing}, over {family_clause}. Every "
+            f"figure in this manuscript is assembled by trusted code "
+            f"from the verified record."
+        ),
+        "introduction": (
+            f"Prior work motivates the registered question {cited}. "
+            f"This report states only what the packet's verified record "
+            f"supports, in the recorded verdict's own words."
+        ),
+        "method_narrative": (
+            "The experiment ran the pre-registered trusted template at "
+            "the recorded seeds; the registration below is rendered "
+            "from the record, not restated."
+        ),
+        "discussion": (
+            f"Across {family_clause}, {standing}. We draw no conclusion "
+            f"beyond the recorded verdicts and figures."
+        ),
+        "limitations": (
+            "The evidence covers the recorded seeds, dataset, and "
+            "training budget only; no claim extends past the packet's "
+            "stated scope, and the underpowered families remain exactly "
+            "as judged."
+        ),
+    }
+    return json.dumps(payload)
+
+
 ANSWERERS: Final = {
     "mapping_queries": _mapping_queries,
     "mapping_screening": _mapping_screening,
@@ -933,4 +988,5 @@ ANSWERERS: Final = {
     "selection_decision": _selection_decision,
     "admission_operationalization": _admission_operationalization,
     "planning_decision": _planning_decision,
+    "manuscript_prose": _manuscript_prose,
 }

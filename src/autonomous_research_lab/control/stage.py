@@ -34,7 +34,9 @@ from typing import Final
 
 
 class StageName(StrEnum):
-    """The stages of the chain, in the order they must happen."""
+    """The stages of the chain, in the order they must happen — plus
+    the post-run export seats, which are not chain stages: iterate
+    :data:`CHAIN_ORDER` for the walk, never this enum."""
 
     MAPPING = "mapping"
     IDEATION = "ideation"
@@ -43,6 +45,10 @@ class StageName(StrEnum):
     ADMISSION = "admission"
     FUNDING = "funding"
     EXPERIMENTATION = "experimentation"
+
+    MANUSCRIPT = "manuscript"
+    """The writing seat. Not in :data:`CHAIN_ORDER`: a manuscript is
+    exported from a finished run's packet, never walked to."""
 
 
 CHAIN_ORDER: Final[tuple[StageName, ...]] = (
