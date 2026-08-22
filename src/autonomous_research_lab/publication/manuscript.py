@@ -322,6 +322,13 @@ def assemble(packet: EvidencePacket, manuscript: Manuscript) -> str:
     for finding in packet.claims:
         lines.append("")
         lines.extend(finding_lines(finding))
+        for figure in packet.figures:
+            if figure.claim_id != finding.claim_id:
+                continue
+            lines.append("")
+            lines.append(
+                f"![{figure.caption}](../figures/{figure.figure_id}.png)"
+            )
     lines.extend(
         [
             "",
