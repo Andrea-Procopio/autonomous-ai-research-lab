@@ -18,6 +18,7 @@ nothing else in the package depends on this; both directions are pinned by
 the structural tests.
 """
 
+from .arxiv import fetch_abstract, summary_from
 from .corpus import CorpusSearchResult, LiteratureCorpus
 from .dedup import (
     DeduplicationReport,
@@ -26,6 +27,7 @@ from .dedup import (
     deduplicate,
 )
 from .openalex import OpenAlexProvider
+from .resolution import AccessResolvingProvider
 from .retrieval import (
     PAGE_SIZE_CEILING,
     RESULT_CEILING,
@@ -59,6 +61,7 @@ __all__ = [
     "PAGE_SIZE_CEILING",
     "RESULT_CEILING",
     "AccessLevel",
+    "AccessResolvingProvider",
     "CorpusSearchResult",
     "DeduplicationReport",
     "DuplicateConflict",
@@ -84,7 +87,9 @@ __all__ = [
     "RetrievedSearch",
     "ScriptedLiteratureProvider",
     "deduplicate",
+    "fetch_abstract",
     "normalize_arxiv_id",
     "normalize_doi",
     "search_record_from",
+    "summary_from",
 ]
