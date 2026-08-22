@@ -27,6 +27,10 @@ dev = ["pytest>=8.0", "ruff>=0.6", "mypy>=1.11"]
 # pinned image, never from the host environment; staging a dataset
 # needs neither. See docs/EXECUTION.md.
 vision = ["torch>=2.4,<3", "torchvision>=0.19,<1"]
+# Figure rendering only. Records, packets, verification, and every
+# replay read hashed bytes; drawing a new figure is the one act that
+# needs the library. See docs/ARCHITECTURE.md (Rendered figures).
+figures = ["matplotlib>=3.8,<4"]
 
 [project.scripts]
 arl = "autonomous_research_lab.control.cli:main"
@@ -68,3 +72,12 @@ warn_unreachable = true
 [[tool.mypy.overrides]]
 module = ["torch", "torch.*", "torchvision", "torchvision.*"]
 ignore_missing_imports = true
+
+# CI installs [figures]; developers may not have it. follow_imports =
+# "skip" keeps strict mypy identical either way — matplotlib's partial
+# inline types would otherwise flap warn_unused_ignores between
+# environments.
+[[tool.mypy.overrides]]
+module = ["matplotlib", "matplotlib.*"]
+ignore_missing_imports = true
+follow_imports = "skip"

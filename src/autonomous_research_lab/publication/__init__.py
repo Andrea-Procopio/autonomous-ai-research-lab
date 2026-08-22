@@ -43,11 +43,34 @@ schema here is flat data, and the composition root does the reading.
   model never outputs a verdict; the score is an instrument reading,
   never the objective.
 
-Still deliberately absent: rendered figures, full venue-macro
-fidelity, and signing.
+* the **rendered figures** (:mod:`.figures`) — trusted code draws the
+  replication families the packet re-derives; the model never sees,
+  names, or captions a figure. The numbers are the identity; the bytes
+  are hashed at creation into a write-once manifest and verified ever
+  after, because matplotlib output varies across versions and the
+  first rendering is the record.
+
+Still deliberately absent: full venue-macro fidelity, and signing.
 """
 
 from .author import AUTHOR_INSTRUCTION, PROSE_SCHEMA, ManuscriptAuthor
+from .figures import (
+    FigureConflictError,
+    FigureData,
+    FigureError,
+    FigureIntegrityError,
+    FigureManifest,
+    FigureStore,
+    FiguresUnavailableError,
+    NothingToDrawError,
+    StaleFigureError,
+    UnknownFigureError,
+    compose_caption,
+    figure_id_for,
+    planned_figures,
+    render_and_manifest,
+    render_figure,
+)
 from .kits import (
     KitConflictError,
     KitIntegrityError,
@@ -80,6 +103,7 @@ from .packet import (
     EvidencePacket,
     FiguresMismatchError,
     PacketError,
+    RenderedFigure,
     render_markdown,
     to_json,
 )
@@ -142,7 +166,14 @@ __all__ = [
     "AmbiguousHeadError",
     "EvidencePacket",
     "FaithfulnessReviewer",
+    "FigureConflictError",
+    "FigureData",
+    "FigureError",
+    "FigureIntegrityError",
+    "FigureManifest",
+    "FigureStore",
     "FiguresMismatchError",
+    "FiguresUnavailableError",
     "KitConflictError",
     "KitIntegrityError",
     "KitManifest",
@@ -154,10 +185,12 @@ __all__ = [
     "ManuscriptIntegrityError",
     "ManuscriptRejectedError",
     "ManuscriptStore",
+    "NothingToDrawError",
     "NothingToReportError",
     "NothingToReviewError",
     "PacketError",
     "PolishRecord",
+    "RenderedFigure",
     "ReviewConflictError",
     "ReviewError",
     "ReviewFinding",
@@ -173,6 +206,8 @@ __all__ = [
     "SimulationRecord",
     "SimulationRejectedError",
     "SimulationStore",
+    "StaleFigureError",
+    "UnknownFigureError",
     "UnknownKitError",
     "VenueError",
     "VenueReview",
@@ -181,15 +216,20 @@ __all__ = [
     "aggregate",
     "assemble",
     "bibtex_entries",
+    "compose_caption",
     "derive_verdict",
     "deterministic_findings",
     "escape",
+    "figure_id_for",
     "gate_prose",
     "ground_findings",
     "head_for",
     "known_renderings",
     "meets",
+    "planned_figures",
     "prose_to_latex",
+    "render_and_manifest",
+    "render_figure",
     "render_latex",
     "render_markdown",
     "require_reportable",
