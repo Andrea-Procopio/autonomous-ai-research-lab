@@ -2427,6 +2427,21 @@ derives from per-file digests, so `dataset_id` in job config is
 machine-independent, and the `DatasetStaged` preflight re-hashes the
 staged files before every launch.
 
+**Assessment is exact inference, on the record.** Since Task 7C the
+result-analyst seat is a statistician: trusted code runs a one-sided
+exact sign test over the claim's replication family — the raw per-seed
+observations the assessor context now carries, exactly as the role
+contract always promised — with Bonferroni adjustment across the
+hypothesis's tested predictions, and every figure stated in the
+assessment's own rationale. SUPPORTED must clear the adjusted exact
+tail; unanimous-but-underpowered is PLAUSIBLE; consistently-contrary-
+but-underpowered stays UNDETERMINED. This is not the "advisory helper"
+the assessment docs warn against: the verdict enters only as an
+`EpistemicAssessment` naming its method, citing the hypothesis-wide
+admissible conclusive family (the one citation set both the coverage
+and promotion gates accept — now labelled in the context), and
+supersedable like any judgment. No model authors a number.
+
 **Governance stays on.** The lab wires the structural methodology
 reviewer, the catalog's tiny-subset overfit control, and — mandatory,
 because `runtime()` is rebuilt every step — a `FileVerificationStore`,

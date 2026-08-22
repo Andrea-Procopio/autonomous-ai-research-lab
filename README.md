@@ -183,7 +183,13 @@ end-to-end runs:
   planner shares the director's seat, pre-registers a sharper
   effect-size claim under the deterministic gate, runs it through the
   same trusted template at a fresh seed, and stops the investigation
-  with a typed reason, citing its evidence.
+  with a typed reason, citing its evidence. And since Task 7C the
+  verdicts are exact inference, not sign checks: a deterministic
+  statistician runs a one-sided exact sign test over each claim's
+  replication family with Bonferroni-adjusted thresholds, and every
+  figure — n, mean, spread, effect, the exact p — lives in the
+  assessment's own rationale. Unanimous-but-underpowered is honestly
+  `PLAUSIBLE`, never inflated to `SUPPORTED`.
 
 Nothing a model says becomes scientific state until deterministic code
 has gated, committed, executed, and verified it. Literature-derived
@@ -204,11 +210,10 @@ dispatches work, and every model decision passes a deterministic gate
 before it takes effect.
 
 Not built yet: access resolution for metadata-only retrieved works,
-checkpoint-resume of a half-trained job (7A.1), the statistician role
-with real inference (effect sizes, uncertainty, multiple comparisons —
-today's assessments are sign checks), literature-grounded findings
-entering research state, cloud execution, a skeptic role, and paper
-writing.
+checkpoint-resume of a half-trained job (7A.1), confidence intervals
+and power analysis behind the statistician, re-assessment of claims as
+new evidence lands, literature-grounded findings entering research
+state, cloud execution, a skeptic role, and paper writing.
 
 Expect interfaces to change.
 

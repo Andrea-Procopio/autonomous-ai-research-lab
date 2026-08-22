@@ -346,10 +346,38 @@ human in the loop, producing results that survive scrutiny.
   open: model-backed repair strategies and reviewers behind the
   existing protocols, richer control libraries, and defaulting the
   runtime to file-backed verification persistence.
-- **Statistician and Verifier.** Real inference behind
-  `EpistemicAssessment`. Today's assessments are demo-grade prediction
-  checks; these roles bring power, uncertainty, and
-  multiple-comparison awareness, plus provenance checking of claims.
+- **Statistician and Verifier.** The deterministic statistician is
+  done (Task 7C, 2026-08-22). Trusted code runs a one-sided exact sign
+  test over the claim's replication family — the raw per-seed
+  observations the assessor context now carries, consuming the
+  replication-group seam the architecture reserved — with Bonferroni
+  adjustment across the hypothesis's tested predictions and every
+  figure stated in the assessment's own content-addressed rationale.
+  SUPPORTED must clear the adjusted exact tail, so the bootstrap
+  declares five seeds (three unanimous observations carry a tail of
+  one in eight, and a verdict that cannot clear its own threshold is
+  not a verdict); unanimous-but-underpowered is PLAUSIBLE — the
+  verdict's first production use — and consistently-contrary-but-
+  underpowered stays UNDETERMINED. The assessor context enrichment
+  also dissolved a real gate trap: coverage demands the admissible
+  conclusive family cited in full while promotion refuses any
+  inadmissible citation, and the context now labels the one set that
+  satisfies both. Wiring it exposed a second trap the stub lab could
+  never show: with a real trainer's cost estimate, synthesis outbids
+  replication at equal value, the claim is judged at n=1, and the
+  planner gate never opens again — fixed by wiring the empirical-ML
+  playbook (replication-gap advice boosts REPLICATE to HIGH at any
+  cost estimate; both sides of the tie-break are regression-tested).
+  Qualified live on real training, 2026-08-22: five bootstrap
+  contrasts (+0.023 to +0.060, mean +0.0419, stdev 0.013) reached
+  SUPPORTED at exact p = 0.03125; the planner's fresh-seed claim
+  (+0.069 against its 0.01 floor) recorded PLAUSIBLE at n=1 with the
+  0.025 Bonferroni-adjusted threshold stated; clean cold verify.
+  Still open: confidence intervals and power analysis (a t-quantile
+  policy), re-assessment when new conclusive evidence postdates the
+  current judgment (frontier re-opening plus `supersedes` wiring), the
+  model-backed statistician and reviewer behind the same seat, and
+  provenance checking of claims (the Verifier).
 - **Trajectory analysis.** The decision log (`DecisionRecord` + JSONL)
   exists. Horizon 1 adds the analysis code that reads it: utility
   calibration, cost prediction error, failure-mode tallies, feeding

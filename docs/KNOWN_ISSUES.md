@@ -5,6 +5,46 @@ diagnosed to some degree, and not yet fixed. An issue leaves this file
 by being fixed in a commit that references it — never by being
 forgotten.
 
+## The critic's ANALYZE fails coverage on wide hypotheses
+
+- **Where:** `orchestration/loop.py::_critic_context` (single-spec
+  projection) versus `_gate_analysis` (hypothesis-wide coverage), reached
+  through `_invoke_critic` when a deterministic trigger fires — observed
+  live on the vision arc's large-effect trigger at the planner's fresh
+  seed.
+- **Status:** open; contained by design (the failed analysis commits as a
+  failed attempt, nothing scientific enters state, the run continues).
+  Recorded so the failing critic path is expected rather than
+  rediscovered.
+- **First observed:** 2026-08-22, while seating the statistician
+  (Task 7C).
+
+The critic is invoked with a single-spec context, but an assessment it
+proposes is gated on citing the hypothesis-wide admissible conclusive
+family — which the critic cannot see. On any hypothesis with more than
+one evidence-bearing spec, the critic's honest attempt is structurally
+doomed to an `AnalysisValidityError`. Closing it means giving the critic
+context the same family enrichment `_assessment_context` received in 7C,
+plus deciding what a critic-authored assessment should cite. Belongs
+with the model-backed reviewer work, not in a drive-by.
+
+## Re-assessment machinery does not exist
+
+- **Where:** `runtime/frontier.py::unassessed_claims` (a claim leaves the
+  frontier permanently after any assessment) and the unused
+  `EpistemicAssessment.supersedes` wiring.
+- **Status:** open, deliberate (Task 7C recorded the deferral).
+- **First observed:** designed-in; named 2026-08-22.
+
+A claim is assessed exactly once, whenever it first surfaces. Evidence
+that lands afterwards never reopens it, and nothing in production sets
+`supersedes`. The statistician's records state their `n` and the
+Bonferroni `m` pinned at assessment time (sequential-analysis behavior,
+disclosed) — but a campaign that keeps replicating after judgment needs
+the frontier to re-open claims whose current assessment predates newer
+conclusive evidence, and the assessor to supersede. That is its own
+task, with its own sweep.
+
 ## Timing flakes in the real-deadline Muse tests under heavy load
 
 - **Where:** `tests/test_muse_provider.py`, the tests that use a real
