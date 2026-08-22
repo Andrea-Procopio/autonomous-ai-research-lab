@@ -238,7 +238,7 @@ Expect interfaces to change.
 | `search` | Policies for choosing the next action among candidates. |
 | `roles` | Interfaces for the agents, including the model-backed engineer and planner. A role receives a task and returns proposals. It never edits state directly. |
 | `orchestration` | The main loop: pick an action, route it to a role, validate what comes back, commit it, log everything. |
-| `publication` | The evidence packet: flat, checked-not-copied mirrors of everything a manuscript may later claim, with the pure checks that re-derive the statistician's figures from the record. Manuscript generation and the reviewer role are still to come. Depends on `core`, `evidence`, and `runtime`; its one consumer is `control`. |
+| `publication` | The evidence packet — flat, checked-not-copied mirrors of everything a manuscript may claim — and the manuscript itself: one gated model call writes five prose sections, deterministic gates refuse unknown numbers and unresolved citations, and trusted code assembles every load-bearing section from the packet. The reviewer role is still to come. Depends on `core`, `evidence`, and `runtime`; its one consumer is `control` (now enforced by the layering tests). |
 
 Dependencies point one way: higher packages import lower ones, never
 the reverse, and `core` imports nothing. `control` is the one exception
@@ -303,6 +303,7 @@ arl resume [INVESTIGATION] --root DIR
 arl status [INVESTIGATION] --root DIR
 arl verify --root DIR
 arl packet [INVESTIGATION] --root DIR [--out DIR]
+arl manuscript [INVESTIGATION] --root DIR [--lab module:factory] [--model NAME] [--out DIR]
 ```
 
 `run` records the config and walks as far as it can. `resume` picks up
@@ -312,7 +313,11 @@ than whatever the file says now. `status` prints the stage table.
 the evidence packet: it verifies the run from cold, re-derives the
 statistician's figures against the record, and writes
 `packet/<packet_id>.json` and `.md` under the root — refused for a walk
-that never reached a research state.
+that never reached a research state. `manuscript` authors the workshop
+draft from that packet: a model writes prose only, behind deterministic
+gates that refuse any number the packet does not state and any citation
+outside its bibliography; trusted code assembles everything else.
+Re-running replays the recorded draft without a model call.
 
 Exit codes are for scripts as much as for people: `0` for a walk that
 ended on its own terms — including an honest scientific no, which is a

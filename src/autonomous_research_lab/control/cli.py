@@ -1,12 +1,14 @@
 """``arl`` — the front door.
 
-Five verbs, and no state of their own::
+Six verbs, and no state of their own::
 
     arl run CONFIG --root DIR [--lab module:factory] [--stop-after STAGE]
     arl resume [INVESTIGATION] --root DIR [--lab module:factory]
     arl status [INVESTIGATION] --root DIR
     arl verify --root DIR
     arl packet [INVESTIGATION] --root DIR [--out DIR]
+    arl manuscript [INVESTIGATION] --root DIR [--lab module:factory]
+        [--model NAME] [--out DIR]
 
 ``run`` records the config and walks as far as it can. ``resume`` picks
 up exactly where a walk stopped, using the config the investigation
@@ -18,7 +20,12 @@ evidence packet: it verifies the run from cold, re-derives the
 statistician's figures against the record, and writes
 ``packet/<packet_id>.json`` and ``.md`` under the root — checked, not
 copied, and refused outright for a walk that never reached a research
-state.
+state. ``manuscript`` authors the workshop draft from that packet: a
+model writes prose only, behind deterministic gates that refuse any
+number the packet does not state and any citation outside its
+bibliography; trusted code assembles everything else. Refused for a
+walk with nothing to report; re-running replays the recorded draft
+without a model call.
 
 Exit codes are meant to be read by a script as well as a person: ``0``
 for a walk that ended on its own terms, including an honest scientific
@@ -39,13 +46,16 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from ..program.integrity import verify_run
+from ..publication.manuscript import ManuscriptError, NothingToReportError
 from ..publication.packet import PacketError
+from ..runtime.providers import ModelProviderError
 from .config import ConfigError, load_config
 from .controller import Controller, ControllerError, Outcome, StatusReport
 from .investigation import InvestigationStore
 from .lab import Lab, LabError, load_lab
+from .manuscript import author_manuscript
 from .packet import build_packet, write_packet
-from .stage import MissingFactError, StageName, StageStatus
+from .stage import CHAIN_ORDER, MissingFactError, StageName, StageStatus
 
 OK: int = 0
 FAILED: int = 1
@@ -76,6 +86,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _status(arguments)
         if arguments.command == "packet":
             return _packet(arguments)
+        if arguments.command == "manuscript":
+            return _manuscript(arguments)
         return _verify(arguments)
     except (ConfigError, ControllerError, LabError) as error:
         print(f"FATAL: {error}")
@@ -194,6 +206,48 @@ def _packet(arguments: argparse.Namespace) -> int:
     return OK
 
 
+def _manuscript(arguments: argparse.Namespace) -> int:
+    root = Path(arguments.root).resolve()
+    if not _exists(root):
+        return FAILED
+    investigation_id = _chosen(root, arguments.investigation)
+    if investigation_id is None:
+        return FAILED
+    try:
+        result = author_manuscript(
+            root,
+            investigation_id,
+            lab=_lab(arguments),
+            out_dir=Path(arguments.out).resolve() if arguments.out else None,
+            model=arguments.model,
+        )
+    except (MissingFactError, NothingToReportError) as error:
+        # Preconditions, not faults: no research state, or a packet
+        # with no claims — there is honestly nothing to write.
+        print(f"REFUSED: {error}")
+        return REFUSED
+    except (PacketError, ManuscriptError, ModelProviderError) as error:
+        print(f"FATAL: {error}")
+        return FAILED
+    manuscript = result.manuscript
+    print(f"manuscript    {manuscript.manuscript_id}")
+    print(f"packet        {manuscript.packet_id}")
+    print(
+        f"model         {manuscript.call.requested_model} "
+        f"(served {manuscript.call.served_model} via "
+        f"{manuscript.call.provider})"
+    )
+    print(
+        f"spend         {manuscript.call.input_tokens}/"
+        f"{manuscript.call.output_tokens} tokens in/out, "
+        f"{manuscript.call.repair_count} corrective call(s)"
+    )
+    print(f"replayed      {str(result.replayed).lower()}")
+    print(f"json          {result.json_path}")
+    print(f"markdown      {result.markdown_path}")
+    return OK
+
+
 # -- helpers ------------------------------------------------------------------
 
 
@@ -308,6 +362,26 @@ def _parser() -> argparse.ArgumentParser:
         type=Path,
         help="directory for the packet files (default: ROOT/packet)",
     )
+
+    manuscript = commands.add_parser(
+        "manuscript", help="author the manuscript from the evidence packet"
+    )
+    manuscript.add_argument("investigation", nargs="?", help="investigation id")
+    _add_root(manuscript)
+    _add_lab(manuscript)
+    manuscript.add_argument(
+        "--model",
+        help=(
+            "model for the writing seat (default: the investigation's "
+            "recorded model); the manuscript records both the requested "
+            "and the served model"
+        ),
+    )
+    manuscript.add_argument(
+        "--out",
+        type=Path,
+        help="directory for the manuscript files (default: ROOT/manuscript)",
+    )
     return parser
 
 
@@ -320,7 +394,7 @@ def _add_root(parser: argparse.ArgumentParser) -> None:
 def _add_stop_after(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--stop-after",
-        choices=[str(stage) for stage in StageName],
+        choices=[str(stage) for stage in CHAIN_ORDER],
         help=(
             "halt this walk after that stage; a brake, not a scope — "
             "resuming without it continues past"

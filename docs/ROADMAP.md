@@ -400,6 +400,28 @@ human in the loop, producing results that survive scrutiny.
   rows each naming its verified result. Still open: rendered figures
   (the packet currently states their absence), manuscript generation
   and the reviewer role (8B/8C), and packet signing.
+- **Manuscript generation.** Done (Task 8B, 2026-08-22). The first
+  model-authored document, and the model may only phrase: one gated
+  call writes five prose sections, and deterministic gates judge the
+  tokens before any prose is kept. A word containing a digit passes
+  only if the packet's own renderings already contain that exact word
+  — so rounded values, unit conversions, recomputed percentages, and
+  obfuscations like a "3x" speedup are unknown numbers by
+  construction. Every bracketed citation must name a bibliography
+  entry; no prose line may open a heading. A rejected draft is
+  preserved as evidence and earns one corrective call carrying exactly
+  the rules that fired. Trusted code assembles the results and
+  references sections from the packet's own renderers byte for byte;
+  the call never charges the settled run's grant, and re-running
+  replays the recorded draft with zero model calls. Qualified live on
+  the real CIFAR-10 root, 2026-08-22: muse-spark-1.2 authored the
+  draft in one call with zero correctives — a numberless abstract,
+  verdicts stated only as "supported" and "plausible", both cited
+  sources resolved — and the root re-verified intact afterwards. Still
+  open: the reviewer role that checks a manuscript against the
+  claim-evidence graph (8C), rendered figures, LaTeX/submission
+  formats, a semantic honest-language gate (deliberately the
+  reviewer's job, not the author's), and manuscript signing.
 - **Trajectory analysis.** The decision log (`DecisionRecord` + JSONL)
   exists. Horizon 1 adds the analysis code that reads it: utility
   calibration, cost prediction error, failure-mode tallies, feeding

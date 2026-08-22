@@ -68,6 +68,12 @@
    result or evidence record of its own. Rules 4 through 10 name it as
    an allowed consumer for exactly this reason — a composition root is
    the thing they forbid *everywhere else*.
+13. ``publication`` reports the record without touching it: it may
+   import only ``core``, ``evidence``, and ``runtime`` (its declared
+   inputs), only the controller may import it, and — like the
+   controller — it mutates no state and constructs no result, evidence
+   record, or assessment of its own. The manuscript's gates are pure
+   functions over flat data for exactly this reason.
 """
 
 from __future__ import annotations
@@ -88,6 +94,7 @@ ADMISSION = SRC / "admission"
 PROGRAM = SRC / "program"
 EVIDENCE = SRC / "evidence"
 CONTROL = SRC / "control"
+PUBLICATION = SRC / "publication"
 ORCHESTRATION = SRC / "orchestration"
 PROVIDERS = SRC / "runtime" / "providers.py"
 PROVIDER_MODULES = (PROVIDERS, SRC / "runtime" / "muse.py")
@@ -1322,6 +1329,97 @@ def test_control_sequences_stages_but_never_does_their_work() -> None:
     forbidden = {"ExperimentResult", "Evidence", "EpistemicAssessment"}
     violations: list[str] = []
     for path in sorted(CONTROL.rglob("*.py")):
+        tree = ast.parse(path.read_text(), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                if (
+                    isinstance(node.func, ast.Attribute)
+                    and node.func.attr in STATE_MUTATORS
+                ):
+                    violations.append(
+                        f"{path.name}:{node.lineno}: calls "
+                        f".{node.func.attr}(...)"
+                    )
+                if (
+                    isinstance(node.func, ast.Name)
+                    and node.func.id in forbidden
+                ):
+                    violations.append(
+                        f"{path.name}:{node.lineno}: constructs "
+                        f"{node.func.id}"
+                    )
+    assert violations == []
+
+
+def test_publication_depends_only_on_its_declared_inputs() -> None:
+    """The reporting layer reads flat data and the provider seam,
+    nothing else: ``core`` for vocabulary and ids, ``evidence`` for the
+    store protocol its checks re-derive against, ``runtime`` for the
+    statistics it re-runs and the model seam the author calls. The
+    analysis chain stays out — the composition root does that reading
+    and hands the packet over as data."""
+    allowed = {"core", "evidence", "runtime", "publication"}
+    violations: list[str] = []
+    for path in sorted(PUBLICATION.rglob("*.py")):
+        tree = ast.parse(path.read_text(), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+                if node.level == 1:
+                    continue  # a sibling inside the package
+                if node.level >= 2:
+                    package = module.split(".")[0]
+                elif module.startswith(f"{PACKAGE}."):
+                    package = module.split(".")[1]
+                else:
+                    continue  # the standard library
+                if package not in allowed:
+                    violations.append(
+                        f"{path.name}:{node.lineno}: imports {module}"
+                    )
+            elif isinstance(node, ast.Import):
+                violations.extend(
+                    f"{path.name}:{node.lineno}: imports {alias.name}"
+                    for alias in node.names
+                    if alias.name.startswith(f"{PACKAGE}.")
+                    and alias.name.split(".")[1] not in allowed
+                )
+    assert violations == []
+
+
+def test_publication_is_imported_only_by_the_controller() -> None:
+    """A stage that could import the reporting layer could phrase its
+    own findings. Only the composition root may hand a packet to a
+    writer, for the same reason only it may read every store."""
+    violations: list[str] = []
+    for path in sorted(SRC.rglob("*.py")):
+        if PUBLICATION in path.parents or CONTROL in path.parents:
+            continue
+        tree = ast.parse(path.read_text(), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+                if "publication" in module.split("."):
+                    violations.append(
+                        f"{path.relative_to(SRC)}: imports {module}"
+                    )
+            elif isinstance(node, ast.Import):
+                violations.extend(
+                    f"{path.relative_to(SRC)}: imports {alias.name}"
+                    for alias in node.names
+                    if "publication" in alias.name.split(".")
+                )
+    assert violations == []
+
+
+def test_publication_never_calls_state_mutators_or_constructs_facts() -> None:
+    """Reporting reads; it never writes science. The same constructor
+    and mutator bans the composition root lives under apply here: a
+    package that could build an assessment could launder prose into
+    judgment."""
+    forbidden = {"ExperimentResult", "Evidence", "EpistemicAssessment"}
+    violations: list[str] = []
+    for path in sorted(PUBLICATION.rglob("*.py")):
         tree = ast.parse(path.read_text(), filename=str(path))
         for node in ast.walk(tree):
             if isinstance(node, ast.Call):
