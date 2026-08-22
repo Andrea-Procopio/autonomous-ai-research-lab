@@ -1,6 +1,6 @@
 """``arl`` — the front door.
 
-Eight verbs, and no state of their own::
+Nine verbs, and no state of their own::
 
     arl run CONFIG --root DIR [--lab module:factory] [--stop-after STAGE]
     arl resume [INVESTIGATION] --root DIR [--lab module:factory]
@@ -13,6 +13,9 @@ Eight verbs, and no state of their own::
         [--model NAME] [--out DIR] [--review-only]
     arl render [INVESTIGATION] --root DIR (--venue NAME | --venue-config FILE)
         [--kits DIR] [--out DIR] [--pdf]
+    arl simulate [INVESTIGATION] --root DIR (--venue NAME | --venue-config FILE)
+        [--kits DIR] [--lab module:factory] [--model NAME]
+        [--reviews N] [--bar N] [--no-polish] [--out DIR]
 
 ``run`` records the config and walks as far as it can. ``resume`` picks
 up exactly where a walk stopped, using the config the investigation
@@ -69,6 +72,7 @@ from ..publication.review import (
     ReviewError,
     ReviewVerdict,
 )
+from ..publication.simulator import SimulationError
 from ..runtime.providers import ModelProviderError
 from .config import ConfigError, load_config
 from .controller import Controller, ControllerError, Outcome, StatusReport
@@ -78,6 +82,7 @@ from .manuscript import author_manuscript
 from .packet import build_packet, write_packet
 from .render import NotApprovedError, RenderError, render_submission
 from .review import review_manuscript
+from .simulate import simulate_submission
 from .stage import CHAIN_ORDER, MissingFactError, StageName, StageStatus
 
 OK: int = 0
@@ -115,6 +120,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _review(arguments)
         if arguments.command == "render":
             return _render(arguments)
+        if arguments.command == "simulate":
+            return _simulate(arguments)
         return _verify(arguments)
     except (ConfigError, ControllerError, LabError) as error:
         print(f"FATAL: {error}")
@@ -401,6 +408,95 @@ def _render(arguments: argparse.Namespace) -> int:
     return OK
 
 
+def _simulate(arguments: argparse.Namespace) -> int:
+    root = Path(arguments.root).resolve()
+    if not _exists(root):
+        return FAILED
+    investigation_id = _chosen(root, arguments.investigation)
+    if investigation_id is None:
+        return FAILED
+    try:
+        result = simulate_submission(
+            root,
+            investigation_id,
+            venue=arguments.venue,
+            venue_config=(
+                Path(arguments.venue_config).resolve()
+                if arguments.venue_config
+                else None
+            ),
+            kits_root=(
+                Path(arguments.kits).resolve() if arguments.kits else None
+            ),
+            lab=_lab(arguments),
+            model=arguments.model,
+            reviews=arguments.reviews,
+            bar=arguments.bar,
+            polish=not arguments.no_polish,
+            out_dir=Path(arguments.out).resolve() if arguments.out else None,
+        )
+    except (
+        MissingFactError,
+        NothingToReportError,
+        NothingToReviewError,
+        NotApprovedError,
+    ) as error:
+        print(f"REFUSED: {error}")
+        return REFUSED
+    except (
+        PacketError,
+        ManuscriptError,
+        ReviewError,
+        VenueError,
+        RenderError,
+        KitIntegrityError,
+        SimulationError,
+    ) as error:
+        print(f"FATAL: {error}")
+        return FAILED
+    simulation = result.simulation
+    print(f"venue         {simulation.venue_name}")
+    print(f"manuscript    {simulation.manuscript_id}")
+    print(f"submission    {simulation.tex_sha256[:16]}…")
+    for review in result.reviews:
+        print(
+            f"  {review.lens:<13} overall {review.overall}/10, "
+            f"confidence {review.confidence}/5"
+        )
+    medians = dict(simulation.medians)
+    print(
+        f"medians       overall {medians['overall']:g}; "
+        + ", ".join(
+            f"{name} {medians[name]:g}"
+            for name in ("originality", "quality", "clarity",
+                         "significance", "soundness", "presentation",
+                         "contribution")
+        )
+    )
+    outcome = "MEETS BAR" if simulation.meets_bar else "BELOW BAR"
+    print(f"bar           {simulation.bar} — {outcome}")
+    if result.opening_simulation is not None:
+        print(
+            f"polished      from {result.opening_simulation.manuscript_id} "
+            f"(overall "
+            f"{dict(result.opening_simulation.medians)['overall']:g})"
+        )
+    if result.faithfulness is not None:
+        print(
+            f"faithfulness  {result.faithfulness.review_id} "
+            f"({result.faithfulness.verdict})"
+        )
+    print(f"simulation    {simulation.simulation_id}")
+    print(f"replayed      {str(result.replayed).lower()}")
+    if not simulation.meets_bar:
+        print()
+        for review in result.reviews:
+            for weakness in review.weaknesses:
+                print(f"  {review.lens}: {weakness}")
+        return FAILED
+    return OK
+
+
 # -- helpers ------------------------------------------------------------------
 
 
@@ -586,6 +682,54 @@ def _parser() -> argparse.ArgumentParser:
         "--pdf",
         action="store_true",
         help="also compile with the installed LaTeX toolchain",
+    )
+
+    simulate = commands.add_parser(
+        "simulate", help="take a venue's reading of the submission"
+    )
+    simulate.add_argument("investigation", nargs="?", help="investigation id")
+    _add_root(simulate)
+    simulated_venue = simulate.add_mutually_exclusive_group(required=True)
+    simulated_venue.add_argument(
+        "--venue", help="a builtin venue name (plain, neurips, icml, iclr)"
+    )
+    simulated_venue.add_argument(
+        "--venue-config", type=Path, help="a venue spec as JSON"
+    )
+    simulate.add_argument(
+        "--kits",
+        type=Path,
+        help="the staged-kits directory (required for kit venues)",
+    )
+    _add_lab(simulate)
+    simulate.add_argument(
+        "--model",
+        help=(
+            "model for the reviewing seat (default: the investigation's "
+            "recorded model)"
+        ),
+    )
+    simulate.add_argument(
+        "--reviews",
+        type=int,
+        default=3,
+        help="ensemble size, one deterministic lens each (default 3)",
+    )
+    simulate.add_argument(
+        "--bar",
+        type=int,
+        default=6,
+        help="overall-median bar the outcome is derived against (default 6)",
+    )
+    simulate.add_argument(
+        "--no-polish",
+        action="store_true",
+        help="record the reading without the polish cycle",
+    )
+    simulate.add_argument(
+        "--out",
+        type=Path,
+        help="submission tree root (default: ROOT/submission)",
     )
     return parser
 
