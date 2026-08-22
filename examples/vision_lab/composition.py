@@ -39,6 +39,7 @@ from autonomous_research_lab.control.lab import (
 from autonomous_research_lab.control.stage import StageName
 from autonomous_research_lab.core.experiment import ExperimentSpec
 from autonomous_research_lab.core.state import ResearchState
+from autonomous_research_lab.evidence.file_store import FileEvidenceStore
 from autonomous_research_lab.execution.runner import DirectJobRunner
 from autonomous_research_lab.literature.openalex import OpenAlexProvider
 from autonomous_research_lab.literature.retrieval import LiteratureProvider
@@ -93,6 +94,7 @@ from .backends import (
     resolve,
 )
 from .catalog import catalog_for, entry_for_metric, fill_slot
+from .checkpoints import CheckpointResume
 from .datasets import DatasetStaged, DatasetStore
 from .direction import VisionDirector, VisionDirectorRole
 from .measure import require_measurable
@@ -218,6 +220,17 @@ class VisionLab:
             preflight = (*preflight, DatasetStaged(store))
 
         usage = UsageLedger()
+        # Checkpoint-resume (7A.1) needs the blob store's verified copy
+        # of a prior attempt's checkpoint, and a path the job's process
+        # can read — a durable evidence store, on a host backend. Any
+        # other deployment keeps the default fresh-seed plan.
+        dispatch = (
+            CheckpointResume(evidence=request.evidence)
+            if isinstance(request.evidence, FileEvidenceStore)
+            and self.profile.backend
+            in {Backend.HOST_CPU, Backend.HOST_MPS, Backend.HOST_CUDA}
+            else None
+        )
         engineer = ModelBackedEngineer(
             provider=self._engineer_provider(catalog),
             model=(
@@ -231,6 +244,7 @@ class VisionLab:
             template_resolver=_resolver(catalog),
             completion_review=FixedRegionReview(),
             preflight_checks=preflight,
+            dispatch=dispatch,
         )
         scientist = VisionScientist(catalog)
         director: FrontierDirector
